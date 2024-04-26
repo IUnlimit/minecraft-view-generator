@@ -9,7 +9,7 @@ import (
 	"github.com/IUnlimit/minecraft-view-generator/pkg/url"
 	"github.com/IUnlimit/minecraft-view-generator/tools"
 	"github.com/buger/jsonparser"
-	"github.com/emirpasic/gods/maps/hashmap"
+	"github.com/emirpasic/gods/maps/treemap"
 	log "github.com/sirupsen/logrus"
 	"os"
 )
@@ -18,7 +18,7 @@ var releaseMap map[string]*model.Release
 
 // LoadVersions 加载版本信息
 func LoadVersions() map[string]*model.Release {
-	data, err := tools.Get(url.VersionManifest)
+	data, err := tools.Get(url.VersionManifest.Format())
 	if err != nil {
 		log.Panic(err)
 	}
@@ -42,9 +42,9 @@ func LoadVersions() map[string]*model.Release {
 	return rMap
 }
 
-// LoadResourceList 加载资源版本列表
-func LoadResourceList(versions []string) *hashmap.Map {
-	rMap := hashmap.New()
+// LoadResourceMap 加载资源版本列表
+func LoadResourceMap(versions []string) *treemap.Map {
+	rMap := treemap.NewWithStringComparator()
 	for _, version := range versions {
 		resource, err := LoadResource(version)
 		if err != nil {
