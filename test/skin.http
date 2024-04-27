@@ -1,0 +1,26 @@
+### 2D皮肤渲染 - playerlist head
+GET https://api.mineatar.io/face/<uuid>?scale=4
+### 2D皮肤渲染 - body front
+GET https://api.mineatar.io/body/front/<uuid>?scale=4
+
+###
+GET https://api.illtamer.com/skin/url/image/front
+    ?skinUrl=https://textures.minecraft.net/texture/6bad1e5429c0efbd0bd449abf18c49baf1208e60e0f64e4f53e355867be94017
+    &nameTag=IllTamer
+    &definition=0.8
+    &transparent=true
+
+###
+GET https://api.illtamer.com/skin/mojang/image/front
+    ?name=illtamer
+    &definition=0.8
+    &transparent=true
+
+###
+GET http://api.illtamer.com/skin/mojang/image/front?name=illtamer&definition=0.8&transparent=true
+
+###
+GET http://api.illtamer.com/skin-mojang?name=illtamer
+
+###
+GET http://127.0.0.1:57680/mojang/image/front?name=illtamer&definition=1.5&transparent=true
