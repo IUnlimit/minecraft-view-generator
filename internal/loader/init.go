@@ -1,27 +1,24 @@
 package loader
 
 import (
-	global "github.com/IUnlimit/minecraft-view-generator/internal"
-	"github.com/IUnlimit/minecraft-view-generator/pkg/draw"
+	"github.com/IUnlimit/minecraft-view-generator/pkg/url"
+	"github.com/IUnlimit/minecraft-view-generator/tools"
+	"github.com/buger/jsonparser"
 	log "github.com/sirupsen/logrus"
 )
 
 func Init() {
-	releaseMap = LoadVersions()
-	enableVersions := global.Config.Minecraft.Version.Enable
-	rMap := LoadResourceMap(enableVersions)
-	json, _ := rMap.ToJSON()
-	log.Debugf("%s", json)
-
-	rMap.Each(initTextures)
+	loadSupportVersions()
 }
 
-func initTextures(_ interface{}, v interface{}) {
-	resource := v.(*Resource)
-	tMap, err := draw.Map2DTextures(draw.ItemTextures, resource.RootPath)
+func loadSupportVersions() {
+	bytes, err := tools.Get(url.ICDAVersions)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Can't get support versions: %v", err)
 	}
-	tMap.Get("")
-	//log.Info(pretty.Sprint(tMap.Values()))
+	log.Debugf("Load support versions: %s", string(bytes))
+
+	jsonparser.ArrayEach(bytes, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
+		log.Info(jsonparser.GetString(value))
+	}, "versions")
 }

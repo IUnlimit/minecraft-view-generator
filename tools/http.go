@@ -3,9 +3,7 @@ package tools
 import (
 	"errors"
 	"fmt"
-	"github.com/IUnlimit/minecraft-view-generator/internal/model"
 	"github.com/dustin/go-humanize"
-	log "github.com/sirupsen/logrus"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -45,29 +43,6 @@ func (wc *WriteCounter) Write(p []byte) (int, error) {
 func (wc *WriteCounter) PrintProgress() {
 	fmt.Printf("\r%s", strings.Repeat(" ", 35))
 	fmt.Printf("\rDownloading... %s complete", humanize.Bytes(wc.Total))
-}
-
-func TryDownloadClient(folderPath string, fileName string, info *model.ClientInfo) error {
-	//log.Debugf("Start dowloading %s ...", url)
-	filePath := folderPath + "/" + fileName
-	if FileExists(filePath) {
-		sha1, _ := CalculateSHA1(filePath)
-		if info.SHA1 == sha1 {
-			log.Debugf("File %s exists, sha1 verification passed", filePath)
-			return nil
-		}
-		log.Debugf("File %s sha1 verification failed, download again", filePath)
-		_ = os.Remove(filePath)
-	}
-	err := os.MkdirAll(folderPath, os.ModePerm)
-	if err != nil {
-		return err
-	}
-	err = DownloadFile(filePath, info.URL)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func DownloadFile(filePath string, url string) error {
