@@ -1,14 +1,14 @@
 package tools
 
 import (
-	"errors"
 	"fmt"
-	"github.com/dustin/go-humanize"
+	"github.com/buger/jsonparser"
+	log "github.com/sirupsen/logrus"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
-	"strings"
+	"path/filepath"
 )
 
 func Get(url string) ([]byte, error) {
@@ -19,7 +19,7 @@ func Get(url string) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, errors.New(fmt.Sprintf("Unexpect response code: %d", resp.StatusCode))
+		return nil, fmt.Errorf("unexpect response code: %d", resp.StatusCode)
 	}
 
 	body, err := ioutil.ReadAll(resp.Body)
@@ -29,25 +29,26 @@ func Get(url string) ([]byte, error) {
 	return body, nil
 }
 
-type WriteCounter struct {
-	Total uint64
+func IsResponseError(body []byte) bool {
+	errorStr, err := jsonparser.GetString(body, "error")
+	if err != nil && len(errorStr) == 0 {
+		return false
+	}
+	log.Debugf("Request failed with body: %s", string(body))
+	return true
 }
 
-func (wc *WriteCounter) Write(p []byte) (int, error) {
-	n := len(p)
-	wc.Total += uint64(n)
-	wc.PrintProgress()
-	return n, nil
-}
+func DownloadFile(filePath string, url string, recover bool) error {
+	if !recover && FileExists(filePath) {
+		return nil
+	}
+	err := MakeParentDirs(filePath)
+	if err != nil {
+		return err
+	}
 
-func (wc *WriteCounter) PrintProgress() {
-	fmt.Printf("\r%s", strings.Repeat(" ", 35))
-	fmt.Printf("\rDownloading... %s complete", humanize.Bytes(wc.Total))
-}
-
-func DownloadFile(filePath string, url string) error {
-	_ = os.Remove(filePath + ".tmp")
-	out, err := os.Create(filePath + ".tmp")
+	_ = os.Remove(filePath)
+	out, err := os.Create(filePath)
 	defer out.Close()
 	if err != nil {
 		return err
@@ -59,13 +60,17 @@ func DownloadFile(filePath string, url string) error {
 	}
 	defer resp.Body.Close()
 
-	counter := &WriteCounter{}
-	if _, err = io.Copy(out, io.TeeReader(resp.Body, counter)); err != nil {
+	if _, err = io.Copy(out, resp.Body); err != nil {
 		return err
 	}
-	fmt.Print("\n")
-	if err = os.Rename(filePath+".tmp", filePath); err != nil {
-		return err
+	return nil
+}
+
+func MakeParentDirs(filePath string) error {
+	dir := filepath.Dir(filePath)
+	err := os.MkdirAll(dir, os.ModePerm)
+	if err != nil {
+		return fmt.Errorf("failed to create parent directories: %v", err)
 	}
 	return nil
 }

@@ -1,5 +1,7 @@
 package url
 
 const (
-	ICDAVersions = "https://api.loohpjames.com/spigot/plugins/interactivechatdiscordsrvaddon/versions"
+	ICDA         = "https://api.loohpjames.com/spigot/plugins/interactivechatdiscordsrvaddon"
+	ICDAVersions = ICDA + "/versions"
+	ICDAResource = ICDA + "?minecraftVersion=%s"
 )

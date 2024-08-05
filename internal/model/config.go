@@ -19,6 +19,11 @@ type Minecraft struct {
 }
 
 type Version struct {
-	Enable   []string `yaml:"enable"`
-	AutoLoad bool     `yaml:"auto-load"`
+	EntryList []*Entry `yaml:"entry-list"`
+	AutoLoad  bool     `yaml:"auto-load"`
+}
+
+type Entry struct {
+	Name string `yaml:"name"`
+	Hash string `yaml:"hash"`
 }
