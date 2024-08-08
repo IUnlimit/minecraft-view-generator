@@ -2,8 +2,6 @@ package conf
 
 import (
 	"embed"
-	"encoding/json"
-	"errors"
 	"github.com/IUnlimit/minecraft-view-generator/configs"
 	global "github.com/IUnlimit/minecraft-view-generator/internal"
 	"github.com/IUnlimit/minecraft-view-generator/internal/model"
@@ -14,8 +12,7 @@ import (
 )
 
 // LoadConfig creat and load config, return exists(file)
-// kind: json / yaml
-func LoadConfig(fileName string, fileFolder string, kind string, fs embed.FS, config any) (bool, error) {
+func LoadConfig(fileName string, fileFolder string, fs embed.FS, config any) (bool, error) {
 	filePath := fileFolder + fileName
 	exists := tools.FileExists(filePath)
 	if !exists {
@@ -39,13 +36,7 @@ func LoadConfig(fileName string, fileFolder string, kind string, fs embed.FS, co
 		return exists, err
 	}
 
-	if kind == "json" {
-		err = json.Unmarshal(data, config)
-	} else if kind == "yaml" {
-		err = yaml.Unmarshal(data, config)
-	} else {
-		err = errors.New("unknown file type: " + kind)
-	}
+	err = yaml.Unmarshal(data, config)
 	if err != nil {
 		return exists, err
 	}

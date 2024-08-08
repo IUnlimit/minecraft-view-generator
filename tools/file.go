@@ -24,6 +24,7 @@ func CreateFile(filePath string, data []byte) error {
 	return nil
 }
 
+// FileExists check file or folder exists
 func FileExists(filename string) bool {
 	_, err := os.Stat(filename)
 	return !os.IsNotExist(err)
