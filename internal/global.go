@@ -10,6 +10,8 @@ const ParentPath = "./config"
 
 const AssetsPath = ParentPath + "/assets"
 
+const FontsPath = ParentPath + "/fonts"
+
 func VersionPath(version string) string {
 	return AssetsPath + "/" + version
 }
