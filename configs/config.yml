@@ -20,3 +20,19 @@ minecraft:
     # 是否自动加载其他请求的版本
     # 如果关闭, API 将在收到未配置版本时直接返回空值
     auto-load: true
+  # 相关资源设置
+  resource:
+    # 在物品工具提示等地方应该使用哪种语言
+    # https://minecraft.fandom.com/wiki/Language
+    language: zh_cn
+
+api:
+  player-list:
+    # 单行展示的最大玩家数
+    single-column-limit: 20
+    # 顶部文本, 留空则跳过绘制
+    header-text:
+      - "&aOnline Players ({OnlinePlayers}/100)"
+    # 底部文本, 留空则跳过绘制
+    footer-text:
+      - "&e{Host}"
