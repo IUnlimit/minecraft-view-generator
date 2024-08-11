@@ -6,7 +6,7 @@ import (
 )
 
 func TestSkin(t *testing.T) {
-	skin, err := NewSkin("ori-skin.png")
+	skin, err := NewSkin("ori-skin.png", true)
 	if err != nil {
 		t.Fatal(err)
 	}

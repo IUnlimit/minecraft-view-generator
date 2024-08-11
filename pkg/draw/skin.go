@@ -9,9 +9,10 @@ import (
 
 type Skin struct {
 	File *image.NRGBA
+	Slim bool
 }
 
-func NewSkin(filePath string) (*Skin, error) {
+func NewSkin(filePath string, slim bool) (*Skin, error) {
 	file, err := tools.ReadImage(filePath)
 	if err != nil {
 		return nil, err
@@ -20,6 +21,7 @@ func NewSkin(filePath string) (*Skin, error) {
 	draw.Draw(playerSkin, file.Bounds(), file, image.Pt(0, 0), draw.Src)
 	return &Skin{
 		File: playerSkin,
+		Slim: slim,
 	}, nil
 }
 
@@ -28,6 +30,6 @@ func (s *Skin) GetFace() *image.NRGBA {
 	return skin.RenderFace(s.File, skin.Options{
 		Scale:   2,
 		Overlay: true,
-		Slim:    true,
+		Slim:    s.Slim,
 	})
 }

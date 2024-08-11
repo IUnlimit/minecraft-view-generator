@@ -10,4 +10,6 @@ func Init() {
 	if hasDefaultVersion(version) {
 		LoadResourceList(version.EntryList)
 	}
+	LoadFont()
+	LoadLocalSkins()
 }

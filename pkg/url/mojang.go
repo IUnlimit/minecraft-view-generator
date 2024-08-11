@@ -9,4 +9,6 @@ const (
 	VersionManifest = URL("https://launchermeta.mojang.com/mc/game/version_manifest.json")
 	// InfoUUID 查询正版用户 UUID
 	InfoUUID = URL("https://api.mojang.com/users/profiles/minecraft/%s")
+	// InfoTexture 获取玩家的皮肤和披风
+	InfoTexture = URL("https://sessionserver.mojang.com/session/minecraft/profile/%s")
 )

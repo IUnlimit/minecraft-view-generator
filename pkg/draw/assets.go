@@ -1,10 +1,10 @@
 package draw
 
 import (
+	"github.com/IUnlimit/minecraft-view-generator/internal/tools"
 	"github.com/disintegration/imaging"
 	"image"
 	"image/draw"
-	"os"
 )
 
 type Assets struct {
@@ -40,22 +40,8 @@ func Inventory(invPath string, skinPath string, scale int) (image.Image, error) 
 	return Cover(resizedSkin, inv, 26*scale, 8*scale, offsetX, -1*scale), nil
 }
 
-func ReadImage(fileName string) (image.Image, error) {
-	file, err := os.Open(fileName)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	img, _, err := image.Decode(file)
-	if err != nil {
-		return nil, err
-	}
-	return img, nil
-}
-
 func Cut(fileName string, x0 int, y0 int, x1 int, y1 int) (image.Image, error) {
-	img, err := ReadImage(fileName)
+	img, err := tools.ReadImage(fileName)
 	if err != nil {
 		return nil, err
 	}
