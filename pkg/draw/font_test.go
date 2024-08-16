@@ -1,11 +1,14 @@
 package draw
 
 import (
-	"github.com/fogleman/gg"
-	log "github.com/sirupsen/logrus"
-	"golang.org/x/image/font"
 	"image/color"
 	"testing"
+
+	"github.com/IUnlimit/minecraft-view-generator/pkg/component"
+	"github.com/fogleman/gg"
+	"github.com/kylelemons/godebug/pretty"
+	log "github.com/sirupsen/logrus"
+	"golang.org/x/image/font"
 )
 
 func TestFont(t *testing.T) {
@@ -38,4 +41,19 @@ func TestFont(t *testing.T) {
 	if err != nil {
 		log.Errorf("%v", err)
 	}
+}
+
+func TestFontCompute(t *testing.T) {
+	component := component.NewComponent("§l§a[A]§r§f我是§cIllTamer")
+	suggestCtx := gg.NewContext(0, 0)
+	err := LoadFont("/home/illtamer/Code/go/goland/minecraft-view-generator/pkg/draw/Minecraft-AE(Chinese).ttf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	face, err := GetFontFace(24, 72)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suggestCtx.SetFontFace(face)
+	pretty.Print(component.Compute(suggestCtx, 3))
 }

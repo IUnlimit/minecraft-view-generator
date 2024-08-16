@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"os"
+	"testing"
+
 	"github.com/IUnlimit/minecraft-view-generator/internal/conf"
 	"github.com/IUnlimit/minecraft-view-generator/internal/loader"
 	"github.com/IUnlimit/minecraft-view-generator/internal/logger"
-	"os"
-	"testing"
+	"github.com/IUnlimit/minecraft-view-generator/internal/model"
 )
 
 func TestGetPlayerList(t *testing.T) {
@@ -18,7 +20,15 @@ func TestGetPlayerList(t *testing.T) {
 	loader.Init()
 	players := make([]any, 0)
 	players = append(players, "§l§d[OP] §r§6IllTamer")
-	err = GetPlayerList(players)
+	request := &model.PlayerListRequest{
+		Entry: []*model.PlayerListRequestEntry{
+			{
+				PlayerName: "[OP] IllTamer",
+				Ping:       50,
+			},
+		},
+	}
+	_, err = GetPlayerList(request)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,17 +1,20 @@
 package handler
 
 import (
+	"fmt"
+	"image"
+	"image/color"
+	"math"
+
 	global "github.com/IUnlimit/minecraft-view-generator/internal"
 	"github.com/IUnlimit/minecraft-view-generator/internal/loader"
+	"github.com/IUnlimit/minecraft-view-generator/internal/model"
 	"github.com/IUnlimit/minecraft-view-generator/internal/tools"
 	"github.com/IUnlimit/minecraft-view-generator/pkg/component"
 	"github.com/IUnlimit/minecraft-view-generator/pkg/draw"
 	"github.com/fogleman/gg"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/image/font"
-	"image"
-	"image/color"
-	"math"
 )
 
 const (
@@ -41,15 +44,15 @@ var (
 	}
 )
 
-func GetPlayerList(players []any) error {
-	if len(players) == 0 {
-		return nil
+func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
+	if len(request.Entry) == 0 {
+		return nil, fmt.Errorf("No player data found")
 	}
 
 	TemplateCtx := gg.NewContext(0, 0)
 	face, err := draw.GetFontFace(FontSize, 72)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	TemplateCtx.SetFontFace(face)
 
@@ -59,11 +62,11 @@ func GetPlayerList(players []any) error {
 
 	var maxNameWidth float64
 	playerRows := make([]image.Image, 0)
-	for _, player := range players {
-		c := component.NewComponent(player.(string))
+	for _, player := range request.Entry {
+		c := component.NewComponent(player.PlayerName)
 		nameWidth, _ := c.Compute(TemplateCtx, BoldOffset)
 		log.Debugf("nameWidth: %f, maxHeight: -", nameWidth)
-		row, err := drawSignPlayerRow(c, nameWidth, face)
+		row, err := drawSinglePlayerRow(player, c, nameWidth, face)
 		if err != nil {
 			log.Errorf("Failed to draw single-player-row, %v", err)
 			continue
@@ -126,23 +129,21 @@ func GetPlayerList(players []any) error {
 		startY += LineSpace
 	}
 
-	err = ctx.SavePNG("./font_test.png")
-	if err != nil {
-		return err
-	}
-	return nil
+	return ctx.Image(), nil
 }
 
-func drawSignPlayerRow(c *component.Component, nameWidth float64, face font.Face) (image.Image, error) {
+func drawSinglePlayerRow(player *model.PlayerListRequestEntry, c *component.Component, nameWidth float64, face font.Face) (image.Image, error) {
 	width := ShadowOffset + nameWidth + 16 + 20 // + head + ping
 	height := ShadowOffset + FontSize
 	ctx := draw.NewImageWithBackground(width, height, PlayerRowColor, face)
 
-	skin, err := loader.LoadSkinByName("IllTamer", true)
+	// TODO 兼容皮肤站
+	skin, err := loader.LoadSkinByName(player.PlayerName, true)
 	if err != nil {
 		return nil, err
 	}
 
+	// TODO texture
 	pingAsset := "/home/illtamer/Code/go/goland/minecraft-view-generator/config/assets/1.21.1/assets/minecraft/textures/gui/sprites/icon/ping_5.png"
 	pingImage, err := tools.ReadImage(pingAsset)
 	if err != nil {

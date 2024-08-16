@@ -45,6 +45,7 @@ func LoadLocalSkins() {
 	global.SkinMap = skinMap
 }
 
+// TODO 加锁, 同一时间同一uuid/name/url 仅允许一个下载
 func LoadSkinByName(name string, cache bool) (*draw.Skin, error) {
 	body, err := tools.Get(url.InfoUUID.Format(name))
 	if err != nil {
