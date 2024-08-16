@@ -1,0 +1,20 @@
+info:
+  contact: {}
+paths:
+  /get_player_list:
+    get:
+      consumes:
+      - application/json
+      description: 描述xxx
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: string
+      summary: 获取在线玩家列表的图像
+      tags:
+      - image
+      - player_list
+swagger: "2.0"
