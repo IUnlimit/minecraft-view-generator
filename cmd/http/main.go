@@ -27,7 +27,7 @@ func Serve() {
 	v1.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerfiles.Handler))
 
 	v1.GET("/ping", Ping)
-	v1.GET("/get_player_list", GetPlayerList)
+	v1.POST("/get_player_list", GetPlayerList)
 
 	log.Infof("Http server will start on port %d", port)
 	err := engine.Run(fmt.Sprintf(":%d", port))

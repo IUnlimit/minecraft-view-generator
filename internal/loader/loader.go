@@ -4,6 +4,7 @@ import (
 	global "github.com/IUnlimit/minecraft-view-generator/internal"
 	"github.com/IUnlimit/minecraft-view-generator/internal/model"
 	log "github.com/sirupsen/logrus"
+	"sync"
 )
 
 func FetchSupportVersions() {
@@ -40,14 +41,18 @@ func hasDefaultVersion(version *model.Version) bool {
 }
 
 func LoadResourceList(list []*model.Entry) {
+	var wg sync.WaitGroup
 	for _, entry := range list {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			err := LoadResource(entry)
 			if err != nil {
 				log.Errorf("Can't get resource map, version(%s) load skipped, %v", entry.Name, err)
 			}
 		}()
 	}
+	wg.Wait()
 }
 
 func LoadResource(entry *model.Entry) error {
