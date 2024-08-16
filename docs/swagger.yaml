@@ -1,20 +1,71 @@
+definitions:
+  http.ErrorResponse:
+    properties:
+      code:
+        type: integer
+      message:
+        type: string
+    type: object
+  http.SuccessResponse:
+    properties:
+      code:
+        type: integer
+      data: {}
+    type: object
+  model.PlayerListRequest:
+    properties:
+      entry:
+        items:
+          $ref: '#/definitions/model.PlayerListRequestEntry'
+        type: array
+      options:
+        $ref: '#/definitions/model.PlayerListRequestOptions'
+    type: object
+  model.PlayerListRequestEntry:
+    properties:
+      ping:
+        type: integer
+      playerName:
+        type: string
+      playerUUID:
+        type: string
+    required:
+    - ping
+    - playerName
+    - playerUUID
+    type: object
+  model.PlayerListRequestOptions:
+    properties:
+      showAvatar:
+        type: boolean
+    type: object
 info:
   contact: {}
 paths:
   /get_player_list:
-    get:
+    post:
       consumes:
       - application/json
-      description: 描述xxx
+      description: 获取在线玩家列表的图像. 如果传入玩家为空，则返回错误码
+      parameters:
+      - description: 玩家列表请求数据
+        in: body
+        name: playerListRequest
+        required: true
+        schema:
+          $ref: '#/definitions/model.PlayerListRequest'
       produces:
       - application/json
       responses:
         "200":
-          description: OK
+          description: 成功响应
           schema:
-            type: string
+            $ref: '#/definitions/http.SuccessResponse'
+        "400":
+          description: 失败响应
+          schema:
+            $ref: '#/definitions/http.ErrorResponse'
       summary: 获取在线玩家列表的图像
       tags:
-      - image
-      - player_list
+      - v1
 swagger: "2.0"

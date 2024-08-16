@@ -5,8 +5,8 @@
     },
     "paths": {
         "/get_player_list": {
-            "get": {
-                "description": "描述xxx",
+            "post": {
+                "description": "获取在线玩家列表的图像. 如果传入玩家为空，则返回错误码",
                 "consumes": [
                     "application/json"
                 ],
@@ -14,17 +14,96 @@
                     "application/json"
                 ],
                 "tags": [
-                    "image",
-                    "player_list"
+                    "v1"
                 ],
                 "summary": "获取在线玩家列表的图像",
-                "responses": {
-                    "200": {
-                        "description": "OK",
+                "parameters": [
+                    {
+                        "description": "玩家列表请求数据",
+                        "name": "playerListRequest",
+                        "in": "body",
+                        "required": true,
                         "schema": {
-                            "type": "string"
+                            "$ref": "#/definitions/model.PlayerListRequest"
                         }
                     }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "成功响应",
+                        "schema": {
+                            "$ref": "#/definitions/http.SuccessResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "失败响应",
+                        "schema": {
+                            "$ref": "#/definitions/http.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "definitions": {
+        "http.ErrorResponse": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer"
+                },
+                "message": {
+                    "type": "string"
+                }
+            }
+        },
+        "http.SuccessResponse": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer"
+                },
+                "data": {}
+            }
+        },
+        "model.PlayerListRequest": {
+            "type": "object",
+            "properties": {
+                "entry": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.PlayerListRequestEntry"
+                    }
+                },
+                "options": {
+                    "$ref": "#/definitions/model.PlayerListRequestOptions"
+                }
+            }
+        },
+        "model.PlayerListRequestEntry": {
+            "type": "object",
+            "required": [
+                "ping",
+                "playerName",
+                "playerUUID"
+            ],
+            "properties": {
+                "ping": {
+                    "type": "integer"
+                },
+                "playerName": {
+                    "type": "string"
+                },
+                "playerUUID": {
+                    "type": "string"
+                }
+            }
+        },
+        "model.PlayerListRequestOptions": {
+            "type": "object",
+            "properties": {
+                "showAvatar": {
+                    "type": "boolean"
                 }
             }
         }
