@@ -7,10 +7,24 @@ This project is an http server used to generate Minecraft view files for other s
   - [x] 客户端材质
   - [x] 正版玩家皮肤
 - 字体渲染
-  - [ ] [原版字体](https://github.com/IdreesInc/Minecraft-Font)
+  - [x] 原版字体(支持中文)
 - 2D UV 贴图绘制
-  - [ ] PlayerList
+  - [x] PlayerList
   - [ ] Inventory
   - [ ] Book
   - [ ] Map
   - [ ] Server Banner
+  - [ ] ItemMeta
+
+## 功能展示
+
+### PlayerList
+
+![](./docs/images/player_list.png)
+
+## Swagger
+
+```shell
+go run main.go
+# See http://localhost:{port}/api/v1/swagger/index.html
+```
