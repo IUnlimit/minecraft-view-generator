@@ -19,7 +19,6 @@ func LoadFont(fontName string) {
 	if !tools.FileExists(fontPath) {
 		if fontName != DefaultFont {
 			log.Fatalf("Can't find font %s in path(%s)", fontName, fontPath)
-			return
 		}
 
 		fontUrl := url.DefaultFont.Format()

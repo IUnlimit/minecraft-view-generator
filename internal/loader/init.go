@@ -11,6 +11,7 @@ func Init() {
 	if hasDefaultVersion(version) {
 		LoadResourceList(version.EntryList)
 	}
+	LoadLangVersionMap(config.Resource.Language, version.EntryList)
 	LoadFont(config.Resource.Font)
 	LoadLocalSkins()
 }
