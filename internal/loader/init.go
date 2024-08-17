@@ -6,10 +6,11 @@ import (
 
 func Init() {
 	FetchSupportVersions()
-	version := global.Config.Minecraft.Version
+	config := global.Config.Minecraft
+	version := config.Version
 	if hasDefaultVersion(version) {
 		LoadResourceList(version.EntryList)
 	}
-	LoadFont()
+	LoadFont(config.Resource.Font)
 	LoadLocalSkins()
 }

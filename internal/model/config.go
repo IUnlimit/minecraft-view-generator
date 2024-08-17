@@ -27,6 +27,7 @@ type Version struct {
 
 type Resource struct {
 	Language string `yaml:"language,omitempty"`
+	Font     string `yaml:"font,omitempty"`
 }
 
 type Entry struct {

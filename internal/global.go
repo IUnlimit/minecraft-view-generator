@@ -10,7 +10,7 @@ const ParentPath = "./config"
 
 const AssetsPath = ParentPath + "/assets"
 
-const FontsPath = ParentPath + "/fonts/Minecraft.ttf"
+const FontsPath = ParentPath + "/fonts"
 
 const SkinsPath = ParentPath + "/skins"
 

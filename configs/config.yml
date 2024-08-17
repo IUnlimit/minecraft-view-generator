@@ -24,7 +24,10 @@ minecraft:
   resource:
     # 在物品工具提示等地方应该使用哪种语言
     # https://minecraft.fandom.com/wiki/Language
-    language: zh_cn
+    language: en_us
+    # 绘制所使用的字体，应位于 config/fonts 文件夹下
+    # 如果指定字体不存在，将自动下载默认字体
+    font: Minecraft.ttf
 
 api:
   player-list:
