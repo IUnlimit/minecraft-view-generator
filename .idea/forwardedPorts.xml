@@ -8,18 +8,6 @@
           <option name="readOnly" value="false" />
         </ForwardedPortInfo>
       </entry>
-      <entry key="10101">
-        <ForwardedPortInfo>
-          <option name="hostPort" value="10101" />
-          <option name="readOnly" value="false" />
-        </ForwardedPortInfo>
-      </entry>
-      <entry key="10102">
-        <ForwardedPortInfo>
-          <option name="hostPort" value="10102" />
-          <option name="readOnly" value="false" />
-        </ForwardedPortInfo>
-      </entry>
     </ports>
   </component>
 </project>
