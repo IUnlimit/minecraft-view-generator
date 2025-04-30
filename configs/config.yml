@@ -28,6 +28,11 @@ minecraft:
     # 绘制所使用的字体，应位于 config/fonts 文件夹下
     # 如果指定字体不存在，将自动下载默认字体
     font: Minecraft.ttf
+  # BlessingSkin 皮肤站链接 (若配置则按顺序调用加载皮肤)
+  # 注意: 使用需皮肤站开启 legacy-api(传统皮肤加载方式)
+  blessing-skin:
+#    - https://skin.mualliance.ltd
+    - https://skin.fjmua.cn
 
 api:
   player-list:

@@ -16,8 +16,9 @@ type Log struct {
 }
 
 type Minecraft struct {
-	Version  *Version  `yaml:"version"`
-	Resource *Resource `yaml:"resource"`
+	Version      *Version  `yaml:"version"`
+	Resource     *Resource `yaml:"resource"`
+	BlessingSkin []string  `yaml:"blessing-skin,omitempty"`
 }
 
 type Version struct {

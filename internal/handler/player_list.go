@@ -150,7 +150,7 @@ func drawSinglePlayerRow(
 	ctx := draw.NewImageWithBackground(width, height, PlayerRowColor, face)
 
 	// TODO 兼容皮肤站
-	skin, err := loader.LoadSkinByName(player.PlayerName, true)
+	skin, err := loader.LoadSkinByName(player.PlayerName, player.PlayerUUID, true)
 	if err != nil {
 		return nil, err
 	}

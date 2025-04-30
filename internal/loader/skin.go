@@ -50,34 +50,57 @@ func LoadLocalSkins() {
 	global.SkinMap = skinMap
 }
 
+// LoadSkinByName load the player skin texture by name
+//
+//	if use blessing skin, the uuid should not be empty
+//
 // TODO 加锁, 同一时间同一uuid/name/url 仅允许一个下载
-func LoadSkinByName(name string, cache bool) (*draw.Skin, error) {
-	body, err := tools.Get(url.InfoUUID.Format(name))
-	if err != nil {
-		return nil, err
-	}
-	// 57876712e6a64cb2ad6419137f209beb
-	uuid, err := jsonparser.GetString(body, "id")
-	if err != nil {
-		return nil, err
-	}
-
-	if cache {
+func LoadSkinByName(name string, uuid string, cache bool) (*draw.Skin, error) {
+	if cache && len(uuid) > 0 {
 		if skin, found := global.SkinMap.Get(uuid); found {
 			return skin.(*draw.Skin), nil
 		}
 	}
-	return LoadSkinByUUID(uuid, cache)
+
+	skin, err := func() (*draw.Skin, error) {
+		body, err := tools.Get(url.InfoUUID.Format(name))
+		if err != nil {
+			return nil, err
+		}
+		_uuid, err := jsonparser.GetString(body, "id")
+		if err != nil {
+			return nil, err
+		}
+
+		if cache {
+			if skin, found := global.SkinMap.Get(_uuid); found {
+				return skin.(*draw.Skin), nil
+			}
+		}
+		return loadSkinByUUID(_uuid, cache)
+	}()
+	if skin != nil {
+		return skin, nil
+	}
+	if len(uuid) == 0 {
+		return nil, err
+	}
+
+	// 第三方皮肤站获取
+	for _, skinUrl := range global.Config.Minecraft.BlessingSkin {
+		format := url.GetSkin.Format(skinUrl, name)
+		s, err := LoadSkinByUrl(format, uuid, false)
+		if s != nil {
+			global.SkinMap.Put(uuid, s)
+			return s, nil
+		}
+		log.Warnf("Try to get player(name: %s, uuid: %s) skin failed from %s, %v", name, uuid, format, err)
+	}
+	return nil, err
 }
 
-// LoadSkinByUUID uuid like 57876712e6a64cb2ad6419137f209beb
-func LoadSkinByUUID(uuid string, cache bool) (*draw.Skin, error) {
-	if cache {
-		if skin, found := global.SkinMap.Get(uuid); found {
-			return skin.(*draw.Skin), nil
-		}
-	}
-
+// loadSkinByUUID uuid like 57876712e6a64cb2ad6419137f209beb
+func loadSkinByUUID(uuid string, cache bool) (*draw.Skin, error) {
 	body, err := tools.Get(url.InfoTexture.Format(uuid))
 	if err != nil {
 		return nil, err
@@ -115,7 +138,11 @@ func LoadSkinByUUID(uuid string, cache bool) (*draw.Skin, error) {
 	if err != nil {
 		return nil, err
 	}
-	return <-skinChan, nil
+	skin := <-skinChan
+	if cache {
+		global.SkinMap.Put(uuid, skin)
+	}
+	return skin, nil
 }
 
 func LoadSkinByUrl(u string, uuid string, slim bool) (*draw.Skin, error) {

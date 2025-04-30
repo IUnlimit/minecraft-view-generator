@@ -11,7 +11,7 @@ type PlayerListRequest struct {
 }
 
 type PlayerListRequestEntry struct {
-	PlayerName string `binding:"required" json:"entry"`
+	PlayerName string `binding:"required" json:"player-name"`
 	PlayerUUID string `binding:"required" json:"player-uuid"`
 	Ping       int    `binding:"required" json:"ping"`
 }
