@@ -2,6 +2,7 @@ package texture
 
 import (
 	"fmt"
+	"image"
 	"strings"
 )
 
@@ -18,9 +19,11 @@ var assetMap = map[string]AssetsManager{
 
 type AssetsManager interface {
 	// GetTexture param like minecraft:block/oak_planks
-	GetTexture(minecraftPath string) *Texture
+	GetTexture(minecraftPath string) (image.Image, error)
+	// GetPlayerInventory with minecraft ICDA(first) and asset(second), 354 x 354
+	GetPlayerInventory() (image.Image, error)
 	// GetPing ping < 0 is considered disconnect
-	GetPing(ping int) *Texture
+	GetPing(ping int) (image.Image, error)
 }
 
 func GetAssetManager(version string) (AssetsManager, error) {

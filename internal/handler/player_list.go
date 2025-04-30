@@ -10,7 +10,6 @@ import (
 	global "github.com/IUnlimit/minecraft-view-generator/internal"
 	"github.com/IUnlimit/minecraft-view-generator/internal/loader"
 	"github.com/IUnlimit/minecraft-view-generator/internal/model"
-	"github.com/IUnlimit/minecraft-view-generator/internal/tools"
 	"github.com/IUnlimit/minecraft-view-generator/pkg/component"
 	"github.com/IUnlimit/minecraft-view-generator/pkg/draw"
 	"github.com/fogleman/gg"
@@ -155,7 +154,7 @@ func drawSinglePlayerRow(
 		return nil, err
 	}
 
-	pingImage, err := tools.ReadImage(manager.GetPing(player.Ping).Path)
+	pingImage, err := manager.GetPing(player.Ping)
 	if err != nil {
 		return nil, err
 	}
