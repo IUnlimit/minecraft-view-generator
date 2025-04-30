@@ -1,9 +1,9 @@
 package texture
 
 type Texture struct {
-	path string
+	Path string
 }
 
 func NewTexture(path string) *Texture {
-	return &Texture{path: path}
+	return &Texture{Path: path}
 }

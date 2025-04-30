@@ -1,0 +1,29 @@
+{
+  "parent": "block/block",
+  "elements": [
+    {
+      "from": [ 0, 0, 0 ],
+      "to": [ 16, 16, 16 ],
+      "faces": {
+        "down":  { "texture": "#down", "cullface": "down" },
+        "up":    { "texture": "#up", "cullface": "up" },
+        "north": { "texture": "#north", "cullface": "north" },
+        "south": { "texture": "#south", "cullface": "south" },
+        "west":  { "texture": "#west", "cullface": "west" },
+        "east":  { "texture": "#east", "cullface": "east" }
+      }
+    }
+  ],
+  "textures": {
+    "#bottom": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_bottom.png",
+    "#side": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_side.png",
+    "#top": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_top.png",
+    "#particle": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_side.png",
+    "#down": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_bottom.png",
+    "#up": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_top.png",
+    "#north": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_side.png",
+    "#east": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_side.png",
+    "#south": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_side.png",
+    "#west": "./config/assets/1.21.1/assets/minecraft/textures/block/tnt_side.png"
+  }
+}

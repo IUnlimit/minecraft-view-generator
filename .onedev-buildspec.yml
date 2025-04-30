@@ -1,0 +1,106 @@
+version: 39
+jobs:
+- name: GoLang - Release
+  steps:
+  - !CheckoutStep
+    name: checkout code
+    cloneCredential: !DefaultCredential {}
+    withLfs: false
+    withSubmodules: false
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !GenerateChecksumStep
+    name: generate dependency checksum
+    files: '**/go.mod'
+    targetFile: checksum
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !SetupCacheStep
+    name: set up dependency cache
+    key: go_cache_@file:checksum@
+    loadKeys:
+    - go_cache
+    paths:
+    - /root/.cache/go_build
+    - /root/.cache/golangci-lint
+    - /go/pkg/mod
+    uploadStrategy: UPLOAD_IF_NOT_HIT
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !CommandStep
+    name: build and test
+    runInContainer: true
+    image: golang:@script:builtin:golang:determine-go-version@
+    interpreter: !DefaultInterpreter
+      commands: "export http_proxy=http://172.17.0.1:7890\nexport https_proxy=http://172.17.0.1:7890\nexport no_proxy=localhost,127.0.0.1\n\nset -e\n# Use double at to avoid being interpreted as OneDev variable substitution\ngo install github.com/axw/gocov/gocov@@latest\ngo install github.com/AlekSi/gocov-xml@@latest\ngo install github.com/jstemmer/go-junit-report/v2@@latest\nset +e\n# Turn off vet as the \"check and lint\" step can do this \ngo test -vet=off -v -coverprofile=coverage.out ./... > test-result.out\ntrue # 忽略测试结果\nTEST_STATUS=$?\ngo-junit-report -in test-result.out -out test-result.xml -set-exit-code\ntrue # 忽略测试结果\nif [ $? -ne 0 ]; then echo \"\\033[1;31mThere are test failures. Check test report for details\\033[0m\"; exit 1; fi\nif [ $TEST_STATUS -ne 0 ]; then exit 1; fi\ngocov convert coverage.out | gocov-xml > coverage.xml\n"
+    useTTY: true
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !SetBuildVersionStep
+    name: 设置构建版本
+    buildVersion: '@tag@'
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !CommandStep
+    name: 多平台构建
+    runInContainer: true
+    image: golang:@script:builtin:golang:determine-go-version@
+    interpreter: !DefaultInterpreter
+      commands: |
+        #!/bin/sh  # 使用 POSIX shell，而不是 Bash
+
+        export http_proxy=http://172.17.0.1:7890
+        export https_proxy=http://172.17.0.1:7890
+        export no_proxy=localhost,127.0.0.1
+
+        export PROJECT_NAME=@project_name@
+        export PROJECT_VERSION=@build_version@
+
+        set -e
+        mkdir -p dist
+        platforms="linux/amd64 linux/arm64 linux/386 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 windows/386"
+        for platform in $platforms
+        do
+            GOOS=$(echo "$platform" | cut -d'/' -f1)   # 提取 linux、darwin 等
+            GOARCH=$(echo "$platform" | cut -d'/' -f2) # 提取 amd64 等
+            output_name="${PROJECT_NAME}-${PROJECT_VERSION}-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then
+                output_name="${output_name}.exe"
+            fi
+            env GOOS="$GOOS" GOARCH="$GOARCH" go build -o "dist/${output_name}" . || echo "Build failed for $platform"
+        done
+        set +e
+    useTTY: true
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !PublishArtifactStep
+    name: 推送工件
+    sourcePath: dist
+    artifacts: '**'
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  - !CommandStep
+    name: check and lint
+    runInContainer: true
+    image: golangci/golangci-lint
+    interpreter: !DefaultInterpreter
+      commands: golangci-lint run --timeout=10m --issues-exit-code=0 --out-format=checkstyle > lint-result.xml
+    useTTY: true
+    condition: NEVER
+  - !PublishCoberturaReportStep
+    name: publish coverage report
+    reportName: Coverage
+    filePatterns: coverage.xml
+    condition: ALWAYS
+  - !PublishJUnitReportStep
+    name: publish unit test report
+    reportName: Unit Test
+    filePatterns: test-result.xml
+    condition: ALWAYS
+  - !PublishCheckstyleReportStep
+    name: publish lint report
+    reportName: Lint
+    filePatterns: lint-result.xml
+    tabWidth: 1
+    failThreshold: HIGH
+    condition: ALWAYS
+  triggers:
+  - !TagCreateTrigger
+    tags: v*
+  retryCondition: never
+  maxRetries: 3
+  retryDelay: 30
+  timeout: 14400

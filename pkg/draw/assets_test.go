@@ -7,7 +7,7 @@ import (
 )
 
 func TestDrawInventory(t *testing.T) {
-	inventory, err := Inventory("inventory.png", "skin.png", 2)
+	inventory, err := Inventory("inventory.png", "output-skin.png", 1)
 	if err != nil {
 		log.Fatal(err)
 	}
