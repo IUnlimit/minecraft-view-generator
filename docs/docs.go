@@ -100,16 +100,16 @@ const docTemplate = `{
         "model.PlayerListRequestEntry": {
             "type": "object",
             "required": [
-                "entry",
                 "ping",
+                "player-name",
                 "player-uuid"
             ],
             "properties": {
-                "entry": {
-                    "type": "string"
-                },
                 "ping": {
                     "type": "integer"
+                },
+                "player-name": {
+                    "type": "string"
                 },
                 "player-uuid": {
                     "type": "string"
@@ -120,6 +120,7 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "show-avatar": {
+                    "description": "TODO 支持关闭头像",
                     "type": "boolean"
                 }
             }
