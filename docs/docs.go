@@ -79,6 +79,9 @@ const docTemplate = `{
         },
         "model.PlayerListRequest": {
             "type": "object",
+            "required": [
+                "version"
+            ],
             "properties": {
                 "entry": {
                     "type": "array",
@@ -88,24 +91,27 @@ const docTemplate = `{
                 },
                 "options": {
                     "$ref": "#/definitions/model.PlayerListRequestOptions"
+                },
+                "version": {
+                    "type": "string"
                 }
             }
         },
         "model.PlayerListRequestEntry": {
             "type": "object",
             "required": [
+                "entry",
                 "ping",
-                "playerName",
-                "playerUUID"
+                "player-uuid"
             ],
             "properties": {
+                "entry": {
+                    "type": "string"
+                },
                 "ping": {
                     "type": "integer"
                 },
-                "playerName": {
-                    "type": "string"
-                },
-                "playerUUID": {
+                "player-uuid": {
                     "type": "string"
                 }
             }
@@ -113,7 +119,7 @@ const docTemplate = `{
         "model.PlayerListRequestOptions": {
             "type": "object",
             "properties": {
-                "showAvatar": {
+                "show-avatar": {
                     "type": "boolean"
                 }
             }

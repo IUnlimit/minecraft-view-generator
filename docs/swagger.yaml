@@ -20,23 +20,27 @@ definitions:
         type: array
       options:
         $ref: '#/definitions/model.PlayerListRequestOptions'
+      version:
+        type: string
+    required:
+    - version
     type: object
   model.PlayerListRequestEntry:
     properties:
+      entry:
+        type: string
       ping:
         type: integer
-      playerName:
-        type: string
-      playerUUID:
+      player-uuid:
         type: string
     required:
+    - entry
     - ping
-    - playerName
-    - playerUUID
+    - player-uuid
     type: object
   model.PlayerListRequestOptions:
     properties:
-      showAvatar:
+      show-avatar:
         type: boolean
     type: object
 info:
