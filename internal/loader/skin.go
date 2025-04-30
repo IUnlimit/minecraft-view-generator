@@ -3,6 +3,10 @@ package loader
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
 	global "github.com/IUnlimit/minecraft-view-generator/internal"
 	"github.com/IUnlimit/minecraft-view-generator/pkg/draw"
 	"github.com/IUnlimit/minecraft-view-generator/pkg/url"
@@ -10,9 +14,6 @@ import (
 	"github.com/buger/jsonparser"
 	"github.com/emirpasic/gods/maps/hashmap"
 	log "github.com/sirupsen/logrus"
-	"os"
-	"path/filepath"
-	"strings"
 )
 
 const (
@@ -20,6 +21,11 @@ const (
 )
 
 func LoadLocalSkins() {
+	if !tools.FileExists(global.SkinsPath) {
+		os.MkdirAll(global.SkinsPath, os.ModePerm)
+		log.Infof("Init skins folder, %s", global.SkinsPath)
+	}
+
 	skinMap := hashmap.New()
 	err := filepath.WalkDir(global.SkinsPath, func(path string, d os.DirEntry, err error) error {
 		if d.IsDir() {
