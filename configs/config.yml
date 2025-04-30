@@ -16,7 +16,7 @@ minecraft:
   version:
     # 启动时加载的版本
     # 为空则启动时自动加载默认版本
-    entry-list: ['1.21']
+    entry-list: ['1.21.1']
     # 是否自动加载其他请求的版本
     # 如果关闭, API 将在收到未配置版本时直接返回空值
     auto-load: true

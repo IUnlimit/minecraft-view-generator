@@ -1,16 +1,22 @@
 package model
 
+type common struct {
+	Version string `binding:"required" json:"version"`
+}
+
 type PlayerListRequest struct {
+	common
 	Entry   []*PlayerListRequestEntry
 	Options *PlayerListRequestOptions
 }
 
 type PlayerListRequestEntry struct {
-	PlayerName string `binding:"required"`
-	PlayerUUID string `binding:"required"`
-	Ping       int    `binding:"required"`
+	PlayerName string `binding:"required" json:"entry"`
+	PlayerUUID string `binding:"required" json:"player-uuid"`
+	Ping       int    `binding:"required" json:"ping"`
 }
 
 type PlayerListRequestOptions struct {
-	ShowAvatar bool
+	// TODO 支持关闭头像
+	ShowAvatar bool `json:"show-avatar,omitempty"`
 }

@@ -27,6 +27,7 @@ func GetPlayerList(ctx *gin.Context) {
 		return
 	}
 
+	// TODO 检查版本资源, 如果不存在但 texture 支持，则加载
 	image, err := handler.GetPlayerList(&request)
 	if err != nil {
 		ResponseError(err, ctx)

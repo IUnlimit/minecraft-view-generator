@@ -17,5 +17,5 @@ func Image2Base64(img image.Image) (string, error) {
 		return "", err
 	}
 
-	return base64.StdEncoding.EncodeToString(buf.B), nil
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.B), nil
 }

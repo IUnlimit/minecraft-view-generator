@@ -22,7 +22,7 @@ const (
 
 func LoadLocalSkins() {
 	if !tools.FileExists(global.SkinsPath) {
-		os.MkdirAll(global.SkinsPath, os.ModePerm)
+		_ = os.MkdirAll(global.SkinsPath, os.ModePerm)
 		log.Infof("Init skins folder, %s", global.SkinsPath)
 	}
 
@@ -31,8 +31,7 @@ func LoadLocalSkins() {
 		if d.IsDir() {
 			return nil
 		}
-		// TODO windows path adapter
-		lastIndex := strings.LastIndex(path, "/")
+		lastIndex := strings.LastIndex(path, string(os.PathSeparator))
 		fileName := path[lastIndex+1:]
 		fileName = fileName[:len(fileName)-len(SkinSuffix)]
 		splits := strings.Split(fileName, "#")

@@ -8,10 +8,11 @@ func Init() {
 	FetchSupportVersions()
 	config := global.Config.Minecraft
 	version := config.Version
-	if hasDefaultVersion(version) {
+	if setDefaultVersion(version) {
 		LoadResourceList(version.EntryList)
 	}
 	LoadLangVersionMap(config.Resource.Language, version.EntryList)
 	LoadFont(config.Resource.Font)
 	LoadLocalSkins()
+	// TODO check config-version & texture-version
 }

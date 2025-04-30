@@ -28,7 +28,7 @@ func FetchSupportVersions() {
 	global.VersionMap = mojangVMap
 }
 
-func hasDefaultVersion(version *model.Version) bool {
+func setDefaultVersion(version *model.Version) bool {
 	entryList := version.EntryList
 	if entryList == nil || len(entryList) == 0 {
 		entryList = make([]*model.Entry, 0)

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"github.com/IUnlimit/minecraft-view-generator/pkg/texture"
 	"image"
 	"image/color"
 	"math"
@@ -34,8 +35,8 @@ var (
 	// BoldOffset 加粗偏移
 	BoldOffset = ShadowOffset + 1
 
-	PlayerRowColor  = &color.RGBA{91, 94, 91, 168}
-	BackgroundColor = &color.RGBA{68, 71, 68, 128}
+	PlayerRowColor  = &color.RGBA{R: 91, G: 94, B: 91, A: 168}
+	BackgroundColor = &color.RGBA{R: 68, G: 71, B: 68, A: 128}
 
 	Options = &draw.Options{
 		ShadowOffset: ShadowOffset,
@@ -46,7 +47,12 @@ var (
 
 func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
 	if len(request.Entry) == 0 {
-		return nil, fmt.Errorf("No player data found")
+		return nil, fmt.Errorf("no player data found")
+	}
+
+	manager, err := texture.GetAssetManager(request.Version)
+	if err != nil {
+		return nil, err
 	}
 
 	TemplateCtx := gg.NewContext(0, 0)
@@ -66,7 +72,7 @@ func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
 		c := component.NewComponent(player.PlayerName)
 		nameWidth, _ := c.Compute(TemplateCtx, BoldOffset)
 		log.Debugf("nameWidth: %f, maxHeight: -", nameWidth)
-		row, err := drawSinglePlayerRow(player, c, nameWidth, face)
+		row, err := drawSinglePlayerRow(player, c, nameWidth, face, manager)
 		if err != nil {
 			log.Errorf("Failed to draw single-player-row, %v", err)
 			continue
@@ -132,7 +138,13 @@ func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
 	return ctx.Image(), nil
 }
 
-func drawSinglePlayerRow(player *model.PlayerListRequestEntry, c *component.Component, nameWidth float64, face font.Face) (image.Image, error) {
+func drawSinglePlayerRow(
+	player *model.PlayerListRequestEntry,
+	c *component.Component,
+	nameWidth float64,
+	face font.Face,
+	manager texture.AssetsManager,
+) (image.Image, error) {
 	width := ShadowOffset + nameWidth + 16 + 20 // + head + ping
 	height := ShadowOffset + FontSize
 	ctx := draw.NewImageWithBackground(width, height, PlayerRowColor, face)
@@ -143,9 +155,7 @@ func drawSinglePlayerRow(player *model.PlayerListRequestEntry, c *component.Comp
 		return nil, err
 	}
 
-	// TODO texture
-	pingAsset := "/home/illtamer/Code/go/goland/minecraft-view-generator/config/assets/1.21.1/assets/minecraft/textures/gui/sprites/icon/ping_5.png"
-	pingImage, err := tools.ReadImage(pingAsset)
+	pingImage, err := tools.ReadImage(manager.GetPing(player.Ping).Path)
 	if err != nil {
 		return nil, err
 	}

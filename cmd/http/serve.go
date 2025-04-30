@@ -3,6 +3,7 @@ package http
 import (
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 
 	docs "github.com/IUnlimit/minecraft-view-generator/docs"
@@ -21,6 +22,10 @@ func Serve() {
 
 	engine := gin.Default()
 	engine.Use(gin.Recovery())
+
+	engine.GET("", func(c *gin.Context) {
+		c.Redirect(http.StatusMovedPermanently, "/api/v1/swagger/index.html")
+	})
 
 	docs.SwaggerInfo.BasePath = "/api/v1"
 	v1 := engine.Group(docs.SwaggerInfo.BasePath)
