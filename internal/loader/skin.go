@@ -17,7 +17,8 @@ import (
 )
 
 const (
-	SkinSuffix = ".png"
+	SkinSuffix    = ".png"
+	SkinDelimiter = "!!"
 )
 
 func LoadLocalSkins() {
@@ -34,7 +35,7 @@ func LoadLocalSkins() {
 		lastIndex := strings.LastIndex(path, string(os.PathSeparator))
 		fileName := path[lastIndex+1:]
 		fileName = fileName[:len(fileName)-len(SkinSuffix)]
-		splits := strings.Split(fileName, "#")
+		splits := strings.Split(fileName, SkinDelimiter)
 		skin, err := LoadSkinByFile(path, splits[1] == "true")
 		if err != nil {
 			log.Warnf("Load skin path(%s) failed, %v", path, err)
@@ -146,7 +147,7 @@ func loadSkinByUUID(uuid string, cache bool) (*draw.Skin, error) {
 }
 
 func LoadSkinByUrl(u string, uuid string, slim bool) (*draw.Skin, error) {
-	skinPath := global.SkinPath(fmt.Sprintf("%s#%t", uuid, slim), SkinSuffix)
+	skinPath := global.SkinPath(fmt.Sprintf("%s%s%t", uuid, SkinDelimiter, slim), SkinSuffix)
 	err := tools.MakeParentDirs(skinPath)
 	if err != nil {
 		return nil, err
