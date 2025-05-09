@@ -22,3 +22,4 @@ go.work
 
 # Custom
 config/
+node_modules/

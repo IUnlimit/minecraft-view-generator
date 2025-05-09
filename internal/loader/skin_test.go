@@ -16,7 +16,7 @@ func TestLoadSkinByName(t *testing.T) {
 	logger.Init()
 	Init()
 
-	skin, err := LoadSkinByName("IllTamer", true)
+	skin, err := LoadSkinByName("IllTamer", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
