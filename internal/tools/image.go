@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"github.com/disintegration/imaging"
 	"image"
 	"image/draw"
@@ -56,4 +57,14 @@ func Cover(top image.Image, bg image.Image, x0, y0, offsetX, offsetY int) *image
 	// 把人物贴上去，源点用 top.Bounds().Min
 	draw.Draw(newImage, destRect, top, topBounds.Min, draw.Over)
 	return newImage
+}
+
+// BytesToImage receive image []byte, return image.Image
+func BytesToImage(data []byte) (image.Image, string, error) {
+	reader := bytes.NewReader(data)
+	img, format, err := image.Decode(reader)
+	if err != nil {
+		return nil, "", err
+	}
+	return img, format, nil
 }

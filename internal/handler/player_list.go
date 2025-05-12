@@ -29,19 +29,9 @@ const (
 )
 
 var (
-	// ShadowOffset 阴影偏移
-	ShadowOffset = math.Ceil(float64(FontSize)/16) + 1
-	// BoldOffset 加粗偏移
-	BoldOffset = ShadowOffset + 1
-
 	PlayerRowColor  = &color.RGBA{R: 91, G: 94, B: 91, A: 168}
 	BackgroundColor = &color.RGBA{R: 68, G: 71, B: 68, A: 128}
-
-	Options = &draw.Options{
-		ShadowOffset: ShadowOffset,
-		BoldOffset:   BoldOffset,
-		OffsetY:      OffsetY,
-	}
+	fontOptions     = draw.DefaultFontOptions(FontSize, OffsetY)
 )
 
 func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
@@ -69,7 +59,7 @@ func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
 	playerRows := make([]image.Image, 0)
 	for _, player := range request.Entry {
 		c := component.NewComponent(player.PlayerName)
-		nameWidth, _ := c.Compute(TemplateCtx, BoldOffset)
+		nameWidth, _ := c.Compute(TemplateCtx, fontOptions.BoldOffset)
 		log.Debugf("nameWidth: %f, maxHeight: -", nameWidth)
 		row, err := drawSinglePlayerRow(player, c, nameWidth, face, manager)
 		if err != nil {
@@ -85,7 +75,7 @@ func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
 	headerComponents := make([]*component.Component, 0)
 	for _, header := range config.HeaderText {
 		c := component.NewComponent(header)
-		headerWidth, _ := c.Compute(TemplateCtx, BoldOffset)
+		headerWidth, _ := c.Compute(TemplateCtx, fontOptions.BoldOffset)
 		maxHeaderWidth = math.Max(headerWidth, maxHeaderWidth)
 		headerComponents = append(headerComponents, c)
 	}
@@ -94,7 +84,7 @@ func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
 	footerComponents := make([]*component.Component, 0)
 	for _, footer := range config.FooterText {
 		c := component.NewComponent(footer)
-		footerWidth, _ := c.Compute(TemplateCtx, BoldOffset)
+		footerWidth, _ := c.Compute(TemplateCtx, fontOptions.BoldOffset)
 		maxFooterWidth = math.Max(footerWidth, maxFooterWidth)
 		footerComponents = append(footerComponents, c)
 	}
@@ -104,33 +94,33 @@ func GetPlayerList(request *model.PlayerListRequest) (image.Image, error) {
 	// 每行都有行间距
 	height := (float64(FontSize)+LineSpace)*float64(len(headerComponents)+len(footerComponents)) +
 		// 增加阴影偏移 提升美观
-		(float64(FontSize)+OffsetY+LineSpace+(ShadowOffset))*float64(len(playerRows)) + ShadowOffset
+		(float64(FontSize)+OffsetY+LineSpace+(fontOptions.ShadowOffset))*float64(len(playerRows)) + fontOptions.ShadowOffset
 
 	ctx := draw.NewImageWithBackground(width, height, BackgroundColor, face)
 	_, startY := 0.0, 0.0
 	// header
 	for _, headerComp := range headerComponents {
-		lineWidth, _ := headerComp.Compute(TemplateCtx, BoldOffset)
+		lineWidth, _ := headerComp.Compute(TemplateCtx, fontOptions.BoldOffset)
 		headerStartX := math.Floor((width - lineWidth) / 2)
-		_, startY = draw.PrintChar(headerStartX, startY+FontSize, headerComp, ctx, Options)
+		_, startY = draw.PrintChar(headerStartX, startY+FontSize, headerComp, ctx, fontOptions)
 		startY += LineSpace
 	}
 
-	startY += ShadowOffset
+	startY += fontOptions.ShadowOffset
 	// content Padding
 	for _, playerRow := range playerRows {
 		rowStartX := math.Floor((width - float64(playerRow.Bounds().Dx())) / 2)
 		rowOffset := playerRow.Bounds().Dy() - FontSize + LineSpace*2
 		log.Debugf("playerRow, dx: %d, dy: %d, rowOffset: %d", playerRow.Bounds().Dx(), playerRow.Bounds().Dy(), rowOffset)
 		ctx.DrawImage(playerRow, int(rowStartX), int(startY)+rowOffset)
-		startY += FontSize + LineSpace + ShadowOffset
+		startY += FontSize + LineSpace + fontOptions.ShadowOffset
 	}
 
 	// footer
 	for _, footerComp := range footerComponents {
-		lineWidth, _ := footerComp.Compute(TemplateCtx, BoldOffset)
+		lineWidth, _ := footerComp.Compute(TemplateCtx, fontOptions.BoldOffset)
 		headerStartX := math.Floor((width - lineWidth) / 2)
-		_, startY = draw.PrintChar(headerStartX, startY+FontSize, footerComp, ctx, Options)
+		_, startY = draw.PrintChar(headerStartX, startY+FontSize, footerComp, ctx, fontOptions)
 		startY += LineSpace
 	}
 
@@ -144,8 +134,8 @@ func drawSinglePlayerRow(
 	face font.Face,
 	manager texture.AssetsManager,
 ) (image.Image, error) {
-	width := ShadowOffset + nameWidth + 16 + 20 // + head + ping
-	height := ShadowOffset + FontSize
+	width := fontOptions.ShadowOffset + nameWidth + 16 + 20 // + head + ping
+	height := fontOptions.ShadowOffset + FontSize
 	ctx := draw.NewImageWithBackground(width, height, PlayerRowColor, face)
 
 	// TODO 兼容皮肤站
@@ -160,12 +150,12 @@ func drawSinglePlayerRow(
 	}
 
 	// 3 for Chinese char
-	startX, startY := 0.0, height-ShadowOffset-3
+	startX, startY := 0.0, height-fontOptions.ShadowOffset-3
 
 	draw.CoveyImage(skin.GetFace(), startX, OffsetY, FontSize, ctx)
 	startX += 16 + 1
 
-	startX, startY = draw.PrintChar(startX, startY, c, ctx, Options)
+	startX, startY = draw.PrintChar(startX, startY, c, ctx, fontOptions)
 
 	draw.CoveyImage(pingImage, startX, OffsetY, FontSize, ctx)
 	return ctx.Image(), nil

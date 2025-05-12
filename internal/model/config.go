@@ -37,7 +37,13 @@ type Entry struct {
 }
 
 type Api struct {
-	PlayerList *PlayerList `yaml:"player-list"`
+	Browserless *Browserless `yaml:"browserless"`
+	PlayerList  *PlayerList  `yaml:"player-list"`
+}
+
+type Browserless struct {
+	Url     string        `yaml:"url,omitempty"`
+	Timeout time.Duration `yaml:"timeout,omitempty"`
 }
 
 type PlayerList struct {

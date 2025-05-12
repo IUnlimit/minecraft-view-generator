@@ -10,10 +10,12 @@ import (
 	"math"
 )
 
-type Options struct {
+type FontOptions struct {
+	// ShadowOffset 阴影偏移
 	ShadowOffset float64
-	BoldOffset   float64
-	OffsetY      float64
+	// BoldOffset 加粗偏移
+	BoldOffset float64
+	OffsetY    float64
 }
 
 // NewImageWithBackground create image with background color
@@ -36,7 +38,7 @@ func CoveyImage(image image.Image, startX float64, startY float64, height float6
 }
 
 // PrintChar print chars to image with options
-func PrintChar(startX float64, startY float64, c *component.Component, ctx *gg.Context, options *Options) (float64, float64) {
+func PrintChar(startX float64, startY float64, c *component.Component, ctx *gg.Context, options *FontOptions) (float64, float64) {
 	for _, char := range c.Parse() {
 		content := string(char.Content)
 		var w float64

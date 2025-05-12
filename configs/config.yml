@@ -36,6 +36,10 @@ minecraft:
     - https://skin.fjmua.cn
 
 api:
+  # browserless/chrome API url
+  browserless:
+    url: "ws://127.0.0.1:23001"
+    timeout: "15s"
   player-list:
     # 单行展示的最大玩家数
     single-column-limit: 20

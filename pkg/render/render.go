@@ -1,52 +1,117 @@
-package main
+package render
 
 import (
 	"context"
-	"encoding/base64"
-	"io/ioutil"
-	"log"
-
+	"errors"
+	"fmt"
+	global "github.com/IUnlimit/minecraft-view-generator/internal"
+	"github.com/IUnlimit/minecraft-view-generator/internal/tools"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/chromedp"
+	log "github.com/sirupsen/logrus"
+	"image"
+	"net/url"
+	"strconv"
+	"time"
 )
 
-// TODO
-// 在 Go 中用 chromedp 直接驱动 Browserless（WebSocket）并拿到 Canvas DataURL
-// 如果你只想拿到 Canvas 的像素数据（Base64），可以用 Go 的 chromedp 库，通过 DevTools Protocol 直接操作页面上的 <canvas>：
-func main() {
+type Option struct {
+	BaseUrl  string
+	Width    int
+	Height   int
+	SkinPath string
+	CapePath string
+	NameTag  string
+}
+
+// GetSkin by skinview3d api
+func GetSkin(browserLessUrl string, timeout time.Duration, o *Option) (image.Image, error) {
+	targetUrl, err := buildTargetUrl(o)
+	if err != nil {
+		return nil, err
+	}
+	log.Debugf("render skin target url: %s", targetUrl)
+
 	// Browserless WebSocket 地址（会自动探测 /json/version）
-	dockerURL := "http://localhost:3000"
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", true),                    // 仍然保持 headless
+		chromedp.Flag("disable-gpu", false),                // 打开 GPU
+		chromedp.Flag("ignore-gpu-blocklist", true),        // 忽略 GPU 黑名单
+		chromedp.Flag("enable-webgl", true),                // 开启 WebGL
+		chromedp.Flag("disable-software-rasterizer", true), // 禁用软件光栅
+	)
 
-	// 建立 RemoteAllocator
-	allocCtx, cancel := chromedp.NewRemoteAllocator(context.Background(), dockerURL)
+	allocCtx, cancel := chromedp.NewExecAllocator(
+		context.Background(),
+		opts...,
+	)
 	defer cancel()
 
-	// 创建浏览器上下文
-	ctx, cancel := chromedp.NewContext(allocCtx)
+	allocCtx, cancel = chromedp.NewRemoteAllocator(
+		allocCtx,
+		browserLessUrl,
+	)
 	defer cancel()
 
-	var dataURL string
-	url := "http://127.0.0.1:13300/dashboard?nameTag=IllTamer&skinUrl=dashboard%2Fskins%2Fc359e5045bc74641ac39f318446e7461!!true.png"
+	var errs []string
+	ctx, cancel := chromedp.NewContext(
+		allocCtx,
+		chromedp.WithErrorf(func(format string, a ...interface{}) {
+			errs = append(errs, fmt.Sprintf(format, a...))
+		}))
+	defer cancel()
+	ctx, cancel = context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	//var dataURL string
+	var buf []byte
 
 	// 执行导航、等待 canvas 出现、取 DataURL
-	err := chromedp.Run(ctx,
-		chromedp.Navigate(url),
+	err = chromedp.Run(ctx,
+		chromedp.Navigate(targetUrl),
+		chromedp.ActionFunc(func(_ctx context.Context) error {
+			bg := &cdp.RGBA{R: 0, G: 0, B: 0, A: 0}
+			return emulation.SetDefaultBackgroundColorOverride().WithColor(bg).Do(_ctx)
+		}),
 		chromedp.WaitVisible("canvas", chromedp.ByQuery),
-		chromedp.Evaluate(`document.querySelector("canvas").toDataURL("image/png")`, &dataURL),
+		chromedp.WaitReady("#skin_container", chromedp.ByQuery),
+		chromedp.Screenshot("#skin_container", &buf, chromedp.ByQuery, chromedp.NodeVisible),
 	)
+	for _, e := range errs {
+		log.Debugf("chromedp: %s", e)
+	}
 	if err != nil {
-		log.Fatalf("chromedp 运行失败：%v", err)
+		return nil, err
 	}
 
-	// dataURL = "data:image/png;base64,XXXX..."
-	// 去掉前缀并解码
-	raw := dataURL[len("data:image/png;base64,"):]
-	img, err := base64.StdEncoding.DecodeString(raw)
+	i, _, err := tools.BytesToImage(buf)
 	if err != nil {
-		log.Fatalf("Base64 解码失败：%v", err)
+		return nil, err
+	}
+	if i == nil {
+		return nil, errors.New("render failed, is it browserless page load failed")
+	}
+	return i, nil
+}
+
+func buildTargetUrl(o *Option) (string, error) {
+	u, err := url.Parse(o.BaseUrl + global.Skinview3dUri)
+	if err != nil {
+		return "", err
 	}
 
-	if err := ioutil.WriteFile("canvas.png", img, 0644); err != nil {
-		log.Fatalf("保存失败：%v", err)
+	params := url.Values{} //拼接query参数
+	params.Add("nameTag", o.NameTag)
+	params.Add("skinUrl", o.SkinPath)
+	params.Add("capeUrl", o.CapePath)
+	if o.Width != 0 {
+		params.Add("width", strconv.Itoa(o.Width))
 	}
-	log.Println("已保存 canvas.png")
+	if o.Height != 0 {
+		params.Add("height", strconv.Itoa(o.Height))
+	}
+	u.RawQuery = params.Encode()
+
+	return u.String(), nil
 }

@@ -2,8 +2,12 @@ package draw
 
 import (
 	"github.com/IUnlimit/minecraft-view-generator/internal/tools"
+	"github.com/IUnlimit/minecraft-view-generator/pkg/component"
 	"github.com/disintegration/imaging"
+	"github.com/fogleman/gg"
+	log "github.com/sirupsen/logrus"
 	"image"
+	"image/color"
 )
 
 type Assets struct {
@@ -12,27 +16,48 @@ type Assets struct {
 	Size int64
 }
 
-func Inventory(inv image.Image, skinPath string, scale int) (image.Image, error) {
-	// 背包大小：352 x 332，人物框大小：49 x 70 0.7
-	// 人物大小：227 x 447
-	skinImg, err := tools.ReadImage(skinPath)
-	if err != nil {
-		return nil, err
-	}
-	skinIn, err := tools.Cut(skinImg, 22, 0, 250, 447)
-	//// 人物大小：444 x 848
-	//skinIn, err := Cut("skin-15.png", 36, 0, 481, 848)
-	//// 人物大小：862 x 1678
-	//skinIn, err := Cut("skin-30.png", 87, 0, 950, 1678)
-	if err != nil {
-		return nil, err
-	}
-	// 差别不大 加点锐化
-	skinIn = imaging.Sharpen(skinIn, 1)
-	// 重绘人物
-	resizedSkin := tools.Resize(skinIn, 0, 70*scale)
+var (
+	// 背包大小：352 x 332
+	InvWidth, InvHeight = 352, 332
+	// 人物框大小：100 x 140
+	PlayerWidth, PlayerHeight = 100, 140
+	// 人物框起点 (52, 16)
+	PlayerStartX, PlayerStartY = 52, 16
+	BackgroundColor            = &color.RGBA{R: 184, G: 184, B: 184, A: 255}
+	fontSize                   = 8
+)
 
-	// 覆盖背包 (26, 8)
-	offsetX := (49*scale - resizedSkin.Bounds().Dx()) / 2
-	return tools.Cover(resizedSkin, inv, 26*scale, 8*scale, offsetX, -1*scale), nil
+func Inventory(name string, inv image.Image, skin image.Image) (image.Image, error) {
+	// 差别不大 加点锐化
+	skin = imaging.Sharpen(skin, 0.5)
+	// 覆盖背包 start (52, 16)
+	inv = tools.Cover(skin, inv, PlayerStartX, PlayerStartY, -10, 3)
+	invCtx := gg.NewContextForImage(inv)
+	// 平移 -Bounds.Min，使得内部坐标原点指向真正的图像左上角
+	invCtx.Translate(float64(inv.Bounds().Min.X), float64(inv.Bounds().Min.Y))
+	log.Debugf("InvCtx bounds min (x: %d, y: %d)", inv.Bounds().Min.X, inv.Bounds().Min.Y)
+
+	// name tag
+	if name != "" {
+		fontOptions := DefaultFontOptions(fontSize, float64(fontSize)-1)
+		// 字号缩小一倍,阴影间距减小 (default 2)
+		fontOptions.ShadowOffset -= 1
+		c := component.NewComponent(name)
+		face, err := GetFontFace(float64(fontSize), 72)
+		if err != nil {
+			return nil, err
+		}
+		invCtx.SetFontFace(face)
+
+		fontWidth, _ := c.Compute(invCtx, fontOptions.BoldOffset)
+		// name tag start pos
+		startX, startY :=
+			float64(PlayerStartX)+(float64(PlayerWidth)-fontWidth)/2-2,
+			float64(PlayerStartY)+2
+		//bg := NewImageWithBackground(fontWidth, float64(fontSize), BackgroundColor, face).Image()
+		//invCtx.DrawImage(bg, int(startX), int(startY))
+		startX, startY = PrintChar(startX, startY, c, invCtx, fontOptions)
+	}
+
+	return invCtx.Image(), nil
 }

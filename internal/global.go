@@ -5,6 +5,13 @@ import (
 	"github.com/emirpasic/gods/maps/hashmap"
 )
 
+const (
+	Skinview3dUri = "/skinview3d"
+
+	PingUri          = "/ping"
+	GetPlayerListUri = "/get_player_list"
+)
+
 // ParentPath perp files draw
 const ParentPath = "./config"
 
