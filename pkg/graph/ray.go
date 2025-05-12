@@ -4,9 +4,7 @@ import (
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
-const modelPath = "/home/illtamer/Code/go/goland/minecraft-view-generator/pkg/graph/model_parse.json"
-
-func Do() error {
+func Do(modelPath string, savePath string) error {
 	screenWidth := int32(160)
 	screenHeight := int32(160)
 	//distance := int32(20)
@@ -49,7 +47,7 @@ func Do() error {
 	// 获取渲染的图像
 	renderedImage := rl.LoadImageFromTexture(target.Texture)
 	// 保存图像为PNG文件
-	rl.ExportImage(*renderedImage, "rendered_block.png")
+	rl.ExportImage(*renderedImage, savePath)
 
 	// 卸载纹理
 	for _, t := range textures {
@@ -96,54 +94,6 @@ func renderBlock(block *Model, textures map[string]rl.Texture2D) {
 		}
 	}
 }
-
-//func drawQuad(texture rl.Texture2D, x1, y1, z1, x2, y2, z2, x3, y3, z3, x4, y4, z4 float32) {
-//	rl.Begin(rl.Quads)
-//	rl.SetTexture(texture.ID)
-//	rl.Color4ub(255, 255, 255, 255)
-//
-//	// Define the normal for the quad
-//	normal := calculateNormal(
-//		rl.NewVector3(x1, y1, z1),
-//		rl.NewVector3(x2, y2, z2),
-//		rl.NewVector3(x3, y3, z3),
-//	)
-//	rl.Normal3f(normal.X, normal.Y, normal.Z)
-//
-//	// Define the texture coordinates and vertices
-//	rl.TexCoord2f(0.0, 0.0)
-//	rl.Vertex3f(x1, y1, z1)
-//
-//	rl.TexCoord2f(1.0, 0.0)
-//	rl.Vertex3f(x2, y2, z2)
-//
-//	rl.TexCoord2f(1.0, 1.0)
-//	rl.Vertex3f(x3, y3, z3)
-//
-//	rl.TexCoord2f(0.0, 1.0)
-//	rl.Vertex3f(x4, y4, z4)
-//
-//	rl.End()
-//}
-//
-//func calculateNormal(v1, v2, v3 rl.Vector3) rl.Vector3 {
-//	u := rl.NewVector3(v2.X-v1.X, v2.Y-v1.Y, v2.Z-v1.Z)
-//	v := rl.NewVector3(v3.X-v1.X, v3.Y-v1.Y, v3.Z-v1.Z)
-//
-//	normal := rl.NewVector3(
-//		u.Y*v.Z-u.Z*v.Y,
-//		u.Z*v.X-u.X*v.Z,
-//		u.X*v.Y-u.Y*v.X,
-//	)
-//
-//	// Normalize the normal vector
-//	length := float32(math.Sqrt(float64(normal.X*normal.X + normal.Y*normal.Y + normal.Z*normal.Z)))
-//	normal.X /= length
-//	normal.Y /= length
-//	normal.Z /= length
-//
-//	return normal
-//}
 
 func drawQuad(texture rl.Texture2D, x1, y1, z1, x2, y2, z2, x3, y3, z3, x4, y4, z4 float32) {
 	x, y, z := float32(-2.0), float32(2.0), float32(0.0)

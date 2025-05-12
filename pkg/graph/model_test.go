@@ -6,7 +6,7 @@ import (
 )
 
 func TestLoadModel(t *testing.T) {
-	path := "/home/illtamer/Code/go/goland/minecraft-view-generator/config/assets/1.21.1/assets/minecraft/models/block/enchanting_table.json"
+	path := "./model_parse.json"
 	model, err := LoadModel(path)
 	if err != nil {
 		t.Fatal(err)
