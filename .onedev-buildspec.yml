@@ -104,3 +104,37 @@ jobs:
   maxRetries: 3
   retryDelay: 30
   timeout: 14400
+- name: Auto Push - GtiHub
+  steps:
+  - !PushRepository
+    name: 推送
+    remoteUrl: https://github.com/IUnlimit/minecraft-view-generator.git
+    userName: IllTamer
+    passwordSecret: GitHub Secret
+    force: false
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  triggers:
+  - !BranchUpdateTrigger {}
+  - !TagCreateTrigger {}
+  retryCondition: never
+  maxRetries: 3
+  retryDelay: 30
+  timeout: 14400
+- name: Auto Pull - GitHub
+  steps:
+  - !PullRepository
+    name: 拉取
+    remoteUrl: https://github.com/IUnlimit/minecraft-view-generator.git
+    userName: IllTamer
+    passwordSecret: GitHub Secret
+    refs: refs/heads/* refs/tags/*
+    withLfs: false
+    force: true
+    condition: ALL_PREVIOUS_STEPS_WERE_SUCCESSFUL
+  triggers:
+  - !ScheduleTrigger
+    cronExpression: 0 0/5 * * * ?
+  retryCondition: never
+  maxRetries: 3
+  retryDelay: 30
+  timeout: 14400
