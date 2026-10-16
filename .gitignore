@@ -1,0 +1,7 @@
+data/
+dist/
+*.log
+*.tmp
+.DS_Store
+renderer-backend/build/
+renderer-backend/fixture/**/*.png
