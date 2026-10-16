@@ -1,0 +1,195 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Config contains process-wide settings. Resource downloads are only allowed
+// against the explicitly configured upstream hosts.
+type Config struct {
+	ListenAddr             string
+	DataDir                string
+	ResourcePackRoot       string
+	MaxBodyBytes           int64
+	MaxImageWidth          int
+	MaxImageHeight         int
+	MaxRenderDuration      time.Duration
+	MaxConcurrentRenders   int
+	HTTPTimeout            time.Duration
+	CORSAllowedOrigins     []string
+	APIKey                 string
+	RequireResources       bool
+	AllowFallbackRenderer  bool
+	RendererCommand        string
+	RendererMaxOutputBytes int64
+	MojangManifestURL      string
+	AddonVersionsURL       string
+	AddonResourceURL       string
+	AllowedResourceHosts   []string
+	AddonEnabled           bool
+	MaxDownloadBytes       int64
+	MaxArchiveFiles        int
+	MaxArchiveBytes        int64
+}
+
+func Default() Config {
+	return Config{
+		ListenAddr:             ":8080",
+		DataDir:                "./data",
+		ResourcePackRoot:       "",
+		MaxBodyBytes:           2 << 20,
+		MaxImageWidth:          1600,
+		MaxImageHeight:         1200,
+		MaxRenderDuration:      15 * time.Second,
+		MaxConcurrentRenders:   4,
+		HTTPTimeout:            30 * time.Second,
+		CORSAllowedOrigins:     []string{"*"},
+		RequireResources:       true,
+		RendererCommand:        "./renderer-backend/run.sh",
+		RendererMaxOutputBytes: 64 << 20,
+		MojangManifestURL:      "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+		AddonVersionsURL:       "https://api.loohpjames.com/spigot/plugins/interactivechatdiscordsrvaddon/versions",
+		AddonResourceURL:       "https://api.loohpjames.com/spigot/plugins/interactivechatdiscordsrvaddon/versions",
+		AllowedResourceHosts:   []string{"piston-meta.mojang.com", "piston-data.mojang.com", "resources.download.minecraft.net", "api.loohpjames.com"},
+		AddonEnabled:           true,
+		MaxDownloadBytes:       512 << 20,
+		MaxArchiveFiles:        100_000,
+		MaxArchiveBytes:        2 << 30,
+	}
+}
+
+func FromEnv() Config {
+	cfg := Default()
+	cfg.ListenAddr = envString("LISTEN_ADDR", cfg.ListenAddr)
+	cfg.DataDir = envString("DATA_DIR", cfg.DataDir)
+	cfg.ResourcePackRoot = envString("RESOURCE_PACK_ROOT", cfg.ResourcePackRoot)
+	cfg.APIKey = os.Getenv("API_KEY")
+	cfg.AllowFallbackRenderer = envBool("ALLOW_FALLBACK_RENDERER", cfg.AllowFallbackRenderer)
+	cfg.RendererCommand = envString("RENDERER_COMMAND", cfg.RendererCommand)
+	cfg.RendererMaxOutputBytes = envInt64("RENDERER_MAX_OUTPUT_BYTES", cfg.RendererMaxOutputBytes)
+	cfg.MojangManifestURL = envString("MOJANG_MANIFEST_URL", cfg.MojangManifestURL)
+	cfg.AddonVersionsURL = envString("ADDON_VERSIONS_URL", cfg.AddonVersionsURL)
+	cfg.AddonResourceURL = envString("ADDON_RESOURCE_URL", cfg.AddonResourceURL)
+	cfg.CORSAllowedOrigins = envCSV("CORS_ALLOWED_ORIGINS", cfg.CORSAllowedOrigins)
+	cfg.AllowedResourceHosts = envCSV("ALLOWED_RESOURCE_HOSTS", cfg.AllowedResourceHosts)
+	cfg.AddonEnabled = envBool("ADDON_ENABLED", cfg.AddonEnabled)
+	cfg.RequireResources = envBool("REQUIRE_RESOURCES", cfg.RequireResources)
+	cfg.MaxBodyBytes = envInt64("MAX_BODY_BYTES", cfg.MaxBodyBytes)
+	cfg.MaxImageWidth = envInt("MAX_IMAGE_WIDTH", cfg.MaxImageWidth)
+	cfg.MaxImageHeight = envInt("MAX_IMAGE_HEIGHT", cfg.MaxImageHeight)
+	cfg.MaxConcurrentRenders = envInt("MAX_CONCURRENT_RENDERS", cfg.MaxConcurrentRenders)
+	cfg.MaxDownloadBytes = envInt64("MAX_DOWNLOAD_BYTES", cfg.MaxDownloadBytes)
+	cfg.MaxArchiveFiles = envInt("MAX_ARCHIVE_FILES", cfg.MaxArchiveFiles)
+	cfg.MaxArchiveBytes = envInt64("MAX_ARCHIVE_BYTES", cfg.MaxArchiveBytes)
+	cfg.HTTPTimeout = envDuration("HTTP_TIMEOUT", cfg.HTTPTimeout)
+	cfg.MaxRenderDuration = envDuration("MAX_RENDER_DURATION", cfg.MaxRenderDuration)
+	return cfg
+}
+
+func (c Config) Validate() error {
+	if strings.TrimSpace(c.ListenAddr) == "" {
+		return fmt.Errorf("listen address is empty")
+	}
+	if strings.TrimSpace(c.DataDir) == "" {
+		return fmt.Errorf("data directory is empty")
+	}
+	if c.MaxBodyBytes <= 0 || c.MaxBodyBytes > 64<<20 {
+		return fmt.Errorf("max body bytes must be between 1 and 67108864")
+	}
+	if c.MaxImageWidth <= 0 || c.MaxImageHeight <= 0 || c.MaxImageWidth > 4096 || c.MaxImageHeight > 4096 {
+		return fmt.Errorf("image dimensions must be between 1 and 4096")
+	}
+	if c.MaxConcurrentRenders <= 0 || c.MaxConcurrentRenders > 128 {
+		return fmt.Errorf("max concurrent renders must be between 1 and 128")
+	}
+	if c.HTTPTimeout <= 0 || c.MaxRenderDuration <= 0 {
+		return fmt.Errorf("timeouts must be positive")
+	}
+	if c.MaxDownloadBytes <= 0 || c.MaxArchiveFiles <= 0 || c.MaxArchiveBytes <= 0 {
+		return fmt.Errorf("resource limits must be positive")
+	}
+	if c.RendererMaxOutputBytes <= 0 || c.RendererMaxOutputBytes > 256<<20 {
+		return fmt.Errorf("renderer max output bytes must be between 1 and 268435456")
+	}
+	if c.MojangManifestURL == "" || c.AddonVersionsURL == "" || c.AddonResourceURL == "" {
+		return fmt.Errorf("resource endpoints must not be empty")
+	}
+	return nil
+}
+
+func envString(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envCSV(name string, fallback []string) []string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	if len(result) == 0 {
+		return fallback
+	}
+	return result
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envInt64(name string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envDuration(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
