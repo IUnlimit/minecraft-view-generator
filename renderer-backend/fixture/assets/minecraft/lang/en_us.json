@@ -1,0 +1,19 @@
+{
+    "item.minecraft.diamond_sword": "Fixture Blade",
+    "item.minecraft.diamond": "Fixture Gem",
+    "item.components": "%s component(s)",
+    "item.nbt_tags": "NBT: %s tag(s)",
+    "item.unbreakable": "Unbreakable",
+    "item.dyed": "Dyed",
+    "item.durability": "Durability: %s / %s",
+    "enchantment.minecraft.sharpness": "Sharpness",
+    "enchantment.level.1": "I",
+    "enchantment.level.5": "V",
+    "item.modifiers.any": "When equipped:",
+    "item.modifiers.mainhand": "When in Main Hand:",
+    "item.modifiers.offhand": "When in Off Hand:",
+    "attribute.modifier.plus.0": "+%s %s",
+    "attribute.modifier.take.0": "-%s %s",
+    "attribute.modifier.equals.0": "%s %s",
+    "attribute.name.attack_damage": "Attack Damage"
+}

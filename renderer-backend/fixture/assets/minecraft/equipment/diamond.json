@@ -1,0 +1,14 @@
+{
+  "layers": {
+    "humanoid": [
+      {
+        "texture": "minecraft:fixture"
+      }
+    ],
+    "humanoid_leggings": [
+      {
+        "texture": "minecraft:fixture_leggings"
+      }
+    ]
+  }
+}
