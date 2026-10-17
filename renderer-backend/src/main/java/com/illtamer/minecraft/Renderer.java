@@ -25,12 +25,14 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
 /** Deterministic CPU renderer for the Minecraft 1.21.11 resource format. */
 final class Renderer {
     private final Map<String, Model> models = new HashMap<>();
+    private final Map<String, Font> fonts = new HashMap<>();
     private ResourceStack resources;
 
     BufferedImage render(Map<String, Object> request) throws IOException {
@@ -44,7 +46,7 @@ final class Renderer {
             case "item" -> renderItem(Json.object(request.get("item"), "item"), Json.integer(request, "width", 128));
             case "player" -> renderPlayer(request, Json.integer(request, "width", 256), Json.integer(request, "height", 384));
             case "tooltip" -> renderTooltip(request, Json.integer(request, "width", 360), Json.integer(request, "height", 0));
-            case "inventory" -> renderInventory(request, Json.integer(request, "width", 0), Json.integer(request, "height", 0));
+            case "inventory" -> renderContainer(request, Json.integer(request, "width", 0), Json.integer(request, "height", 0), "inventory");
             case "item_container" -> renderSpecialContainer(request, Json.integer(request, "width", 0), Json.integer(request, "height", 0));
             case "enderchest" -> renderEnderchest(request, Json.integer(request, "width", 0), Json.integer(request, "height", 0));
             case "player_inventory" -> renderPlayerInventory(request, Json.integer(request, "width", 0), Json.integer(request, "height", 0));
@@ -91,14 +93,6 @@ final class Renderer {
             drawGlint(result);
         }
         return result;
-    }
-
-    private Model loadItemModel(String id, Map<String, Object> item) throws IOException {
-        ItemSelection selection = resolveItemSelection(id, item);
-        if (!selection.special.isBlank()) {
-            throw new IOException("unsupported special item model: " + selection.special);
-        }
-        return loadModelWithOverrides(selection.model, item);
     }
 
     private Model loadModelWithOverrides(String modelID, Map<String, Object> item) throws IOException {
@@ -490,15 +484,17 @@ final class Renderer {
         return new Point(x, y);
     }
 
+    /**
+     * Flattens the generated layers into a square icon. A {@code minecraft:generated} model is exactly
+     * one 16x16 plate per layer, so the icon is the layer stack scaled to the requested size and
+     * nothing else — that keeps a GUI slot blit pixel perfect at the native 16 px icon size.
+     */
     private BufferedImage generatedSprite(List<BufferedImage> textures, int size) {
         BufferedImage canvas = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
         Graphics2D graphics = canvas.createGraphics();
         graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-        int margin = Math.max(1, size / 10);
-        int width = size - margin * 2;
-        int height = size - margin * 2;
         for (BufferedImage texture : textures) {
-            graphics.drawImage(texture, margin, margin, width, height, null);
+            graphics.drawImage(texture, 0, 0, size, size, null);
         }
         graphics.dispose();
         return canvas;
@@ -521,7 +517,7 @@ final class Renderer {
         int iconSize = icon ? 72 : 0;
         int left = icon ? iconSize + 18 : TOOLTIP_PADDING;
         int wrapWidth = Math.max(
-                TOOLTIP_FONT_SIZE * 4,
+                FONT_SIZE * 4,
                 (requestedWidth <= 0 ? DEFAULT_TOOLTIP_WIDTH : requestedWidth) - left - TOOLTIP_PADDING);
         List<List<TextRun>> wrapped = new ArrayList<>();
         for (List<TextRun> line : lines) {
@@ -1033,7 +1029,7 @@ final class Renderer {
     private int styledWidth(List<TextRun> line) throws IOException {
         int width = 0;
         for (TextRun run : line) {
-            width += textWidth(run.text(), TOOLTIP_FONT_SIZE);
+            width += textWidth(run.text(), 1);
             if (run.bold()) {
                 width += run.text().codePointCount(0, run.text().length());
             }
@@ -1042,7 +1038,7 @@ final class Renderer {
     }
 
     private int glyphAdvance(String glyph) throws IOException {
-        return textWidth(glyph, TOOLTIP_FONT_SIZE);
+        return textWidth(glyph, 1);
     }
 
     /**
@@ -1050,12 +1046,12 @@ final class Renderer {
      * the baseline sits seven pixels below it, with a one pixel shadow copy behind every glyph.
      */
     private void drawStyledLine(BufferedImage destination, int x, int lineTop, List<TextRun> line) throws IOException {
-        Font regular = bundledFont("MinecraftDefault-Regular.ttf").deriveFont((float) TOOLTIP_FONT_SIZE);
-        Font uniform = bundledFont("MinecraftDefaultUniformBMP-Regular.ttf").deriveFont((float) TOOLTIP_FONT_SIZE);
+        Font regular = font(FONT_REGULAR, 1);
+        Font uniform = font(FONT_UNIFORM, 1);
         Graphics2D graphics = destination.createGraphics();
         graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
         FontRenderContext context = graphics.getFontRenderContext();
-        int baseline = lineTop + TOOLTIP_TEXT_BASELINE;
+        int baseline = lineTop + FONT_ASCENT;
         for (int pass = 0; pass < 2; pass++) {
             int offset = pass == 0 ? 1 : 0;
             int cursor = x;
@@ -1181,63 +1177,93 @@ final class Renderer {
         }
     }
 
-    private void drawBitmapText(BufferedImage destination, int x, int y, String text, int color, int maxWidth) throws IOException {
-        drawBitmapText(destination, x, y, text, color, maxWidth, 12, false);
+    /**
+     * Vanilla bitmap text. The bundled font reproduces the vanilla 8 px cell exactly at size 12:
+     * digits and capitals are five pixels wide with an advance of six, and every glyph occupies the
+     * seven pixels above its baseline. A line whose top edge is {@code y} therefore has its ink in
+     * {@code [y, y + 7 * scale)}, which is the origin every vanilla GUI label coordinate assumes.
+     */
+    private void drawText(BufferedImage destination, int x, int y, String text, int color) throws IOException {
+        drawText(destination, x, y, text, color, 1, false);
     }
 
-    private void drawBitmapText(BufferedImage destination, int x, int y, String text, int color, int maxWidth, int size, boolean shadow) throws IOException {
-        Font regular = bundledFont("MinecraftDefault-Regular.ttf");
-        Font uniform = bundledFont("MinecraftDefaultUniformBMP-Regular.ttf");
+    private void drawText(BufferedImage destination, int x, int y, String text, int color, int scale, boolean shadow) throws IOException {
+        Font regular = font(FONT_REGULAR, scale);
+        Font uniform = font(FONT_UNIFORM, scale);
+        int baseline = y + FONT_ASCENT * scale;
+        int shadowColor = shadowColor(color);
         Graphics2D graphics = destination.createGraphics();
         graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
         FontRenderContext context = graphics.getFontRenderContext();
-        for (int pass = 0; pass < (shadow ? 2 : 1); pass++) {
-            int offset = pass == 0 ? 1 : 0;
-            graphics.setColor(pass == 0 ? new Color((color >> 2) & 0x3F3F3F) : new Color(color & 0xFFFFFF));
-            int cursor = x;
-            for (int position = 0; position < text.length();) {
-                int codePoint = text.codePointAt(position);
-                position += Character.charCount(codePoint);
-                if (codePoint == 0xA7) continue;
-                Font font = codePoint <= 0x7F ? regular.deriveFont((float) size) : uniform.deriveFont((float) size);
-                String glyph = new String(Character.toChars(codePoint));
-                GlyphVector vector = font.createGlyphVector(context, glyph);
-                int advance = Math.max(1, (int) Math.ceil(vector.getGlyphMetrics(0).getAdvance()));
-                if (cursor + advance > x + maxWidth) break;
-                graphics.setFont(font);
-                graphics.drawString(glyph, cursor + offset, y + size + offset);
-                cursor += advance;
+        int cursor = x;
+        for (int position = 0; position < text.length(); ) {
+            int codePoint = text.codePointAt(position);
+            position += Character.charCount(codePoint);
+            // Styled tooltip lines are parsed into runs before drawing, so a lone formatting code can
+            // only come from a caller that never intended it to be visible.
+            if (codePoint == 0xA7) {
+                continue;
             }
+            Font selected = codePoint <= 0x7F ? regular : uniform;
+            String glyph = new String(Character.toChars(codePoint));
+            GlyphVector vector = selected.createGlyphVector(context, glyph);
+            graphics.setFont(selected);
+            if (shadow) {
+                graphics.setColor(new Color(shadowColor));
+                graphics.drawString(glyph, cursor + scale, baseline + scale);
+            }
+            graphics.setColor(new Color(color & 0xFFFFFF));
+            graphics.drawString(glyph, cursor, baseline);
+            cursor += Math.max(1, (int) Math.ceil(vector.getGlyphMetrics(0).getAdvance()));
         }
         graphics.dispose();
     }
 
-    private int textWidth(String text, int size) throws IOException {
-        Font regular = bundledFont("MinecraftDefault-Regular.ttf");
-        Font uniform = bundledFont("MinecraftDefaultUniformBMP-Regular.ttf");
+    private int textWidth(String text, int scale) throws IOException {
+        Font regular = font(FONT_REGULAR, scale);
+        Font uniform = font(FONT_UNIFORM, scale);
         BufferedImage scratch = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
         Graphics2D graphics = scratch.createGraphics();
         FontRenderContext context = graphics.getFontRenderContext();
         int width = 0;
-        for (int position = 0; position < text.length();) {
+        for (int position = 0; position < text.length(); ) {
             int codePoint = text.codePointAt(position);
             position += Character.charCount(codePoint);
-            if (codePoint == 0xA7) continue;
-            Font font = codePoint <= 0x7F ? regular.deriveFont((float) size) : uniform.deriveFont((float) size);
-            GlyphVector vector = font.createGlyphVector(context, new String(Character.toChars(codePoint)));
+            if (codePoint == 0xA7) {
+                continue;
+            }
+            Font selected = codePoint <= 0x7F ? regular : uniform;
+            GlyphVector vector = selected.createGlyphVector(context, new String(Character.toChars(codePoint)));
             width += Math.max(1, (int) Math.ceil(vector.getGlyphMetrics(0).getAdvance()));
         }
         graphics.dispose();
         return width;
     }
 
+    /** The uniform font alone is ten megabytes, so every size is created once per process. */
+    private Font font(String name, int scale) throws IOException {
+        String key = name + "@" + scale;
+        Font cached = fonts.get(key);
+        if (cached == null) {
+            cached = bundledFont(name).deriveFont((float) (FONT_SIZE * scale));
+            fonts.put(key, cached);
+        }
+        return cached;
+    }
+
     private Font bundledFont(String name) throws IOException {
+        Font cached = fonts.get(name);
+        if (cached != null) {
+            return cached;
+        }
         try (var stream = Renderer.class.getResourceAsStream("/" + name)) {
             if (stream == null) throw new IOException("missing bundled font: " + name);
-            return Font.createFont(Font.TRUETYPE_FONT, stream);
+            cached = Font.createFont(Font.TRUETYPE_FONT, stream);
         } catch (FontFormatException error) {
             throw new IOException("invalid bundled font: " + name, error);
         }
+        fonts.put(name, cached);
+        return cached;
     }
 
     private void drawNineSlice(BufferedImage destination, BufferedImage source, int left, int top, int right, int bottom, int x, int y, int width, int height) {
@@ -1268,134 +1294,37 @@ final class Renderer {
         graphics.drawImage(source, dx, dy, dx + dw, dy + dh, sx, sy, sx2, sy2, null);
     }
 
-    private BufferedImage renderInventory(Map<String, Object> request, int requestedWidth, int requestedHeight) throws IOException {
+    /**
+     * Vanilla container screens. Every screen blits a 176 px wide background, draws its title on the
+     * row {@code AbstractContainerScreen} uses and places each menu slot at its content coordinate,
+     * which is the top left pixel of the 16 px item sitting inside an 18 px slot.
+     */
+    private BufferedImage renderContainer(Map<String, Object> request, int requestedWidth, int requestedHeight, String kind) throws IOException {
         Map<String, Object> container = Json.object(request.get("container"), "container");
-        int rows = Json.integer(container, "rows", 3);
-        int columns = Json.integer(container, "columns", 9);
-        if (rows <= 0 || rows > 6 || columns != 9) {
-            throw new IOException("inventory supports 1-6 rows and exactly 9 columns");
+        if (Json.integer(container, "columns", 9) != 9) {
+            throw new IOException("containers require exactly 9 columns");
         }
-        int nativeWidth = 176;
-        int topHeight = 17 + rows * 18;
-        int nativeHeight = topHeight + 96;
-        BufferedImage source = resources.texture("minecraft:gui/container/generic_54");
-        BufferedImage nativeCanvas = new BufferedImage(nativeWidth, nativeHeight, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D graphics = nativeCanvas.createGraphics();
+        ContainerLayout layout = containerLayout(kind, Json.integer(container, "rows", 3));
+        BufferedImage panel = resources.texture(layout.texture());
+        BufferedImage canvas = new BufferedImage(layout.width(), layout.height(), BufferedImage.TYPE_INT_ARGB);
+        Graphics2D graphics = canvas.createGraphics();
         graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-        drawPatch(graphics, source, 0, 0, nativeWidth, topHeight, 0, 0, nativeWidth, topHeight);
-        drawPatch(graphics, source, 0, topHeight, nativeWidth, 96, 0, 126, nativeWidth, 222);
+        if (layout.rows() > 0) {
+            // ContainerScreen#renderBg: the slot band grows with the row count while the 96 px player
+            // band below it is always the same slice of generic_54.
+            int top = CONTAINER_TOP + layout.rows() * 18;
+            drawPatch(graphics, panel, 0, 0, layout.width(), top, 0, 0, layout.width(), top);
+            drawPatch(graphics, panel, 0, top, layout.width(), CONTAINER_BOTTOM, 0, CONTAINER_BOTTOM_SOURCE,
+                    layout.width(), CONTAINER_BOTTOM_SOURCE + CONTAINER_BOTTOM);
+        } else {
+            drawPatch(graphics, panel, 0, 0, layout.width(), layout.height(), 0, 0, layout.width(), layout.height());
+        }
         graphics.dispose();
         String title = Json.string(container, "title", "");
         if (!title.isBlank()) {
-            drawBitmapText(nativeCanvas, 8, 6, title, 0x404040, 160);
+            int x = layout.titleX() >= 0 ? layout.titleX() : (layout.width() - textWidth(title, 1)) / 2;
+            drawText(canvas, x, LABEL_Y, title, LABEL_COLOR);
         }
-        Object slotsValue = container.get("slots");
-        if (!(slotsValue instanceof List<?>)) {
-            slotsValue = container.get("items");
-        }
-        if (slotsValue instanceof List<?> slots) {
-            for (Object slotValue : slots) {
-                if (!(slotValue instanceof Map<?, ?> value)) {
-                    continue;
-                }
-                @SuppressWarnings("unchecked")
-                Map<String, Object> slot = (Map<String, Object>) value;
-                int index = Json.integer(slot, "slot", -1);
-                if (index < 0) {
-                    continue;
-                }
-                Map<String, Object> item = slot.get("item") instanceof Map<?, ?> itemValue ? castMap(itemValue) : null;
-                if (Json.bool(slot, "empty", false) || item == null || Json.string(item, "id", "").isBlank()) {
-                    continue;
-                }
-                int x;
-                int y;
-                if (index < rows * 9) {
-                    x = 7 + (index % 9) * 18;
-                    y = 17 + (index / 9) * 18;
-                } else {
-                    int playerIndex = index - rows * 9;
-                    if (playerIndex >= 36) {
-                        continue;
-                    }
-                    x = 7 + (playerIndex % 9) * 18;
-                    y = topHeight + 13 + (playerIndex / 9) * 18;
-                }
-                BufferedImage icon = renderItem(item, 16);
-                drawScaled(nativeCanvas, icon, x + 1, y + 1, 16, 16);
-                int count = Json.integer(item, "count", 0);
-                if (count > 1) {
-                    drawBitmapText(nativeCanvas, x + 9, y + 9, Integer.toString(count), 0xFFFFFF, 8);
-                }
-            }
-        }
-        int outputWidth = requestedWidth > 0 ? requestedWidth : nativeWidth;
-        int outputHeight = requestedHeight > 0 ? requestedHeight : nativeHeight;
-        if (outputWidth == nativeWidth && outputHeight == nativeHeight) {
-            return nativeCanvas;
-        }
-        BufferedImage output = new BufferedImage(outputWidth, outputHeight, BufferedImage.TYPE_INT_ARGB);
-        drawScaled(output, nativeCanvas, 0, 0, outputWidth, outputHeight);
-        return output;
-    }
-
-    private BufferedImage renderEnderchest(Map<String, Object> request, int requestedWidth, int requestedHeight) throws IOException {
-        Map<String, Object> container = Json.object(request.get("container"), "container");
-        int rows = Json.integer(container, "rows", 3);
-        int columns = Json.integer(container, "columns", 9);
-        if (rows != 3 || columns != 9) {
-            throw new IOException("enderchest supports exactly 3 rows and 9 columns");
-        }
-        BufferedImage base = renderInventory(request, 176, 167);
-        Graphics2D graphics = base.createGraphics();
-        graphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.24f));
-        graphics.setColor(new Color(82, 35, 128, 255));
-        graphics.fillRect(0, 0, base.getWidth(), base.getHeight());
-        graphics.setComposite(AlphaComposite.SrcOver);
-        BufferedImage chestTexture = resources.texture("minecraft:entity/chest/ender");
-        drawScaled(base, chestTexture, base.getWidth() - 27, 2, 18, 18);
-        graphics.dispose();
-        int outputWidth = requestedWidth > 0 ? requestedWidth : base.getWidth();
-        int outputHeight = requestedHeight > 0 ? requestedHeight : base.getHeight();
-        if (outputWidth == base.getWidth() && outputHeight == base.getHeight()) {
-            return base;
-        }
-        BufferedImage output = new BufferedImage(outputWidth, outputHeight, BufferedImage.TYPE_INT_ARGB);
-        drawScaled(output, base, 0, 0, outputWidth, outputHeight);
-        return output;
-    }
-
-    private BufferedImage renderSpecialContainer(Map<String, Object> request, int requestedWidth, int requestedHeight) throws IOException {
-        Map<String, Object> container = Json.object(request.get("container"), "container");
-        String kind = Json.string(container, "container", "").toLowerCase();
-        kind = switch (kind) {
-            case "hopper" -> "hopper";
-            case "furnace", "blast_furnace", "smoker" -> kind;
-            case "crafting", "crafting_table" -> "crafting_table";
-            case "anvil" -> "anvil";
-            case "brewing", "brewing_stand" -> "brewing_stand";
-            default -> throw new IOException("unsupported_container: " + kind);
-        };
-        BufferedImage source = resources.texture("minecraft:gui/container/" + kind);
-        int nativeWidth = 176;
-        int nativeHeight = 166;
-        BufferedImage nativeCanvas = new BufferedImage(nativeWidth, nativeHeight, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D graphics = nativeCanvas.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-        drawPatch(graphics, source, 0, 0, nativeWidth, nativeHeight, 0, 0, nativeWidth, nativeHeight);
-        graphics.dispose();
-        String title = Json.string(container, "title", "");
-        if (!title.isBlank()) {
-            drawBitmapText(nativeCanvas, 8, 6, title, 0x404040, 160);
-        }
-        int playerStart = switch (kind) {
-            case "hopper" -> 5;
-            case "furnace", "blast_furnace", "smoker" -> 3;
-            case "crafting_table" -> 10;
-            case "anvil" -> 3;
-            case "brewing_stand" -> 4;
-            default -> 0;
-        };
         Object slotsValue = container.get("slots");
         if (!(slotsValue instanceof List<?>)) {
             slotsValue = container.get("items");
@@ -1406,66 +1335,115 @@ final class Renderer {
                     continue;
                 }
                 Map<String, Object> slot = castMap(value);
-                int index = Json.integer(slot, "slot", -1);
-                Map<String, Object> item = slot.get("item") instanceof Map<?, ?> itemValue ? castMap(itemValue) : null;
-                if (index < 0 || item == null || Json.bool(slot, "empty", false) || Json.string(item, "id", "").isBlank()) {
+                Map<String, Object> item = slotItem(slot);
+                if (item == null) {
                     continue;
                 }
-                int[] position = specialSlotPosition(kind, index, playerStart);
-                if (position == null) {
-                    continue;
-                }
-                BufferedImage icon = renderItem(item, 16);
-                drawScaled(nativeCanvas, icon, position[0] + 1, position[1] + 1, 16, 16);
-                int count = Json.integer(item, "count", 0);
-                if (count > 1) {
-                    drawBitmapText(nativeCanvas, position[0] + 9, position[1] + 9, Integer.toString(count), 0xFFFFFF, 8);
+                int[] position = containerSlot(kind, Json.integer(slot, "slot", -1), layout.rows());
+                if (position != null) {
+                    drawSlotItem(canvas, item, position[0], position[1]);
                 }
             }
         }
-        int outputWidth = requestedWidth > 0 ? requestedWidth : nativeWidth;
-        int outputHeight = requestedHeight > 0 ? requestedHeight : nativeHeight;
-        if (outputWidth == nativeWidth && outputHeight == nativeHeight) {
-            return nativeCanvas;
-        }
-        BufferedImage output = new BufferedImage(outputWidth, outputHeight, BufferedImage.TYPE_INT_ARGB);
-        drawScaled(output, nativeCanvas, 0, 0, outputWidth, outputHeight);
-        return output;
+        return resize(canvas, requestedWidth, requestedHeight);
     }
 
-    private int[] specialSlotPosition(String kind, int index, int playerStart) {
-        int[] position = switch (kind) {
-            case "hopper" -> index < 5 ? new int[]{43 + index * 18, 20} : null;
-            case "furnace", "blast_furnace", "smoker" -> switch (index) {
-                case 0 -> new int[]{55, 17};
-                case 1 -> new int[]{55, 52};
-                case 2 -> new int[]{111, 31};
-                default -> null;
-            };
-            case "crafting_table" -> index < 9 ? new int[]{29 + (index % 3) * 18, 17 + (index / 3) * 18} : index == 9 ? new int[]{119, 30} : null;
-            case "anvil" -> switch (index) {
-                case 0 -> new int[]{26, 47};
-                case 1 -> new int[]{76, 47};
-                case 2 -> new int[]{126, 47};
-                default -> null;
-            };
-            case "brewing_stand" -> switch (index) {
-                case 0 -> new int[]{16, 52};
-                case 1 -> new int[]{70, 52};
-                case 2 -> new int[]{124, 52};
-                case 3 -> new int[]{79, 17};
-                default -> null;
-            };
-            default -> null;
-        };
-        if (position != null) {
-            return position;
+    /** The ender chest is a plain three row container: same texture, same colours, same slots. */
+    private BufferedImage renderEnderchest(Map<String, Object> request, int requestedWidth, int requestedHeight) throws IOException {
+        Map<String, Object> container = Json.object(request.get("container"), "container");
+        if (Json.integer(container, "rows", 3) != 3) {
+            throw new IOException("enderchest supports exactly 3 rows and 9 columns");
         }
-        int playerIndex = index - playerStart;
-        if (playerIndex < 0 || playerIndex >= 36) {
+        return renderContainer(request, requestedWidth, requestedHeight, "inventory");
+    }
+
+    private BufferedImage renderSpecialContainer(Map<String, Object> request, int requestedWidth, int requestedHeight) throws IOException {
+        Map<String, Object> container = Json.object(request.get("container"), "container");
+        String kind = Json.string(container, "container", "").toLowerCase(Locale.ROOT);
+        kind = switch (kind) {
+            case "hopper" -> "hopper";
+            case "furnace", "blast_furnace", "smoker" -> kind;
+            case "crafting", "crafting_table" -> "crafting_table";
+            case "anvil" -> "anvil";
+            case "brewing", "brewing_stand" -> "brewing_stand";
+            default -> throw new IOException("unsupported_container: " + kind);
+        };
+        return renderContainer(request, requestedWidth, requestedHeight, kind);
+    }
+
+    /** One vanilla container screen: its background texture, canvas size and title column. */
+    private record ContainerLayout(String texture, int rows, int width, int height, int titleX) {}
+
+    /**
+     * Layout of every supported container screen, mirroring the decompiled 1.21.11 screens. A
+     * positive {@code rows} selects the row dependent generic_54 background used by the chest,
+     * ender chest and backpack family; {@code titleX} of -1 centres the title in the frame.
+     */
+    private static ContainerLayout containerLayout(String kind, int rows) throws IOException {
+        return switch (kind) {
+            case "inventory", "enderchest" -> {
+                if (rows < 1 || rows > 6) {
+                    throw new IOException("inventory supports 1-6 rows");
+                }
+                yield new ContainerLayout("minecraft:gui/container/generic_54", rows,
+                        CONTAINER_WIDTH, CONTAINER_TOP + rows * 18 + CONTAINER_BOTTOM, 8);
+            }
+            case "hopper" -> new ContainerLayout("minecraft:gui/container/hopper", 0, 176, 133, 8);
+            case "furnace", "blast_furnace", "smoker", "brewing_stand" ->
+                    new ContainerLayout("minecraft:gui/container/" + kind, 0, 176, 166, -1);
+            case "crafting_table" -> new ContainerLayout("minecraft:gui/container/crafting_table", 0, 176, 166, 29);
+            case "anvil" -> new ContainerLayout("minecraft:gui/container/anvil", 0, 176, 166, 60);
+            default -> throw new IOException("unsupported_container: " + kind);
+        };
+    }
+
+    /**
+     * Content coordinate of one menu slot, in the order the vanilla menus declare them: the
+     * container's own slots first, then the 27 storage rows and the 9 hotbar slots of the player.
+     * Returns null for slots the screen does not have.
+     */
+    private static int[] containerSlot(String kind, int index, int rows) {
+        if (index < 0) {
             return null;
         }
-        return new int[]{7 + (playerIndex % 9) * 18, 84 + (playerIndex / 9) * 18};
+        return switch (kind) {
+            case "inventory", "enderchest" -> index < rows * 9
+                    ? new int[]{8 + (index % 9) * 18, 18 + (index / 9) * 18}
+                    : playerSlot(index - rows * 9, 8, 31 + rows * 18);
+            case "hopper" -> index < 5 ? new int[]{44 + index * 18, 20} : playerSlot(index - 5, 8, 51);
+            case "furnace", "blast_furnace", "smoker" -> index < 3 ? FURNACE_SLOTS[index] : playerSlot(index - 3, 8, 84);
+            case "crafting_table" -> index < 9
+                    ? new int[]{30 + (index % 3) * 18, 17 + (index / 3) * 18}
+                    : index == 9 ? new int[]{124, 35} : playerSlot(index - 10, 8, 84);
+            case "anvil" -> index < 3 ? ANVIL_SLOTS[index] : playerSlot(index - 3, 8, 84);
+            case "brewing_stand" -> index < 5 ? BREWING_SLOTS[index] : playerSlot(index - 5, 8, 84);
+            default -> null;
+        };
+    }
+
+    /**
+     * One slot of the vanilla player inventory block: 27 storage slots in three rows of nine plus the
+     * hotbar nine rows further down, at the offsets ContainerMenu and InventoryMenu use.
+     */
+    private static int[] playerSlot(int index, int x, int y) {
+        if (index < 0 || index >= 36) {
+            return null;
+        }
+        return index < 27
+                ? new int[]{x + (index % 9) * 18, y + (index / 9) * 18}
+                : new int[]{x + (index - 27) * 18, y + PLAYER_INVENTORY_STRIDE};
+    }
+
+    /** Returns the native canvas, or the requested size with an exact nearest neighbour scale. */
+    private BufferedImage resize(BufferedImage canvas, int requestedWidth, int requestedHeight) {
+        int width = requestedWidth > 0 ? requestedWidth : canvas.getWidth();
+        int height = requestedHeight > 0 ? requestedHeight : canvas.getHeight();
+        if (width == canvas.getWidth() && height == canvas.getHeight()) {
+            return canvas;
+        }
+        BufferedImage output = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        drawScaled(output, canvas, 0, 0, width, height);
+        return output;
     }
 
     private BufferedImage renderAchievement(Map<String, Object> request, int requestedWidth, int requestedHeight) throws IOException {
@@ -1491,11 +1469,15 @@ final class Renderer {
         String suffix = completed ? "obtained" : "unobtained";
         BufferedImage frameImage = resources.texture("minecraft:gui/sprites/advancements/" + frame + "_frame_" + suffix);
         drawScaled(nativeCanvas, frameImage, 4, 3, 26, 26);
-        drawBitmapText(nativeCanvas, title, 34, 6, completed ? 0xFFFF55 : 0xFFFFFF, 122);
+        // AdvancementToast draws the title and the wrapped description at x 30, rows 7 and 18, and
+        // the whole 160x32 toast is scaled up by the requested output size.
+        drawText(nativeCanvas, 30, 7, title, completed ? 0xFFFF55 : 0xFFFFFF);
         String description = Json.string(achievement, "description", "");
         if (!description.isBlank()) {
-            List<String> lines = wrapText(description, 15);
-            drawBitmapText(nativeCanvas, lines.get(0), 34, 18, 0xFFFFFF, 122);
+            List<String> lines = wrapText(description, 20);
+            if (!lines.isEmpty()) {
+                drawText(nativeCanvas, 30, 18, lines.get(0), 0xFFFFFF);
+            }
         }
         int outputWidth = requestedWidth > 0 ? requestedWidth : 480;
         int outputHeight = requestedHeight > 0 ? requestedHeight : 96;
@@ -1535,10 +1517,10 @@ final class Renderer {
         }
         String dimension = Json.string(map, "dimension", "");
         if (!dimension.isBlank()) {
-            drawBitmapText(canvas, 3, 3, dimension, 0xFFFFFFFF, width - 6);
+            drawText(canvas, MAP_LABEL_X, MAP_LABEL_Y, dimension, 0xFFFFFF);
         }
         if (Json.bool(map, "locked", false)) {
-            drawBitmapText(canvas, 3, Math.max(3, height - 16), "LOCKED", 0xFFFFFFFF, width - 6);
+            drawText(canvas, MAP_LABEL_X, height - MAP_LABEL_BOTTOM, "LOCKED", 0xFFFFFF);
         }
         return canvas;
     }
@@ -1589,7 +1571,7 @@ final class Renderer {
         graphics.dispose();
         String name = Json.string(marker, "name", "");
         if (!name.isBlank()) {
-            drawBitmapText(canvas, (int) Math.round(centerX - size / 2.0), (int) Math.round(centerY + size / 2.0), name, 0xFFFFFFFF, Math.max(8, canvas.getWidth() - (int) Math.round(centerX)));
+            drawText(canvas, (int) Math.round(centerX - size / 2.0), (int) Math.round(centerY + size / 2.0), name, 0xFFFFFF);
         }
     }
 
@@ -1664,13 +1646,14 @@ final class Renderer {
         if (columns < 1 || columns > 8) {
             throw new IOException("playerlist columns exceed 8");
         }
-        // Vanilla tab list geometry (9 px rows, 8 px faces, 10x8 ping icons) at twice the size.
+        // Vanilla tab list geometry (9 px rows, 8 px faces, 10x8 ping icons) at twice the size, so
+        // the font cell scales with the same unit and the rows stay readable.
         int unit = 2;
         int rowHeight = 9 * unit;
         int avatarSize = 8 * unit;
         int pingWidth = 10 * unit;
         int pingHeight = 8 * unit;
-        int textSize = 8 * unit;
+        int textRow = rowHeight - avatarSize;
         List<Map<String, Object>> entries = new ArrayList<>();
         int maxText = 0;
         for (Object value : players) {
@@ -1679,7 +1662,7 @@ final class Renderer {
             }
             Map<String, Object> entry = castMap(raw);
             entries.add(entry);
-            maxText = Math.max(maxText, textWidth(playerLabel(entry), textSize));
+            maxText = Math.max(maxText, textWidth(playerLabel(entry), unit));
         }
         int rowsPerColumn = Math.max(1, (entries.size() + columns - 1) / columns);
         int rowWidth = avatarSize + unit + maxText + 2 * unit + pingWidth;
@@ -1689,13 +1672,7 @@ final class Renderer {
         List<String> footerLines = splitLines(Json.string(list, "footer", ""));
         int headerHeight = headerLines.size() * rowHeight;
         int footerHeight = footerLines.size() * rowHeight;
-        int widestText = 0;
-        for (String line : headerLines) {
-            widestText = Math.max(widestText, textWidth(line, textSize));
-        }
-        for (String line : footerLines) {
-            widestText = Math.max(widestText, textWidth(line, textSize));
-        }
+        int widestText = Math.max(widestLine(headerLines, unit), widestLine(footerLines, unit));
         int width = Math.max(Math.max(requestedWidth, panelWidth * columns), widestText + 4 * unit);
         int height = requestedHeight > 0 ? requestedHeight : panelHeight + headerHeight + footerHeight + 2 * unit;
         BufferedImage canvas = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
@@ -1705,26 +1682,34 @@ final class Renderer {
         graphics.setColor(new Color(0, 0, 0, 128));
         graphics.fillRect(panelLeft, panelTop, panelWidth * columns, panelHeight);
         graphics.dispose();
-        int lineTop = panelTop - headerHeight;
-        for (String line : headerLines) {
-            drawBitmapText(canvas, (width - textWidth(line, textSize)) / 2, lineTop + (rowHeight - textSize) / 2, line, 0xFFFFFF, width, textSize, true);
-            lineTop += rowHeight;
-        }
+        // The header sits directly above the panel and the footer directly below it.
+        drawCenteredLines(canvas, headerLines, width, panelTop - headerHeight, rowHeight, unit, textRow);
         for (int index = 0; index < entries.size(); index++) {
             Map<String, Object> entry = entries.get(index);
             int x = panelLeft + (index / rowsPerColumn) * panelWidth + unit;
             int rowTop = panelTop + unit + (index % rowsPerColumn) * rowHeight;
-            drawPlayerAvatar(canvas, entry, x, rowTop + (rowHeight - avatarSize) / 2, avatarSize);
-            drawBitmapText(canvas, x + avatarSize + unit, rowTop + (rowHeight - textSize) / 2, playerLabel(entry), 0xFFFFFF,
-                    Math.max(unit, rowWidth - avatarSize - pingWidth - 3 * unit), textSize, true);
+            drawPlayerAvatar(canvas, entry, x, rowTop + textRow / 2, avatarSize);
+            drawText(canvas, x + avatarSize + unit, rowTop + textRow / 2, playerLabel(entry), 0xFFFFFF, unit, true);
             drawPingIcon(canvas, Json.integer(entry, "ping", 0), x + rowWidth - pingWidth, rowTop + (rowHeight - pingHeight) / 2, pingWidth, pingHeight);
         }
-        lineTop = panelTop + panelHeight;
-        for (String line : footerLines) {
-            drawBitmapText(canvas, (width - textWidth(line, textSize)) / 2, lineTop + (rowHeight - textSize) / 2, line, 0xFFFFFF, width, textSize, true);
-            lineTop += rowHeight;
-        }
+        drawCenteredLines(canvas, footerLines, width, panelTop + panelHeight, rowHeight, unit, textRow);
         return canvas;
+    }
+
+    /** Draws the centred header or footer rows of the tab list, one screen row apart. */
+    private void drawCenteredLines(BufferedImage canvas, List<String> lines, int width, int top, int rowHeight, int scale, int textRow) throws IOException {
+        for (String line : lines) {
+            drawText(canvas, (width - textWidth(line, scale)) / 2, top + textRow / 2, line, 0xFFFFFF, scale, true);
+            top += rowHeight;
+        }
+    }
+
+    private int widestLine(List<String> lines, int scale) throws IOException {
+        int widest = 0;
+        for (String line : lines) {
+            widest = Math.max(widest, textWidth(line, scale));
+        }
+        return widest;
     }
 
     private static String playerLabel(Map<String, Object> entry) {
@@ -1771,10 +1756,6 @@ final class Renderer {
         drawScaled(destination, icon, x, y, width, height);
     }
 
-    private void drawBitmapText(BufferedImage destination, String text, int x, int y, int color, int maxWidth) throws IOException {
-        drawBitmapText(destination, x, y, text, color, maxWidth);
-    }
-
     /**
      * Vanilla InventoryScreen geometry: the 176x166 container texture is blitted one to one and the
      * player is rendered into the preview viewport that
@@ -1809,56 +1790,72 @@ final class Renderer {
 
         String title = Json.string(inventory, "title", "");
         if (!title.isBlank()) {
-            drawBitmapText(canvas, 8, 6, title, 0x404040, 160);
+            // InventoryScreen overrides titleLabelX to 97 so the title clears the recipe book grid.
+            drawText(canvas, 97, LABEL_Y, title, LABEL_COLOR);
         }
-        Object slotsValue = inventory.get("slots");
-        if (slotsValue instanceof List<?> slots) {
-            for (Object value : slots) {
-                if (!(value instanceof Map<?, ?> slotValue)) {
-                    continue;
-                }
-                Map<String, Object> slot = castMap(slotValue);
-                int index = Json.integer(slot, "slot", -1);
-                Map<String, Object> item = slot.get("item") instanceof Map<?, ?> itemValue ? castMap(itemValue) : null;
-                if (index < 0 || index >= 36 || item == null || Json.bool(slot, "empty", false) || Json.string(item, "id", "").isBlank()) {
-                    continue;
-                }
-                drawInventoryIcon(canvas, item, INVENTORY_SLOT_X + (index % 9) * 18, INVENTORY_BACKPACK_Y + (index / 9) * 18);
-            }
-        }
+        renderPlayerInventorySlots(canvas, inventory.get("slots"), INVENTORY_BACKPACK_Y);
         Object armorValue = inventory.get("armor");
         if (armorValue instanceof List<?> armor) {
             for (int index = 0; index < armor.size() && index < 4; index++) {
-                if (armor.get(index) instanceof Map<?, ?> slotValue) {
-                    Map<String, Object> slot = castMap(slotValue);
-                    Map<String, Object> item = slot.get("item") instanceof Map<?, ?> itemValue ? castMap(itemValue) : slot;
-                    if (!Json.bool(slot, "empty", false) && !Json.string(item, "id", "").isBlank()) {
-                        drawInventoryIcon(canvas, item, INVENTORY_SLOT_X, INVENTORY_ARMOR_Y + index * 18);
-                    }
+                Map<String, Object> item = slotItem(armor.get(index));
+                if (item != null) {
+                    drawSlotItem(canvas, item, 8, INVENTORY_ARMOR_Y + index * 18);
                 }
             }
         }
-        if (inventory.get("offhand") instanceof Map<?, ?> value) {
-            drawInventoryIcon(canvas, castMap(value), INVENTORY_OFFHAND_X, INVENTORY_OFFHAND_Y);
+        Map<String, Object> offhand = slotItem(inventory.get("offhand"));
+        if (offhand != null) {
+            drawSlotItem(canvas, offhand, INVENTORY_OFFHAND_X, INVENTORY_OFFHAND_Y);
         }
-
-        int outputWidth = requestedWidth > 0 ? requestedWidth : INVENTORY_WIDTH;
-        int outputHeight = requestedHeight > 0 ? requestedHeight : INVENTORY_HEIGHT;
-        if (outputWidth == INVENTORY_WIDTH && outputHeight == INVENTORY_HEIGHT) {
-            return canvas;
-        }
-        BufferedImage output = new BufferedImage(outputWidth, outputHeight, BufferedImage.TYPE_INT_ARGB);
-        drawScaled(output, canvas, 0, 0, outputWidth, outputHeight);
-        return output;
+        return resize(canvas, requestedWidth, requestedHeight);
     }
 
-    private void drawInventoryIcon(BufferedImage destination, Map<String, Object> item, int x, int y) throws IOException {
-        BufferedImage icon = renderItem(item, 16);
-        drawScaled(destination, icon, x + 1, y + 1, 16, 16);
+    /** The 27 storage slots plus the 9 hotbar slots of the player inventory at their menu positions. */
+    private void renderPlayerInventorySlots(BufferedImage canvas, Object slotsValue, int y) throws IOException {
+        if (!(slotsValue instanceof List<?> slots)) {
+            return;
+        }
+        for (Object slotValue : slots) {
+            if (!(slotValue instanceof Map<?, ?> value)) {
+                continue;
+            }
+            Map<String, Object> slot = castMap(value);
+            Map<String, Object> item = slotItem(slot);
+            if (item == null) {
+                continue;
+            }
+            int[] position = playerSlot(Json.integer(slot, "slot", -1), 8, y);
+            if (position != null) {
+                drawSlotItem(canvas, item, position[0], position[1]);
+            }
+        }
+    }
+
+    /**
+     * Vanilla {@code GuiGraphics#renderItemDecorations}: the 16 px icon is blitted at the slot content
+     * position and the stack size sits in the lower right corner of the slot, right aligned two
+     * pixels above its border and always drawn with a shadow.
+     */
+    private void drawSlotItem(BufferedImage destination, Map<String, Object> item, int x, int y) throws IOException {
+        drawScaled(destination, renderItem(item, 16), x, y, 16, 16);
         int count = Json.integer(item, "count", 0);
         if (count > 1) {
-            drawBitmapText(destination, x + 9, y + 9, Integer.toString(count), 0xFFFFFF, 8);
+            String text = Integer.toString(count);
+            drawText(destination, x + 17 - textWidth(text, 1), y + 9, text, 0xFFFFFF, 1, true);
         }
+    }
+
+    /** The item of one request slot, or null when the slot is absent, empty or unnamed. */
+    private Map<String, Object> slotItem(Object slotValue) {
+        if (!(slotValue instanceof Map<?, ?> value)) {
+            return null;
+        }
+        Map<String, Object> slot = castMap(value);
+        Map<String, Object> item = slot.get("item") instanceof Map<?, ?> itemValue ? castMap(itemValue) : slot;
+        if (Json.bool(slot, "empty", false) || Json.string(item, "id", "").isBlank()) {
+            return null;
+        }
+        return item;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1876,13 +1873,22 @@ final class Renderer {
     private static final double[] ENTITY_LIGHT_0 = normalize(new double[]{-0.2, 1.0, -0.7});
     private static final double[] ENTITY_LIGHT_1 = normalize(new double[]{0.2, -1.0, 0.7});
 
+    /**
+     * Vanilla bitmap font metrics. Size 12 of the bundled Minecraft font reproduces the vanilla
+     * 8 px cell exactly — digits and capitals are five pixels wide with an advance of six, a space
+     * is four — and every glyph is seven pixels tall above its baseline, so both numbers scale
+     * with the GUI scale of a render.
+     */
+    private static final int FONT_SIZE = 12;
+    private static final int FONT_ASCENT = 7;
+    private static final String FONT_REGULAR = "MinecraftDefault-Regular.ttf";
+    private static final String FONT_UNIFORM = "MinecraftDefaultUniformBMP-Regular.ttf";
+
     /** Vanilla tooltip geometry: 12 px of background around the text block, 10 px per text line. */
     private static final int DEFAULT_TOOLTIP_WIDTH = 360;
     private static final int TOOLTIP_PADDING = 12;
     private static final int TOOLTIP_LINE_HEIGHT = 10;
     private static final int TOOLTIP_TITLE_GAP = 2;
-    private static final int TOOLTIP_TEXT_BASELINE = 7;
-    private static final int TOOLTIP_FONT_SIZE = 12;
     private static final int SPACE_WIDTH = 4;
     private static final String TOOLTIP_BACKGROUND_SPRITE = "minecraft:gui/sprites/tooltip/background";
     private static final String TOOLTIP_FRAME_SPRITE = "minecraft:gui/sprites/tooltip/frame";
@@ -1893,12 +1899,36 @@ final class Renderer {
             0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF
     };
 
-    /** Vanilla InventoryScreen size and slot geometry (AbstractContainerScreen screen coordinates). */
+    /**
+     * Vanilla container screen geometry in AbstractContainerScreen coordinates. Every screen is
+     * 176 px wide; the generic_54 chest background adds 17 px of frame plus one 18 px row per
+     * container row on top of the shared 96 px player inventory band.
+     */
+    private static final int CONTAINER_WIDTH = 176;
+    private static final int CONTAINER_TOP = 17;
+    private static final int CONTAINER_BOTTOM = 96;
+    private static final int CONTAINER_BOTTOM_SOURCE = 126;
+    /** AbstractContainerScreen draws every title on row 6 in the 0x404040 label colour. */
+    private static final int LABEL_Y = 6;
+    private static final int LABEL_COLOR = 0x404040;
+    /** The hotbar sits 58 px below the first storage row of every vanilla player inventory. */
+    private static final int PLAYER_INVENTORY_STRIDE = 58;
+
+    /** Map labels are inset so the text clears the border of the parchment background. */
+    private static final int MAP_LABEL_X = 3;
+    private static final int MAP_LABEL_Y = 8;
+    private static final int MAP_LABEL_BOTTOM = 11;
+
+    /** Vanilla menu slot coordinates of the screens with a fixed layout, in addSlot order. */
+    private static final int[][] FURNACE_SLOTS = {{56, 17}, {56, 53}, {116, 35}};
+    private static final int[][] ANVIL_SLOTS = {{27, 47}, {76, 47}, {134, 47}};
+    private static final int[][] BREWING_SLOTS = {{56, 51}, {79, 58}, {102, 51}, {79, 17}, {17, 17}};
+
+    /** Vanilla InventoryScreen size and slot geometry (InventoryMenu content coordinates). */
     private static final int INVENTORY_WIDTH = 176;
     private static final int INVENTORY_HEIGHT = 166;
-    private static final int INVENTORY_SLOT_X = 8;
-    private static final int INVENTORY_ARMOR_Y = 8;
     private static final int INVENTORY_BACKPACK_Y = 84;
+    private static final int INVENTORY_ARMOR_Y = 8;
     private static final int INVENTORY_OFFHAND_X = 77;
     private static final int INVENTORY_OFFHAND_Y = 62;
     /**
@@ -2695,10 +2725,11 @@ final class Renderer {
     /**
      * Builds the player model, the equipment layers and the held items as one quad list.
      *
-     * <p>When {@code fit} is set the scene is scaled so the whole player fits the canvas, which is
-     * what the {@code skin} operation does. The interactive inventory instead fixes the viewport to
-     * the vanilla InventoryScreen values, so the held item must not influence the model scale either
-     * way: the scene is always fitted before the held item quads are appended.</p>
+     * <p>When {@code fit} is set — the {@code player} and {@code skin} operations — the scene is
+     * scaled so everything that is drawn, held items included, fits the canvas. The interactive
+     * inventory instead fixes the viewport to the vanilla InventoryScreen values and passes
+     * {@code fit} as false, so there the held item can never influence the model scale either
+     * way.</p>
      */
     private List<Quad> buildPlayerQuads(Map<String, Object> request, Scene scene, int width, int height, boolean fit) throws IOException {
         Map<String, Object> skin = Json.object(request.get("skin"), "skin");
@@ -2713,10 +2744,10 @@ final class Renderer {
         }
         addPlayerModel(quads, texture, slim, outer);
         addEquipmentLayers(quads, equipmentValue, slim, cape);
+        addHeldItems(quads, equipmentValue, slim);
         if (fit) {
             scene.fit(quads, width, height);
         }
-        addHeldItems(quads, equipmentValue, slim);
         return quads;
     }
 

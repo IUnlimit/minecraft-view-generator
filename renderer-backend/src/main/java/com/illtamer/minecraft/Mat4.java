@@ -85,14 +85,6 @@ final class Mat4 {
         return rotationX(x).multiply(rotationY(y)).multiply(rotationZ(z));
     }
 
-    /** The project coordinate change from the vanilla model space: {@code (x, y, z) -> (x, 24 - y, z)}. */
-    static Mat4 projectSpace() {
-        Mat4 result = identity();
-        result.value[5] = -1;
-        result.value[7] = 24;
-        return result;
-    }
-
     Mat4 multiply(Mat4 other) {
         double[] result = new double[16];
         for (int row = 0; row < 4; row++) {

@@ -24,10 +24,12 @@ public final class RendererSmokeTest {
         testArmourLayers(renderer, root);
         testMap(renderer, root);
         testPlayerList(renderer, root);
+        testContainers(renderer, root);
         testPlayerInventory(renderer, root);
+        testAchievement(renderer, root);
         testTooltip(renderer, root);
         testHeldItems(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/inventory/tooltip/hand paths passed");
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/achievement/tooltip/hand paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -166,6 +168,9 @@ public final class RendererSmokeTest {
 
     /** Panel colour of the fixture container texture; it must never match one of the skin colours. */
     private static final int PANEL = 0xFF203040;
+    /** Fixture chest background: the slot band above and the player inventory band below row 126. */
+    private static final int CHEST_TOP = 0xFF304020;
+    private static final int CHEST_BOTTOM = 0xFF402030;
     private static final int TOOLTIP_FILL = 0xFF102030;
     private static final int TOOLTIP_FRAME = 0xFFB030FF;
     private static final int SWORD = 0xFFE01080;
@@ -174,6 +179,97 @@ public final class RendererSmokeTest {
     private static final int PREVIEW_TOP = 8;
     private static final int PREVIEW_RIGHT = 75;
     private static final int PREVIEW_BOTTOM = 78;
+
+    private static void testContainers(Renderer renderer, Path root) throws Exception {
+        // ContainerScreen blits two bands of generic_54: the slot band grows with the row count while
+        // the 96 px player inventory band below it is always the same slice of the source texture.
+        BufferedImage chest = renderContainer(renderer, root, "inventory", Map.of("title", "Chest", "rows", 3));
+        require(chest.getWidth() == 176 && chest.getHeight() == 167, "chest dimensions: " + chest.getWidth() + "x" + chest.getHeight());
+        require(sameColor(chest.getRGB(0, 0), CHEST_TOP), "chest slot band is not blitted from the texture top");
+        require(sameColor(chest.getRGB(0, 70), CHEST_TOP), "chest slot band is too short");
+        require(sameColor(chest.getRGB(0, 71), CHEST_BOTTOM), "chest player band does not start at rows * 18 + 17");
+        require(sameColor(chest.getRGB(0, 166), CHEST_BOTTOM), "chest player band does not reach the canvas bottom");
+        // AbstractContainerScreen draws every title at x 8 on row 6 with a seven pixel glyph box.
+        int[] title = exactBounds(chest, 0x404040);
+        require(title[0] == 8 && title[1] == 6, "container title is not at the vanilla label position: " + title[0] + "," + title[1]);
+        require(title[3] == 12, "container title glyph box is not seven pixels tall: " + title[3]);
+        BufferedImage sixRows = renderContainer(renderer, root, "inventory", Map.of("rows", 6));
+        require(sixRows.getHeight() == 6 * 18 + 113, "six row chest dimensions: " + sixRows.getHeight());
+
+        // Menu slot coordinates: slot 0 of a chest sits at (8, 18) and the fixture diamond only has
+        // opaque pixels inside (2, 2)..(13, 13) of its 16 px icon.
+        BufferedImage empty = renderContainer(renderer, root, "inventory", Map.of("rows", 3));
+        BufferedImage one = renderContainer(renderer, root, "inventory", Map.of("rows", 3,
+                "slots", List.of(Map.of("slot", 0, "item", Map.of("id", "minecraft:diamond")))));
+        int[] icon = diffBounds(empty, one);
+        require(icon[0] == 10 && icon[1] == 20 && icon[2] == 21 && icon[3] == 31,
+                "slot 0 icon is not at the vanilla slot coordinate: " + java.util.Arrays.toString(icon));
+        // The player inventory block starts 13 px below the slot band and its hotbar 58 px below that,
+        // so with 27 container slots the first hotbar slot is menu slot 54 at (8, 143).
+        BufferedImage hotbar = renderContainer(renderer, root, "inventory", Map.of("rows", 3,
+                "slots", List.of(Map.of("slot", 54, "item", Map.of("id", "minecraft:diamond")))));
+        int[] firstHotbar = diffBounds(empty, hotbar);
+        require(firstHotbar[0] == 10 && firstHotbar[1] == 145,
+                "hotbar slot is not at the vanilla player inventory coordinate: " + java.util.Arrays.toString(firstHotbar));
+
+        // renderItemDecorations puts the stack size in the lower right corner of the slot, right
+        // aligned two pixels above the slot border; the shadow extends it by one more pixel.
+        BufferedImage stacked = renderContainer(renderer, root, "inventory", Map.of("rows", 3,
+                "slots", List.of(Map.of("slot", 0, "item", Map.of("id", "minecraft:diamond", "count", 64)))));
+        int[] count = diffBounds(one, stacked);
+        require(count[0] == 13 && count[1] == 27 && count[2] == 24 && count[3] == 34,
+                "stack size is not at the vanilla decoration position: " + java.util.Arrays.toString(count));
+
+        // The ender chest is the very same screen: same texture, same colours, no tint of its own.
+        BufferedImage ender = renderContainer(renderer, root, "enderchest", Map.of("rows", 3));
+        require(ender.getWidth() == chest.getWidth() && ender.getHeight() == chest.getHeight(), "ender chest dimensions");
+        require(equalPixels(empty, ender), "ender chest does not match a plain three row container");
+
+        // HopperScreen is 133 px tall and its five slots start at x 44 on row 20.
+        BufferedImage hopper = renderContainer(renderer, root, "item_container", Map.of("container", "hopper"));
+        require(hopper.getWidth() == 176 && hopper.getHeight() == 133, "hopper dimensions: " + hopper.getWidth() + "x" + hopper.getHeight());
+        // Every other screen is a single 176x166 blit of its own texture.
+        for (String kind : List.of("furnace", "blast_furnace", "smoker", "crafting_table", "anvil", "brewing_stand")) {
+            BufferedImage screen = renderContainer(renderer, root, "item_container", Map.of("container", kind));
+            require(screen.getWidth() == 176 && screen.getHeight() == 166, kind + " dimensions: " + screen.getWidth() + "x" + screen.getHeight());
+        }
+        // Fixed menu layouts, straight from the decompiled screens: the result slots of the furnace,
+        // anvil and crafting table are the ones the previous hand tuned table got wrong.
+        requireSlot(renderer, root, "hopper", 0, 44, 20);
+        requireSlot(renderer, root, "hopper", 5, 8, 51);
+        requireSlot(renderer, root, "furnace", 1, 56, 53);
+        requireSlot(renderer, root, "furnace", 2, 116, 35);
+        requireSlot(renderer, root, "furnace", 3, 8, 84);
+        requireSlot(renderer, root, "crafting_table", 0, 30, 17);
+        requireSlot(renderer, root, "crafting_table", 9, 124, 35);
+        requireSlot(renderer, root, "anvil", 2, 134, 47);
+        requireSlot(renderer, root, "brewing_stand", 3, 79, 17);
+        requireSlot(renderer, root, "brewing_stand", 4, 17, 17);
+        Map<String, Object> unsupported = new LinkedHashMap<>();
+        unsupported.put("operation", "item_container");
+        unsupported.put("resourceRoot", root.toString());
+        unsupported.put("container", Map.of("container", "not_a_container"));
+        requireFails(renderer, unsupported, "unsupported_container");
+    }
+
+    /** Asserts the menu slot coordinate by diffing the icon the renderer blits into the slot. */
+    private static void requireSlot(Renderer renderer, Path root, String kind, int slot, int x, int y) throws Exception {
+        BufferedImage empty = renderContainer(renderer, root, "item_container", Map.of("container", kind));
+        BufferedImage filled = renderContainer(renderer, root, "item_container", Map.of("container", kind,
+                "slots", List.of(Map.of("slot", slot, "item", Map.of("id", "minecraft:diamond")))));
+        int[] bounds = diffBounds(empty, filled);
+        // The fixture diamond is opaque inside (2, 2)..(13, 13) of its 16 px icon.
+        require(bounds[0] == x + 2 && bounds[1] == y + 2,
+                kind + " slot " + slot + " is not at the vanilla menu coordinate: " + java.util.Arrays.toString(bounds));
+    }
+
+    private static BufferedImage renderContainer(Renderer renderer, Path root, String operation, Map<String, Object> container) throws Exception {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", operation);
+        request.put("resourceRoot", root.toString());
+        request.put("container", container);
+        return renderer.render(request);
+    }
 
     private static void testPlayerInventory(Renderer renderer, Path root) throws Exception {
         Map<String, Object> request = new LinkedHashMap<>();
@@ -195,13 +291,51 @@ public final class RendererSmokeTest {
         // 64 px; the exact value depends on which texture pixels are opaque.
         require(span >= 60 && span <= 68, "preview model vertical span is not the vanilla size: " + span
                 + " bounds=" + bounds[0] + "," + bounds[1] + ".." + bounds[2] + "," + bounds[3]);
-        // The panel keeps the vanilla slot geometry, so a slot icon is drawn inside the panel grid.
+        // InventoryScreen overrides titleLabelX to 97 so the title clears the recipe book grid.
+        Map<String, Object> titled = new LinkedHashMap<>(request);
+        titled.put("playerInventory", Map.of(
+                "skin", Map.of("texture", PlayerSkinFixture.png64()),
+                "title", "Chest"));
+        int[] title = exactBounds(renderer.render(titled), 0x404040);
+        require(title[0] == 97 && title[1] == 6, "player inventory title is not at the vanilla label position: " + title[0] + "," + title[1]);
+        require(title[3] == 12, "player inventory title glyph box is not seven pixels tall: " + title[3]);
+
+        // InventoryMenu slot coordinates: slot 0 sits at (8, 84) and the hotbar starts at (8, 142).
         Map<String, Object> occupied = new LinkedHashMap<>(request);
         occupied.put("playerInventory", Map.of(
                 "skin", Map.of("texture", PlayerSkinFixture.png64()),
                 "slots", List.of(Map.of("slot", 0, "item", Map.of("id", "minecraft:diamond")))));
         BufferedImage withItem = renderer.render(occupied);
         require(countExact(withItem, 0x50DCFF) > 0, "player inventory slot icon missing");
+        int[] backpack = diffBounds(image, withItem);
+        require(backpack[0] == 10 && backpack[1] == 86,
+                "backpack slot is not at the vanilla menu coordinate: " + java.util.Arrays.toString(backpack));
+        Map<String, Object> hotbarRequest = new LinkedHashMap<>(request);
+        hotbarRequest.put("playerInventory", Map.of(
+                "skin", Map.of("texture", PlayerSkinFixture.png64()),
+                "slots", List.of(Map.of("slot", 27, "item", Map.of("id", "minecraft:diamond")))));
+        int[] hotbar = diffBounds(image, renderer.render(hotbarRequest));
+        require(hotbar[0] == 10 && hotbar[1] == 144,
+                "hotbar slot is not at the vanilla InventoryMenu coordinate: " + java.util.Arrays.toString(hotbar));
+
+        // The stack size keeps the vanilla decoration position inside the slot.
+        Map<String, Object> stackedRequest = new LinkedHashMap<>(request);
+        stackedRequest.put("playerInventory", Map.of(
+                "skin", Map.of("texture", PlayerSkinFixture.png64()),
+                "slots", List.of(Map.of("slot", 0, "item", Map.of("id", "minecraft:diamond", "count", 64)))));
+        int[] count = diffBounds(withItem, renderer.render(stackedRequest));
+        require(count[0] == 13 && count[1] == 93 && count[2] == 24 && count[3] == 100,
+                "player inventory stack size is not at the vanilla decoration position: " + java.util.Arrays.toString(count));
+
+        // The armour column keeps the InventoryMenu coordinates (8, 8 + index * 18) and the offhand
+        // slot sits at (77, 62), which is the last slot of the vanilla inventory menu.
+        Map<String, Object> offhandRequest = new LinkedHashMap<>(request);
+        offhandRequest.put("playerInventory", Map.of(
+                "skin", Map.of("texture", PlayerSkinFixture.png64()),
+                "offhand", Map.of("id", "minecraft:diamond")));
+        BufferedImage withOffhand = renderer.render(offhandRequest);
+        require(diffCountIn(image, withOffhand, 77, 62, 93, 78) > 50, "offhand slot icon missing");
+        require(diffCountIn(image, withOffhand, 0, 0, 26, 84) == 0, "offhand icon is drawn outside its slot");
 
         // The held item hangs at hand height in front of the preview model, inside the vanilla
         // viewport, and it must not rescale that model: the preview viewport is fixed.
@@ -224,6 +358,24 @@ public final class RendererSmokeTest {
             require(Math.abs(previewBounds[index] - bounds[index]) <= 1,
                     "held item changed the vanilla preview bounds: " + java.util.Arrays.toString(previewBounds));
         }
+    }
+
+    private static void testAchievement(Renderer renderer, Path root) throws Exception {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", "achievement");
+        request.put("resourceRoot", root.toString());
+        request.put("achievement", Map.of(
+                "title", "Fixture", "description", "Done", "frame", "task", "completed", true,
+                "icon", Map.of("id", "minecraft:diamond")));
+        BufferedImage image = renderer.render(request);
+        require(image.getWidth() == 480 && image.getHeight() == 96, "achievement dimensions");
+        // AdvancementToast draws its texts at x 30 on rows 7 and 18 of the 160x32 toast, so the
+        // default 480x96 output puts the title at three times that position.
+        int[] title = exactBounds(image, 0xFFFF55);
+        require(title[0] >= 90 && title[0] <= 96, "achievement title is not at the vanilla column: " + title[0]);
+        require(title[1] >= 21 && title[1] <= 27, "achievement title is not on the vanilla row: " + title[1]);
+        int[] description = exactBounds(image, 0xFFFFFF);
+        require(description[1] >= 54 && description[1] <= 60, "achievement description is not on the vanilla row: " + description[1]);
     }
 
     private static void testTooltip(Renderer renderer, Path root) throws Exception {
@@ -297,13 +449,13 @@ public final class RendererSmokeTest {
                 "main hand item is not held at hand height: " + java.util.Arrays.toString(heldBounds));
 
         // The offhand runs through the mirrored display transform and lands in front of the torso
-        // too. Its item hangs beside the far arm in this three quarter view, so only part of the rod
+        // too. Its item hangs past the far arm in this three quarter view, so only part of the rod
         // overlaps the body, while a version rendered behind the back would be occluded instead.
         BufferedImage offhand = renderEquipment(renderer, root, Map.of("offhand", Map.of("id", "minecraft:diamond_sword")));
         int offhandSword = countExact(offhand, SWORD & 0xFFFFFF);
         require(offhandSword > 20, "offhand item is missing");
         int offhandOverBody = overModelPixels(none, offhand, SWORD & 0xFFFFFF, -1);
-        require(offhandOverBody * 4 >= offhandSword, "offhand item is not drawn in front of the torso: "
+        require(offhandOverBody * 3 >= offhandSword, "offhand item is not drawn in front of the torso: "
                 + offhandOverBody + "/" + offhandSword);
         int[] offhandBounds = exactBounds(offhand, SWORD & 0xFFFFFF);
         require(offhandBounds[0] > 0 && offhandBounds[2] < offhand.getWidth() - 1,
@@ -392,14 +544,28 @@ public final class RendererSmokeTest {
         return bounds;
     }
 
-    private static int[] extend(int[] bounds, int x, int y) {
-        if (bounds == null) {
+    private static int[] extend(int[] bounds, int x, int y) {        if (bounds == null) {
             return new int[]{x, y, x, y};
         }
         bounds[0] = Math.min(bounds[0], x);
         bounds[1] = Math.min(bounds[1], y);
         bounds[2] = Math.max(bounds[2], x);
         bounds[3] = Math.max(bounds[3], y);
+        return bounds;
+    }
+
+    /** Bounding box of every pixel that differs between two renders of the same size. */
+    private static int[] diffBounds(BufferedImage before, BufferedImage after) {
+        require(before.getWidth() == after.getWidth() && before.getHeight() == after.getHeight(), "diffed images differ in size");
+        int[] bounds = null;
+        for (int y = 0; y < before.getHeight(); y++) {
+            for (int x = 0; x < before.getWidth(); x++) {
+                if (before.getRGB(x, y) != after.getRGB(x, y)) {
+                    bounds = extend(bounds, x, y);
+                }
+            }
+        }
+        require(bounds != null, "the two images are identical");
         return bounds;
     }
 
@@ -425,6 +591,34 @@ public final class RendererSmokeTest {
         }
         return count;
     }
+
+    /** Counts the pixels that differ between two renders inside one rectangle. */
+    private static int diffCountIn(BufferedImage before, BufferedImage after, int x0, int y0, int x1, int y1) {
+        int count = 0;
+        for (int y = Math.max(0, y0); y < Math.min(before.getHeight(), y1); y++) {
+            for (int x = Math.max(0, x0); x < Math.min(before.getWidth(), x1); x++) {
+                if (before.getRGB(x, y) != after.getRGB(x, y)) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    private static boolean equalPixels(BufferedImage first, BufferedImage second) {
+        if (first.getWidth() != second.getWidth() || first.getHeight() != second.getHeight()) {
+            return false;
+        }
+        for (int y = 0; y < first.getHeight(); y++) {
+            for (int x = 0; x < first.getWidth(); x++) {
+                if (first.getRGB(x, y) != second.getRGB(x, y)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     /** Counts pixels with exactly this RGB value and a fully opaque alpha channel. */
     private static int countExact(BufferedImage image, int rgb) {
         int count = 0;
