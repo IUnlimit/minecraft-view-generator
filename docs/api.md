@@ -40,7 +40,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 | type | 真实 Java 后端能力 |
 | --- | --- |
 | `item` | 1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、select/condition/range dispatch、八类 `minecraft:special` 几何（旗帜 / 床 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟）与箱子族平面贴图、图案与染色组件、damage/glint、资源缺失时画原版缺失模型 |
-| `tooltip` | 原版九宫格背景（`gui/sprites/tooltip/background`，border 从 `.mcmeta` 读取）与 advanced 边框（`tooltip/frame`）、`§` 颜色与修饰符、原版行生成顺序（悬停名 → advanced id → lore → 附魔 → 属性修饰符 → 单值组件 → 组件/NBT 计数）、按真实文本宽度折行、`icon` 开关 |
+| `tooltip` | 原版九宫格背景（`gui/sprites/tooltip/background`，border 从 `.mcmeta` 读取）与 advanced 边框（`tooltip/frame`）、`§` 与 `&` 颜色/修饰符前缀、原版行生成顺序（悬停名 → advanced id → lore → 附魔 → 属性修饰符 → 单值组件 → 组件/NBT 计数）、按真实文本宽度折行、`icon` 开关 |
 | `inventory` | 官方 `generic_54` chest GUI，1–6 行九列、标题、主容器槽、玩家区槽位、堆叠数量 |
 | `item_container` | hopper（176×133）、furnace/blast_furnace/smoker、crafting_table、anvil、brewing_stand（176×166）；槽位取自各自原版菜单；未知容器返回 `unsupported_container` |
 | `enderchest` | 固定 3×9，与普通三行箱子完全一致（同一 `generic_54` 贴图、配色与槽位，无额外叠加） |
@@ -195,6 +195,12 @@ request = {
 print(json.dumps(request, ensure_ascii=False))
 PY
 ```
+
+## 颜色码（`§` 与 `&`）
+
+所有文本入口（容器标题、`playerInventory` 标题、playerlist 的 header/footer 与玩家名、`map` 的 dimension 与标记名、`achievement` 的标题与描述、tooltip 的每一行）都按同一套原版 legacy 格式解析：`0-9a-f` 十六色（原版调色板）、`l` 粗体、`o` 斜体、`n` 下划线、`m` 删除线、`k` 混淆（确定性渲染，不做随机化）、`r` 重置。原版只认 `§`（U+00A7）；`&` 是本服务的兼容扩展，两者都作为前缀接受，**只有后跟合法码字符时才算格式码**，因此字面量 `&` 与 `A& B` 原样保留（消费方不必再自行把 `&` 转成 `§`）。
+
+未带码的文本使用该入口在游戏中用的颜色（容器标题 `0x404040`、tooltip/playerlist/achievement/map 为白色、`achievement` 完成态标题为 `0xFFFF55`），`§r` 也回到这个颜色。格式码不计入宽度：容器标题的居中、playerlist 的列宽与 header 居中、tooltip 的折行都用去码后的宽度。全部文本均带原版字形盒几何（行顶到底部 7px × 缩放），容器标题与地图标签按原版不带阴影，tooltip 与 playerlist 带阴影。
 
 ## special 物品模型
 

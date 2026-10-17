@@ -1600,6 +1600,7 @@ final class Renderer {
         return lines;
     }
 
+    /** Width of a parsed line in font pixels, with the vanilla one pixel bold offset per glyph. */
     private int styledWidth(List<TextRun> line) throws IOException {
         int width = 0;
         for (TextRun run : line) {
@@ -1611,23 +1612,44 @@ final class Renderer {
         return width;
     }
 
+    /** Width of a text that may carry {@code §}/{@code &} formatting codes, at the requested scale. */
+    private int styledWidth(String text, int scale) throws IOException {
+        int width = 0;
+        for (TextRun run : parseStyledText(text)) {
+            width += textWidth(run.text(), scale);
+            if (run.bold()) {
+                width += scale * run.text().codePointCount(0, run.text().length());
+            }
+        }
+        return width;
+    }
+
     private int glyphAdvance(String glyph) throws IOException {
         return textWidth(glyph, 1);
     }
 
     /**
-     * Draws one tooltip line at the vanilla 8 px font cell: the glyphs start at {@code lineTop} and
-     * the baseline sits seven pixels below it, with a one pixel shadow copy behind every glyph.
+     * Draws one tooltip line at the vanilla 8 px font cell.
      */
     private void drawStyledLine(BufferedImage destination, int x, int lineTop, List<TextRun> line) throws IOException {
-        Font regular = font(FONT_REGULAR, 1);
-        Font uniform = font(FONT_UNIFORM, 1);
+        drawStyledLine(destination, x, lineTop, line, 1, true);
+    }
+
+    /**
+     * Draws one styled line: the glyphs start at {@code lineTop}, the baseline sits seven pixels per
+     * scale unit below it, and when {@code shadow} is set a one unit offset copy of every glyph is
+     * painted behind it. Vanilla container titles and map labels pass {@code false} here, tooltips
+     * always pass {@code true}.
+     */
+    private void drawStyledLine(BufferedImage destination, int x, int lineTop, List<TextRun> line, int scale, boolean shadow) throws IOException {
+        Font regular = font(FONT_REGULAR, scale);
+        Font uniform = font(FONT_UNIFORM, scale);
         Graphics2D graphics = destination.createGraphics();
         graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
         FontRenderContext context = graphics.getFontRenderContext();
-        int baseline = lineTop + FONT_ASCENT;
-        for (int pass = 0; pass < 2; pass++) {
-            int offset = pass == 0 ? 1 : 0;
+        int baseline = lineTop + FONT_ASCENT * scale;
+        for (int pass = shadow ? 0 : 1; pass < 2; pass++) {
+            int offset = pass == 0 ? scale : 0;
             int cursor = x;
             for (TextRun run : line) {
                 graphics.setColor(new Color(pass == 0 ? shadowColor(run.color()) : run.color()));
@@ -1642,19 +1664,28 @@ final class Renderer {
                     graphics.setFont(font);
                     graphics.drawString(glyph, cursor + offset, baseline + offset);
                     if (run.bold()) {
-                        graphics.drawString(glyph, cursor + offset + 1, baseline + offset);
+                        graphics.drawString(glyph, cursor + offset + scale, baseline + offset);
                     }
                     if (pass == 1 && run.underline()) {
-                        graphics.fillRect(cursor, baseline + 2, advance, 1);
+                        graphics.fillRect(cursor, baseline + 2 * scale, advance, scale);
                     }
                     if (pass == 1 && run.strikethrough()) {
-                        graphics.fillRect(cursor, baseline - 3, advance, 1);
+                        graphics.fillRect(cursor, baseline - 3 * scale, advance, scale);
                     }
-                    cursor += advance + (run.bold() ? 1 : 0);
+                    cursor += advance + (run.bold() ? scale : 0);
                 }
             }
         }
         graphics.dispose();
+    }
+
+    /**
+     * Draws one line of legacy formatted text at the vanilla label geometry: the glyph box starts at
+     * {@code y} and every {@code §}/{@code &} code switches the colour or style of the glyphs that
+     * follow. Runs without a code of their own use {@code defaultColor}.
+     */
+    private void drawStyledText(BufferedImage destination, int x, int y, String text, int defaultColor, int scale, boolean shadow) throws IOException {
+        drawStyledLine(destination, x, y, parseStyledText(text, defaultColor), scale, shadow);
     }
 
     /** Vanilla shadows are the base colour scaled by a quarter. */
@@ -1662,11 +1693,24 @@ final class Renderer {
         return ((color >> 2) & 0x3F3F3F);
     }
 
-    /** Parses the {@code §} formatting codes of the vanilla legacy text format into styled runs. */
+    /** Parses styled text with the vanilla default colour of a free standing label. */
     private List<TextRun> parseStyledText(String text) {
+        return parseStyledText(text, 0xFFFFFF);
+    }
+
+    /**
+     * Parses the legacy formatting codes of a text component into styled runs.
+     *
+     * <p>Vanilla only understands {@code §} (0xA7); {@code &} is accepted here as well because the
+     * callers of this service hand over user written text that uses it. A prefix character only
+     * counts as a code when a valid code character follows it, so a literal ampersand survives, and a
+     * run without a code of its own keeps {@code defaultColor} — which is exactly how vanilla applies
+     * the colour argument of {@code GuiGraphics#drawString} to unstyled text.</p>
+     */
+    private List<TextRun> parseStyledText(String text, int defaultColor) {
         List<TextRun> runs = new ArrayList<>();
         StringBuilder current = new StringBuilder();
-        int color = 0xFFFFFF;
+        int color = defaultColor;
         boolean bold = false;
         boolean italic = false;
         boolean underline = false;
@@ -1676,9 +1720,9 @@ final class Renderer {
         int index = 0;
         while (index < text.length()) {
             int codePoint = text.codePointAt(index);
-            if (codePoint == 0xA7 && index + 1 < text.length()) {
+            if ((codePoint == 0xA7 || codePoint == '&') && index + 1 < text.length()
+                    && isFormatCode(text.charAt(index + 1))) {
                 char code = Character.toLowerCase(text.charAt(index + 1));
-                boolean applied = true;
                 if (code >= '0' && code <= '9') {
                     color = LEGACY_COLORS[code - '0'];
                 } else if (code >= 'a' && code <= 'f') {
@@ -1691,25 +1735,24 @@ final class Renderer {
                         case 'm' -> strikethrough = true;
                         case 'k' -> obfuscated = true;
                         case 'r' -> {
-                            color = 0xFFFFFF;
+                            color = defaultColor;
                             bold = false;
                             italic = false;
                             underline = false;
                             strikethrough = false;
                             obfuscated = false;
                         }
-                        default -> applied = false;
+                        default -> {
+                        }
                     }
                 }
-                if (applied) {
-                    if (current.length() > 0) {
-                        runs.add(style.toRun(current.toString()));
-                        current.setLength(0);
-                    }
-                    style = new Style(color, bold, italic, underline, strikethrough, obfuscated);
-                    index += 2;
-                    continue;
+                if (current.length() > 0) {
+                    runs.add(style.toRun(current.toString()));
+                    current.setLength(0);
                 }
+                style = new Style(color, bold, italic, underline, strikethrough, obfuscated);
+                index += 2;
+                continue;
             }
             current.appendCodePoint(codePoint);
             index += Character.charCount(codePoint);
@@ -1718,6 +1761,12 @@ final class Renderer {
             runs.add(style.toRun(current.toString()));
         }
         return runs;
+    }
+
+    /** The code characters of the legacy format: the sixteen colours plus the five style switches. */
+    private static boolean isFormatCode(char code) {
+        char lower = Character.toLowerCase(code);
+        return lower >= '0' && lower <= '9' || lower >= 'a' && lower <= 'f' || "lonmkr".indexOf(lower) >= 0;
     }
 
     private record TextRun(String text, int color, boolean bold, boolean italic, boolean underline, boolean strikethrough, boolean obfuscated) {
@@ -1896,8 +1945,8 @@ final class Renderer {
         graphics.dispose();
         String title = Json.string(container, "title", "");
         if (!title.isBlank()) {
-            int x = layout.titleX() >= 0 ? layout.titleX() : (layout.width() - textWidth(title, 1)) / 2;
-            drawText(canvas, x, LABEL_Y, title, LABEL_COLOR);
+            int x = layout.titleX() >= 0 ? layout.titleX() : (layout.width() - styledWidth(title, 1)) / 2;
+            drawStyledText(canvas, x, LABEL_Y, title, LABEL_COLOR, 1, false);
         }
         Object slotsValue = container.get("slots");
         if (!(slotsValue instanceof List<?>)) {
@@ -2045,12 +2094,12 @@ final class Renderer {
         drawScaled(nativeCanvas, frameImage, 4, 3, 26, 26);
         // AdvancementToast draws the title and the wrapped description at x 30, rows 7 and 18, and
         // the whole 160x32 toast is scaled up by the requested output size.
-        drawText(nativeCanvas, 30, 7, title, completed ? 0xFFFF55 : 0xFFFFFF);
+        drawStyledText(nativeCanvas, 30, 7, title, completed ? 0xFFFF55 : 0xFFFFFF, 1, false);
         String description = Json.string(achievement, "description", "");
         if (!description.isBlank()) {
             List<String> lines = wrapText(description, 20);
             if (!lines.isEmpty()) {
-                drawText(nativeCanvas, 30, 18, lines.get(0), 0xFFFFFF);
+                drawStyledText(nativeCanvas, 30, 18, lines.get(0), 0xFFFFFF, 1, false);
             }
         }
         int outputWidth = requestedWidth > 0 ? requestedWidth : 480;
@@ -2091,10 +2140,10 @@ final class Renderer {
         }
         String dimension = Json.string(map, "dimension", "");
         if (!dimension.isBlank()) {
-            drawText(canvas, MAP_LABEL_X, MAP_LABEL_Y, dimension, 0xFFFFFF);
+            drawStyledText(canvas, MAP_LABEL_X, MAP_LABEL_Y, dimension, 0xFFFFFF, 1, false);
         }
         if (Json.bool(map, "locked", false)) {
-            drawText(canvas, MAP_LABEL_X, height - MAP_LABEL_BOTTOM, "LOCKED", 0xFFFFFF);
+            drawStyledText(canvas, MAP_LABEL_X, height - MAP_LABEL_BOTTOM, "LOCKED", 0xFFFFFF, 1, false);
         }
         return canvas;
     }
@@ -2145,7 +2194,7 @@ final class Renderer {
         graphics.dispose();
         String name = Json.string(marker, "name", "");
         if (!name.isBlank()) {
-            drawText(canvas, (int) Math.round(centerX - size / 2.0), (int) Math.round(centerY + size / 2.0), name, 0xFFFFFF);
+            drawStyledText(canvas, (int) Math.round(centerX - size / 2.0), (int) Math.round(centerY + size / 2.0), name, 0xFFFFFF, 1, false);
         }
     }
 
@@ -2235,7 +2284,7 @@ final class Renderer {
             }
             Map<String, Object> entry = castMap(raw);
             entries.add(entry);
-            maxText = Math.max(maxText, textWidth(playerLabel(entry), unit));
+            maxText = Math.max(maxText, styledWidth(playerLabel(entry), unit));
         }
         int rowsPerColumn = Math.max(1, (entries.size() + columns - 1) / columns);
         int rowWidth = avatarSize + unit + maxText + 2 * unit + pingWidth;
@@ -2262,7 +2311,7 @@ final class Renderer {
             int x = panelLeft + (index / rowsPerColumn) * panelWidth + unit;
             int rowTop = panelTop + unit + (index % rowsPerColumn) * rowHeight;
             drawPlayerAvatar(canvas, entry, x, rowTop + textRow / 2, avatarSize);
-            drawText(canvas, x + avatarSize + unit, rowTop + textRow / 2, playerLabel(entry), 0xFFFFFF, unit, true);
+            drawStyledText(canvas, x + avatarSize + unit, rowTop + textRow / 2, playerLabel(entry), 0xFFFFFF, unit, true);
             drawPingIcon(canvas, Json.integer(entry, "ping", 0), x + rowWidth - pingWidth, rowTop + (rowHeight - pingHeight) / 2, pingWidth, pingHeight);
         }
         drawCenteredLines(canvas, footerLines, width, panelTop + panelHeight, rowHeight, unit, textRow);
@@ -2272,7 +2321,7 @@ final class Renderer {
     /** Draws the centred header or footer rows of the tab list, one screen row apart. */
     private void drawCenteredLines(BufferedImage canvas, List<String> lines, int width, int top, int rowHeight, int scale, int textRow) throws IOException {
         for (String line : lines) {
-            drawText(canvas, (width - textWidth(line, scale)) / 2, top + textRow / 2, line, 0xFFFFFF, scale, true);
+            drawStyledText(canvas, (width - styledWidth(line, scale)) / 2, top + textRow / 2, line, 0xFFFFFF, scale, true);
             top += rowHeight;
         }
     }
@@ -2280,7 +2329,7 @@ final class Renderer {
     private int widestLine(List<String> lines, int scale) throws IOException {
         int widest = 0;
         for (String line : lines) {
-            widest = Math.max(widest, textWidth(line, scale));
+            widest = Math.max(widest, styledWidth(line, scale));
         }
         return widest;
     }
@@ -2364,7 +2413,7 @@ final class Renderer {
         String title = Json.string(inventory, "title", "");
         if (!title.isBlank()) {
             // InventoryScreen overrides titleLabelX to 97 so the title clears the recipe book grid.
-            drawText(canvas, 97, LABEL_Y, title, LABEL_COLOR);
+            drawStyledText(canvas, 97, LABEL_Y, title, LABEL_COLOR, 1, false);
         }
         renderPlayerInventorySlots(canvas, inventory.get("slots"), INVENTORY_BACKPACK_Y);
         Object armorValue = inventory.get("armor");

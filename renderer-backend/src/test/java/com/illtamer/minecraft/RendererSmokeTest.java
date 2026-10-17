@@ -29,12 +29,13 @@ public final class RendererSmokeTest {
         testAchievement(renderer, root);
         testTooltip(renderer, root);
         testHeldItems(renderer, root);
+        testTextColours(renderer, root);
         testSpecialItems(renderer, root);
         testSpecialComponents(renderer, root);
         testSpecialHeldItems(renderer, root);
         testSpecialItemList(renderer, root);
         testMissingResources(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/achievement/tooltip/hand/special/resources paths passed");
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/achievement/tooltip/hand/text/special/resources paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -173,6 +174,8 @@ public final class RendererSmokeTest {
 
     /** Panel colour of the fixture container texture; it must never match one of the skin colours. */
     private static final int PANEL = 0xFF203040;
+    /** Vanilla {@code AbstractContainerScreen} label colour. */
+    private static final int LABEL_RGB = 0x404040;
     /** Fixture chest background: the slot band above and the player inventory band below row 126. */
     private static final int CHEST_TOP = 0xFF304020;
     private static final int CHEST_BOTTOM = 0xFF402030;
@@ -472,8 +475,104 @@ public final class RendererSmokeTest {
         require(slimBounds[0] > heldBounds[0], "slim arm does not move the held item towards the body");
     }
 
+    /**
+     * Every text surface of the service accepts the vanilla {@code §} colour codes and the
+     * {@code &} compatibility prefix, a code never contributes to the measured width, and the colour
+     * of a run without a code is the one the vanilla label would use.
+     */
+    private static void testTextColours(Renderer renderer, Path root) throws Exception {
+        // A container title keeps the vanilla label colour for its unformatted runs and centres on the
+        // width of the text without its codes.
+        BufferedImage plain = renderContainer(renderer, root, "inventory", Map.of("title", "Fixture plain", "rows", 3));
+        BufferedImage styled = renderContainer(renderer, root, "inventory", Map.of("title", "\u00A7cFixture plain", "rows", 3));
+        require(countExact(styled, 0xFF5555) > 4, "container title ignores the section colour code");
+        require(exactBounds(styled, 0xFF5555)[0] == exactBounds(plain, LABEL_RGB)[0],
+                "container title does not centre on the width without its colour code");
 
+        // §r resets to the colour the caller passed in, exactly like an unstyled vanilla component.
+        BufferedImage reset = renderContainer(renderer, root, "inventory",
+                Map.of("title", "\u00A7cRed\u00A7r plain", "rows", 3));
+        int[] resetRed = exactBounds(reset, 0xFF5555);
+        int[] resetPlain = boundsOf(reset, LABEL_RGB);
+        require(resetRed[2] < resetPlain[0], "§r does not reset the container title colour: "
+                + java.util.Arrays.toString(resetRed) + " " + java.util.Arrays.toString(resetPlain));
 
+        // A prefix that is not followed by a valid code character stays literal.
+        BufferedImage literal = renderContainer(renderer, root, "inventory", Map.of("title", "A& B", "rows", 3));
+        require(countExact(literal, 0xFF5555) == 0 && countExact(literal, 0x55FF55) == 0,
+                "a literal ampersand was parsed as a colour code");
+
+        // The inventory title uses the same pipeline at its vanilla 97 px column.
+        Map<String, Object> inventory = new LinkedHashMap<>();
+        inventory.put("operation", "player_inventory");
+        inventory.put("resourceRoot", root.toString());
+        inventory.put("playerInventory", Map.of(
+                "skin", Map.of("texture", PlayerSkinFixture.png64()),
+                "title", "&bBag"));
+        require(countExact(renderer.render(inventory), 0x55FFFF) > 4, "inventory title ignores the ampersand colour code");
+
+        // Tab list rows and the header/footer pair are styled as well, and a code does not widen the
+        // row: the panel is laid out from the width of the text without its codes.
+        Map<String, Object> player = Map.of("name", "Steve", "texture", PlayerSkinFixture.png64(), "ping", 40);
+        Map<String, Object> styledPlayer = Map.of("name", "&cSteve", "texture", PlayerSkinFixture.png64(), "ping", 40);
+        BufferedImage list = renderPlayerList(renderer, root, "&aHeader", "&bFooter", List.of(player));
+        BufferedImage coded = renderPlayerList(renderer, root, "&aHeader", "&bFooter", List.of(styledPlayer));
+        require(countExact(list, 0x55FF55) > 4, "playerlist header ignores the ampersand colour code");
+        require(countExact(list, 0x55FFFF) > 4, "playerlist footer ignores the ampersand colour code");
+        require(countExact(coded, 0xFF5555) > 4, "playerlist entry ignores the ampersand colour code");
+        require(coded.getWidth() == list.getWidth(), "playerlist row width counts the colour codes: "
+                + coded.getWidth() + " != " + list.getWidth());
+        // Two header lines of the same text but different code lengths are centred on the same column.
+        BufferedImage lines = renderPlayerList(renderer, root, "&aAB\n\u00A7cCD", "&bEF", List.of(player));
+        require(exactBounds(lines, 0x55FF55)[0] == exactBounds(lines, 0xFF5555)[0],
+                "playerlist header lines are not centred on the width without their codes");
+
+        // The advancement toast and the map labels run through the same styling.
+        Map<String, Object> achievement = new LinkedHashMap<>();
+        achievement.put("operation", "achievement");
+        achievement.put("resourceRoot", root.toString());
+        achievement.put("achievement", Map.of(
+                "title", "&cFixture", "description", "&9Done", "frame", "task", "completed", true,
+                "icon", Map.of("id", "minecraft:diamond")));
+        BufferedImage toast = renderer.render(achievement);
+        require(countExact(toast, 0xFF5555) > 4, "achievement title ignores the ampersand colour code");
+        require(countExact(toast, 0x5555FF) > 4, "achievement description ignores the ampersand colour code");
+
+        // The tooltip pipeline accepts the compatibility prefix as well.
+        Map<String, Object> tooltip = new LinkedHashMap<>();
+        tooltip.put("operation", "tooltip");
+        tooltip.put("resourceRoot", root.toString());
+        tooltip.put("tooltip", Map.of("title", "&cCoded", "lines", List.of("&aGreen line")));
+        BufferedImage tooltipImage = renderer.render(tooltip);
+        require(countExact(tooltipImage, 0xFF5555) > 4, "tooltip ignores the ampersand colour code");
+        require(countExact(tooltipImage, 0x55FF55) > 4, "tooltip ignores the ampersand colour code on its lines");
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("operation", "map");
+        map.put("resourceRoot", root.toString());
+        map.put("map", Map.of("dimension", "&aOverworld",
+                "markers", List.of(Map.of("x", 32, "z", 32, "rotation", 0, "type", "player", "name", "&eHome"))));
+        BufferedImage mapImage = renderer.render(map);
+        require(countExact(mapImage, 0x55FF55) > 4, "map dimension label ignores the ampersand colour code");
+        require(countExact(mapImage, 0xFFFF55) > 4, "map marker name ignores the ampersand colour code");
+    }
+
+    private static BufferedImage renderPlayerList(Renderer renderer, Path root, String header, String footer, List<Map<String, Object>> players) throws Exception {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", "playerlist");
+        request.put("resourceRoot", root.toString());
+        request.put("playerList", Map.of("header", header, "footer", footer, "players", players));
+        return renderer.render(request);
+    }
+
+    /** Browses a bounding box that may be absent, for assertions about a colour that must not occur. */
+    private static int[] boundsOf(BufferedImage image, int rgb) {
+        try {
+            return exactBounds(image, rgb);
+        } catch (AssertionError error) {
+            return null;
+        }
+    }
 
     /**
      * The seven special model families the renderer transcribes from the client code. Every fixture

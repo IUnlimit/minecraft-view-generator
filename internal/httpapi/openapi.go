@@ -89,7 +89,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeTooltip,
 			summary:     "tooltip · 悬浮提示",
-			description: "按原版 1.21.11 TooltipRenderUtil 渲染：文本块四周各外扩 12px，用 gui/sprites/tooltip/background 九宫格铺底（advanced 时叠加 tooltip/frame），行高 10px、标题后额外 2px，文本始终带阴影。文本支持 § 颜色与修饰符（§0-9a-f、§l/o/n/m/k/r；§k 为确定性渲染，不做随机化）。未显式给出 title 时按原版顺序生成行：悬停名、advanced 物品 id、lore、附魔、属性修饰符、单值组件、advanced 组件与 NBT 计数。icon 默认关闭，设为 true 时在左侧绘制物品图标。",
+			description: "按原版 1.21.11 TooltipRenderUtil 渲染：文本块四周各外扩 12px，用 gui/sprites/tooltip/background 九宫格铺底（advanced 时叠加 tooltip/frame），行高 10px、标题后额外 2px，文本始终带阴影。文本支持 § 与 & 两种颜色/修饰符前缀（0-9a-f、l/o/n/m/k/r；§k 为确定性渲染，不做随机化），只有后跟合法码字符时才算格式码。未显式给出 title 时按原版顺序生成行：悬停名、advanced 物品 id、lore、附魔、属性修饰符、单值组件、advanced 组件与 NBT 计数。icon 默认关闭，设为 true 时在左侧绘制物品图标。",
 			payload: `{
   "version": "1.21.11",
   "type": "tooltip",
@@ -122,7 +122,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeInventory,
 			summary:     "inventory · 容器界面",
-			description: "官方 generic_54 容器 GUI，rows 1-6、columns 固定 9。标题按原版 AbstractContainerScreen 坐标绘制（左上角 +8,+6）；槽位 0 到 rows*9-1 属于容器区，之后是玩家背包区（本例从 54 开始）；堆叠数量按原版 renderItemDecorations 画在槽位右下角并带阴影。资源缺失或模型不可用的槽位画原版紫黑缺失模型，整图仍然产出。",
+			description: "官方 generic_54 容器 GUI，rows 1-6、columns 固定 9。标题按原版 AbstractContainerScreen 坐标绘制（左上角 +8,+6），可用 § 或 & 颜色码，居中按去码后的宽度；槽位 0 到 rows*9-1 属于容器区，之后是玩家背包区（本例从 54 开始）；堆叠数量按原版 renderItemDecorations 画在槽位右下角并带阴影。资源缺失或模型不可用的槽位画原版紫黑缺失模型，整图仍然产出。",
 			payload: `{
   "version": "1.21.11",
   "type": "inventory",
@@ -185,7 +185,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypePlayerInventory,
 			summary:     "playerInventory · 玩家背包",
-			description: "原版 InventoryScreen 1:1 布局：默认输出 176×166，container/inventory 贴图不缩放；标题按原版 titleLabelX=97、行 6 绘制；3D 玩家按原版预览视口渲染（x 26→75、y 8→78，30 像素/方块，脚底对齐视口中心 + (bbHeight/2+0.0625)×30，3/4 正交视角），槽位沿用原版 InventoryMenu 坐标（背包第 0 格 8/84、快捷栏 8/142、装备 8/8+18i、副手 77/62）。armor 按顺序绘制头盔/胸甲/护腿/靴子的原版装备层（含染色与贴图分层），mainHand/offhand 用 display.thirdperson_righthand / thirdperson_lefthand 的 T·R·S 变换挂在对应手上，并乘上原版实体模型空间到场景空间的转换（y 向下/颈原点/朝 -z → y 向上/脚底原点/朝 +z），因此物品落在手心高度、躯干前方并参与同一深度排序；special 模型（旗帜/盾牌/头颅/潮涌核心/陶罐/铜傀儡雕像/三叉戟）在手持时也使用其 3D 几何而不是平面贴图。显式 width/height 时整图最近邻缩放。",
+			description: "原版 InventoryScreen 1:1 布局：默认输出 176×166，container/inventory 贴图不缩放；标题按原版 titleLabelX=97、行 6 绘制（支持 § 或 & 颜色码）；3D 玩家按原版预览视口渲染（x 26→75、y 8→78，30 像素/方块，脚底对齐视口中心 + (bbHeight/2+0.0625)×30，3/4 正交视角），槽位沿用原版 InventoryMenu 坐标（背包第 0 格 8/84、快捷栏 8/142、装备 8/8+18i、副手 77/62）。armor 按顺序绘制头盔/胸甲/护腿/靴子的原版装备层（含染色与贴图分层），mainHand/offhand 用 display.thirdperson_righthand / thirdperson_lefthand 的 T·R·S 变换挂在对应手上，并乘上原版实体模型空间到场景空间的转换（y 向下/颈原点/朝 -z → y 向上/脚底原点/朝 +z），因此物品落在手心高度、躯干前方并参与同一深度排序；special 模型（旗帜/盾牌/头颅/潮涌核心/陶罐/铜傀儡雕像/三叉戟）在手持时也使用其 3D 几何而不是平面贴图。显式 width/height 时整图最近邻缩放。",
 			payload: `{
   "version": "1.21.11",
   "type": "playerInventory",
@@ -232,7 +232,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypePlayerList,
 			summary:     "playerlist · 玩家列表",
-			description: "原版 TAB 列表布局：9px 行距（2 倍渲染，字体同步放大 2 倍）、8x8 头像（皮肤 (8,8) 与外层 (40,8)）、右侧 ping 图标与官方阈值（<150/<300/<600/<1000 对应 ping_5..ping_1，ping<=0 为 ping_unknown），每列最多 20 行、多列从左到右、header/footer 居中。gameMode 仍接受校验但不会绘制，以保持原版行布局。",
+			description: "原版 TAB 列表布局：9px 行距（2 倍渲染，字体同步放大 2 倍）、8x8 头像（皮肤 (8,8) 与外层 (40,8)）、右侧 ping 图标与官方阈值（<150/<300/<600/<1000 对应 ping_5..ping_1，ping<=0 为 ping_unknown），每列最多 20 行、多列从左到右、header/footer 居中。玩家名与 header/footer 都支持 § 或 & 颜色码，列宽与居中按去码后的宽度计算。gameMode 仍接受校验但不会绘制，以保持原版行布局。",
 			payload: `{
   "version": "1.21.11",
   "type": "playerlist",
@@ -273,7 +273,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeAchievement,
 			summary:     "achievement · 成就提示",
-			description: "官方 advancement toast：160×32 的 toast 内容按默认 480×96 放大三倍；frame 为 task/goal/challenge，completed 决定 obtained/unobtained 边框，icon 为物品图标；标题与描述按原版 AdvancementToast 绘制在 x=30 的第 7、18 行。",
+			description: "官方 advancement toast：160×32 的 toast 内容按默认 480×96 放大三倍；frame 为 task/goal/challenge，completed 决定 obtained/unobtained 边框，icon 为物品图标；标题与描述按原版 AdvancementToast 绘制在 x=30 的第 7、18 行，支持 § 或 & 颜色码。",
 			payload: `{
   "version": "1.21.11",
   "type": "achievement",
