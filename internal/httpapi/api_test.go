@@ -80,6 +80,19 @@ func TestRenderBase64Item(t *testing.T) {
 	}
 }
 
+func TestRenderAcceptsUnknownItemInContainer(t *testing.T) {
+	// A slot the resource pack cannot resolve is the renderer's business: it draws the vanilla
+	// missing model instead of failing, so the API must not reject the request up front.
+	server := testServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/render", strings.NewReader(`{"version":"1.21.11","type":"inventory","output":"base64","data":{"title":"Chest","rows":3,"columns":9,"slots":[{"slot":0,"item":{"id":"minecraft:not_an_item"}}]}}`))
+	request.Header.Set("Content-Type", "application/json")
+	record := httptest.NewRecorder()
+	server.Handler().ServeHTTP(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", record.Code, record.Body.String())
+	}
+}
+
 func TestRenderRejectsMissingItemID(t *testing.T) {
 	server := testServer(t)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/render", strings.NewReader(`{"version":"1.21.11","type":"item","output":"png","data":{}}`))

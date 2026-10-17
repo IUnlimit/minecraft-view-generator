@@ -39,13 +39,13 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 | type | 真实 Java 后端能力 |
 | --- | --- |
-| `item` | 1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、select/condition/range dispatch、支持 shulker/chest special、damage/glint |
+| `item` | 1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、select/condition/range dispatch、八类 `minecraft:special` 几何（旗帜 / 床 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟）与箱子族平面贴图、图案与染色组件、damage/glint、资源缺失时画原版缺失模型 |
 | `tooltip` | 原版九宫格背景（`gui/sprites/tooltip/background`，border 从 `.mcmeta` 读取）与 advanced 边框（`tooltip/frame`）、`§` 颜色与修饰符、原版行生成顺序（悬停名 → advanced id → lore → 附魔 → 属性修饰符 → 单值组件 → 组件/NBT 计数）、按真实文本宽度折行、`icon` 开关 |
 | `inventory` | 官方 `generic_54` chest GUI，1–6 行九列、标题、主容器槽、玩家区槽位、堆叠数量 |
 | `item_container` | hopper（176×133）、furnace/blast_furnace/smoker、crafting_table、anvil、brewing_stand（176×166）；槽位取自各自原版菜单；未知容器返回 `unsupported_container` |
 | `enderchest` | 固定 3×9，与普通三行箱子完全一致（同一 `generic_54` 贴图、配色与槽位，无额外叠加） |
-| `playerInventory` | 原版 InventoryScreen 1:1 布局（默认 176×166，面板贴图不缩放）、标题 `(97, 6)`、原版预览视口内的 3D 玩家（26→75 / 8→78，30 像素每方块）、外层与披风、`equipment/*.json` 盔甲分层（染色层、elytra 翼）、手持物 thirdperson 3D 变换（手部高度、躯干前方）、InventoryMenu 槽位（背包 / 快捷栏 / 装备 / 副手） |
-| `skin` | 原版 3D 玩家模型：64×64 classic/slim、legacy 64×32（自动补齐左侧肢体）、外层第二层、原版斗篷 UV、手持物 thirdperson 3D 变换（含在自适应缩放内） |
+| `playerInventory` | 原版 InventoryScreen 1:1 布局（默认 176×166，面板贴图不缩放）、标题 `(97, 6)`、原版预览视口内的 3D 玩家（26→75 / 8→78，30 像素每方块）、外层与披风、`equipment/*.json` 盔甲分层（染色层、elytra 翼）、手持物 thirdperson 3D 变换（手部高度、躯干前方，special 模型也用 3D 几何）、InventoryMenu 槽位（背包 / 快捷栏 / 装备 / 副手） |
+| `skin` | 原版 3D 玩家模型：64×64 classic/slim、legacy 64×32（自动补齐左侧肢体）、外层第二层、原版斗篷 UV、手持物 thirdperson 3D 变换（含在自适应缩放内；special 模型同样使用其 3D 几何） |
 | `playerlist` | 原版 TAB 布局：行距 9px、8×8 头像、官方 ping 图标与阈值、header/footer 居中、多列（每列 20 行），最多 500 人，整体 2 倍渲染（字体同步放大）；`gameMode` 接受校验但不绘制 |
 | `map` | 原版地图图像：`map/map_background` 羊皮纸背景 + 内缩的完整 128×128 像素网格（默认 140×140，内容 1:1）+ `map/decorations/*` 原版装饰图标，最多 16384 项 pixels 或解码后最多 16384 字节 pixelData、marker rotation/type/name、dimension/locked/scale |
 | `achievement` | 官方 advancement toast（160×32 内容，默认放大 3 倍到 480×96）、task/goal/challenge obtained/unobtained frame、icon、标题与描述在 x=30 的第 7/18 行 |
@@ -196,7 +196,33 @@ print(json.dumps(request, ensure_ascii=False))
 PY
 ```
 
-特殊 item definition 只实现 `shulker_box`、`chest`、`ender_chest` 三类 special 模型；其它 special 类型返回 `422 render_failed`，错误信息为 `unsupported special item model: <type>`，不会静默替换成普通图标。
+## special 物品模型
+
+`minecraft:special` 的模型定义在客户端代码里而不是 model JSON 中，本服务按 1.21.11 反编译结果逐盒直译几何与贴图区域，语义与客户端一致（同一个 `texOffs` + `PartPose` 盒列表、同一套贴图展开、同一个 `display` 变换）：
+
+| 族（模型定义 `model.type`） | 几何与贴图 |
+| --- | --- |
+| `banner` | 旗杆 + 横杆（`entity/banner_base`）与旗面：先按模型的 `color` 染 `entity/banner/base`，再按 `banner_patterns` 的每个图案染 `entity/banner/<pattern>`；`base_color` 组件覆盖模型颜色 |
+| `bed` | 床头 / 床尾两半（`entity/bed/<texture>`），按 `BedRenderer` 的 `translate(0, 0.5625, 0/-1) → rotateX(90°)` 摆放 |
+| `head` | `kind` 对应 `entity/{skeleton, creeper, zombie, piglin, enderdragon}/…`，`texture` 字段可覆盖；8³ 头颅 + 0.25 膨胀覆盖层（humanoid kind），固定 `yRot = 180°` 面对观察者 |
+| `player_head` | 同上的人类头层，皮肤取 `profile` 组件里内联 PNG；没有内联皮肤（含只给远端 hash 的 profile）时回退到客户端默认皮肤 `entity/player/wide/steve` |
+| `shield` | 盾面 + 握把（`entity/shield_base_nopattern` / `entity/shield_base`），有图案时按 `banner_patterns` 逐层染 `entity/shield/base` 与 `entity/shield/<pattern>` |
+| `conduit` | 未激活状态的外壳（6³，`entity/conduit/base`）+ `translate(0.5, 0.5, 0.5)`；笼、风与眼睛三层属于方块实体的激活状态，不在物品图标里 |
+| `decorated_pot` | 颈 + 盖 + 四面侧壁（`entity/decorated_pot/*`），`pot_decorations` 按原版 back/left/right/front 顺序选陶片图案 `*_pottery_pattern`，没有陶片的侧面用 `decorated_pot_side` |
+| `copper_golem_statue` | 站立姿势的铜傀儡盒列表（`texture` 指向氧化程度贴图）；`sitting` / `running` / `star` 三种姿势尚未直译，暂用站立姿势 |
+| `trident` | 杆 + 基座 + 三叉（`entity/trident`）；GUI 上下文的 `select(display_context)` 会选中平面模型 `item/trident`，因此这条几何用于手持 |
+| `chest` / `ender_chest` / `shulker_box` | 仍是原版平面实体贴图（`entity/chest/*`、`entity/shulker/shulker`），与之前版本逐像素一致 |
+
+图标与手持共用同一份几何：图标走「`display.gui` 的 `T·R(rotationXYZ)·S·T(-0.5,-0.5,-0.5)` + 正交直视相机（1 单位 = 1 像素、物品中心落在图标中心）」，手持走 `thirdperson_righthand` / `thirdperson_lefthand` 与 `ItemInHandLayer` 链条，深度排序与遮挡和玩家模型共用。
+
+## 资源缺失时的行为
+
+渲染不再因为资源缺失整体失败（保持 `422` 的只有请求结构性错误，例如 unknown operation、`item.id` 缺失、未知 `item_container`、未知地图标记类型）：
+
+- 未知物品 id、缺失的 model JSON、没有可用几何或整层透明的模型、未直译的 special 族：该物品画**原版缺失模型**（16³ 立方体 + 生成的紫黑缺失贴图，即 `0xFFF800F8` / 黑色棋盘），并把原因写到 stderr；
+- 单个贴图缺失或不是合法 PNG：**只有那一层**用缺失贴图继续渲染，其余层照常；
+- 容器 / 背包 / tooltip / achievement 里单个槽位渲染异常只影响该槽位（同样画缺失模型），整图仍然产出；
+- 手持物失败时该手持物画缺失模型。
 
 ## 健康与 fallback
 

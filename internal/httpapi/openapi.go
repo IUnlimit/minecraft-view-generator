@@ -75,7 +75,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeItem,
 			summary:     "item · 物品图标",
-			description: "1.21.11 item definition：模型继承、generated/handheld、纹理层与 glint 都由真实资源决定。",
+			description: "1.21.11 item definition：模型继承、generated/handheld、纹理层与 glint 都由真实资源决定。minecraft:special 模型按客户端代码直译的几何渲染（旗帜 / 床 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟），组件驱动图案、染色、陶片与内联皮肤；箱子族仍为平面贴图。模型不可用时画原版紫黑缺失模型，不返回 422。",
 			payload: `{
   "version": "1.21.11",
   "type": "item",
@@ -122,7 +122,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeInventory,
 			summary:     "inventory · 容器界面",
-			description: "官方 generic_54 容器 GUI，rows 1-6、columns 固定 9。标题按原版 AbstractContainerScreen 坐标绘制（左上角 +8,+6）；槽位 0 到 rows*9-1 属于容器区，之后是玩家背包区（本例从 54 开始）；堆叠数量按原版 renderItemDecorations 画在槽位右下角并带阴影。",
+			description: "官方 generic_54 容器 GUI，rows 1-6、columns 固定 9。标题按原版 AbstractContainerScreen 坐标绘制（左上角 +8,+6）；槽位 0 到 rows*9-1 属于容器区，之后是玩家背包区（本例从 54 开始）；堆叠数量按原版 renderItemDecorations 画在槽位右下角并带阴影。资源缺失或模型不可用的槽位画原版紫黑缺失模型，整图仍然产出。",
 			payload: `{
   "version": "1.21.11",
   "type": "inventory",
@@ -185,7 +185,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypePlayerInventory,
 			summary:     "playerInventory · 玩家背包",
-			description: "原版 InventoryScreen 1:1 布局：默认输出 176×166，container/inventory 贴图不缩放；标题按原版 titleLabelX=97、行 6 绘制；3D 玩家按原版预览视口渲染（x 26→75、y 8→78，30 像素/方块，脚底对齐视口中心 + (bbHeight/2+0.0625)×30，3/4 正交视角），槽位沿用原版 InventoryMenu 坐标（背包第 0 格 8/84、快捷栏 8/142、装备 8/8+18i、副手 77/62）。armor 按顺序绘制头盔/胸甲/护腿/靴子的原版装备层（含染色与贴图分层），mainHand/offhand 用 display.thirdperson_righthand / thirdperson_lefthand 的 T·R·S 变换挂在对应手上，并乘上原版实体模型空间到场景空间的转换（y 向下/颈原点/朝 -z → y 向上/脚底原点/朝 +z），因此物品落在手心高度、躯干前方并参与同一深度排序。显式 width/height 时整图最近邻缩放。",
+			description: "原版 InventoryScreen 1:1 布局：默认输出 176×166，container/inventory 贴图不缩放；标题按原版 titleLabelX=97、行 6 绘制；3D 玩家按原版预览视口渲染（x 26→75、y 8→78，30 像素/方块，脚底对齐视口中心 + (bbHeight/2+0.0625)×30，3/4 正交视角），槽位沿用原版 InventoryMenu 坐标（背包第 0 格 8/84、快捷栏 8/142、装备 8/8+18i、副手 77/62）。armor 按顺序绘制头盔/胸甲/护腿/靴子的原版装备层（含染色与贴图分层），mainHand/offhand 用 display.thirdperson_righthand / thirdperson_lefthand 的 T·R·S 变换挂在对应手上，并乘上原版实体模型空间到场景空间的转换（y 向下/颈原点/朝 -z → y 向上/脚底原点/朝 +z），因此物品落在手心高度、躯干前方并参与同一深度排序；special 模型（旗帜/盾牌/头颅/潮涌核心/陶罐/铜傀儡雕像/三叉戟）在手持时也使用其 3D 几何而不是平面贴图。显式 width/height 时整图最近邻缩放。",
 			payload: `{
   "version": "1.21.11",
   "type": "playerInventory",

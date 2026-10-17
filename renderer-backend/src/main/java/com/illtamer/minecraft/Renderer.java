@@ -28,9 +28,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
-/** Deterministic CPU renderer for the Minecraft 1.21.11 resource format. */
+    /** Deterministic CPU renderer for the Minecraft 1.21.11 resource format. */
 final class Renderer {
+    /**
+     * Synthetic texture id of the generated missing texture. The missing model samples it and every
+     * lookup whose file is absent resolves to it, so unlike a real id it never needs a file.
+     */
+    private static final String MISSING_TEXTURE = "minecraft:missing";
+
     private final Map<String, Model> models = new HashMap<>();
     private final Map<String, Font> fonts = new HashMap<>();
     private ResourceStack resources;
@@ -57,6 +64,12 @@ final class Renderer {
         };
     }
 
+    /**
+     * Renders one item icon. Structural request problems — no id, an impossible size — stay hard
+     * errors, while anything that only concerns the resource pack (a missing model, an unsupported
+     * special model, a texture that is not there) degrades to the vanilla missing model so that one
+     * broken slot can never take the whole picture down.
+     */
     private BufferedImage renderItem(Map<String, Object> item, int size) throws IOException {
         if (size < 16 || size > 4096) {
             throw new IOException("item render size must be between 16 and 4096");
@@ -65,34 +78,43 @@ final class Renderer {
         if (id.isBlank()) {
             throw new IOException("item.id is required");
         }
-        ItemSelection selection = resolveItemSelection(id, item);
         BufferedImage result;
-        if (!selection.special.isBlank()) {
-            result = renderSpecialItemIcon(selection.special, size);
-        } else {
-            Model model = loadModelWithOverrides(selection.model, item);
-            if (model.isGenerated()) {
-                List<BufferedImage> layers = new ArrayList<>();
-                for (String layer : model.generatedLayers()) {
-                    layers.add(resources.texture(model.texture(layer, layer)));
-                }
-                if (layers.isEmpty()) {
-                    throw new IOException("generated item model has no texture layers: " + id);
-                }
-                result = generatedSprite(layers, size);
-            } else if (!model.elements.isEmpty()) {
-                result = renderModel(model, size);
-            } else {
-                throw new IOException("item model has no renderable elements or generated layer: " + id);
+        try {
+            result = renderItemIcon(item, id, size);
+            if (Json.integer(item, "damage", 0) > 0 && Json.integer(item, "maxDamage", 0) > 0) {
+                drawDurability(result, Json.integer(item, "damage", 0), Json.integer(item, "maxDamage", 0));
             }
-        }
-        if (Json.integer(item, "damage", 0) > 0 && Json.integer(item, "maxDamage", 0) > 0) {
-            drawDurability(result, Json.integer(item, "damage", 0), Json.integer(item, "maxDamage", 0));
-        }
-        if (hasGlint(item)) {
-            drawGlint(result);
+            if (hasGlint(item)) {
+                drawGlint(result);
+            }
+        } catch (IOException | RuntimeException error) {
+            System.err.println("item " + id + " fell back to the missing model: " + error);
+            result = renderMissingItemIcon(size);
         }
         return result;
+    }
+
+    private BufferedImage renderItemIcon(Map<String, Object> item, String id, int size) throws IOException {
+        ItemSelection selection = resolveItemSelection(id, item);
+        if (selection.special != null) {
+            return renderSpecialItemIcon(selection.special, item, size);
+        }
+        Model model = loadModelWithOverrides(selection.model, item);
+        if (model.isGenerated()) {
+            if (model.generatedLayers().isEmpty()) {
+                // Vanilla bakes an item model without geometry as the missing model.
+                return renderMissingItemIcon(size);
+            }
+            List<BufferedImage> layers = new ArrayList<>();
+            for (String layer : model.generatedLayers()) {
+                layers.add(resources.texture(model.texture(layer, layer)));
+            }
+            return generatedSprite(layers, size);
+        }
+        if (!model.elements.isEmpty()) {
+            return renderModel(model, size);
+        }
+        return renderMissingItemIcon(size);
     }
 
     private Model loadModelWithOverrides(String modelID, Map<String, Object> item) throws IOException {
@@ -112,39 +134,42 @@ final class Renderer {
     private ItemSelection resolveItemSelection(String id, Map<String, Object> item) throws IOException {
         String component = itemModelComponent(item);
         if (!component.isBlank()) {
-            return new ItemSelection(component, "");
+            return new ItemSelection(component, null);
         }
         Map<String, Object> definition = resources.json(itemDefinitionPath(id));
         if (definition != null) {
             ItemSelection selected = selectItemSelection(definition.get("model"), item);
-            if (!selected.model.isBlank() || !selected.special.isBlank()) {
+            if (selected.present()) {
                 return selected;
             }
             throw new IOException("item definition has no supported model: " + id);
         }
-        return new ItemSelection("minecraft:item/" + itemIdPath(id), "");
+        return new ItemSelection("minecraft:item/" + itemIdPath(id), null);
     }
 
     private ItemSelection selectItemSelection(Object value, Map<String, Object> item) throws IOException {
         if (value instanceof String model) {
-            return new ItemSelection(normalizeID(model), "");
+            return new ItemSelection(normalizeID(model), null);
         }
         if (!(value instanceof Map<?, ?> map)) {
-            return new ItemSelection("", "");
+            return new ItemSelection("", null);
         }
         Map<String, Object> object = castMap(map);
         String type = Json.string(object, "type", "").toLowerCase();
         if (type.equals("minecraft:model") || type.equals("model")) {
-            return new ItemSelection(normalizeID(Json.string(object, "model", "")), "");
+            return new ItemSelection(normalizeID(Json.string(object, "model", "")), null);
         }
         if (type.equals("minecraft:special") || type.equals("special")) {
-            String special = Json.string(object, "base", Json.string(object, "model", ""));
-            special = special.substring(special.lastIndexOf(':') + 1);
-            special = special.substring(special.lastIndexOf('/') + 1);
-            if (special.isBlank()) {
-                special = Json.string(object, "special", "");
+            // The family of a special model is the "type" of the nested model object; the base field
+            // only names the model whose display transforms the item borrows.
+            Map<String, Object> parameters = object.get("model") instanceof Map<?, ?> nested
+                    ? castMap(nested) : Map.of();
+            String family = textureName(normalizeID(Json.string(parameters, "type",
+                    Json.string(object, "special", ""))));
+            if (family.isBlank()) {
+                family = textureName(normalizeID(Json.string(object, "base", "")));
             }
-            return new ItemSelection("", special);
+            return new ItemSelection("", new SpecialItem(family, parameters, normalizeID(Json.string(object, "base", ""))));
         }
         if (type.equals("minecraft:condition") || type.equals("condition")) {
             String property = Json.string(object, "property", "").toLowerCase();
@@ -180,7 +205,7 @@ final class Renderer {
                     }
                 }
             }
-            return selected != null && (!selected.model.isBlank() || !selected.special.isBlank())
+            return selected != null && selected.present()
                     ? selected : selectItemSelection(object.get("fallback"), item);
         }
         if (type.equals("minecraft:select") || type.equals("select")) {
@@ -198,7 +223,7 @@ final class Renderer {
             }
             return selectItemSelection(object.get("fallback"), item);
         }
-        return new ItemSelection("", "");
+        return new ItemSelection("", null);
     }
 
     private String selectPropertyValue(String property, Map<String, Object> item) {
@@ -232,23 +257,572 @@ final class Renderer {
         return separator < 0 ? id : id.substring(separator + 1);
     }
 
-    private record ItemSelection(String model, String special) {}
-
-    private BufferedImage renderSpecialItemIcon(String type, int size) throws IOException {
-        return generatedSprite(List.of(resources.texture(specialItemTexture(type))), size);
+    /** The model an item resolves to: either a model JSON path or a special model of its own. */
+    private record ItemSelection(String model, SpecialItem special) {
+        boolean present() {
+            return !model.isBlank() || special != null;
+        }
     }
 
-    private String specialItemTexture(String type) throws IOException {
-        String normalized = type.toLowerCase();
-        if (!normalized.equals("shulker_box") && !normalized.equals("chest") && !normalized.equals("ender_chest")) {
-            throw new IOException("unsupported special item model: " + type);
+    /**
+     * One {@code minecraft:special} item model. Vanilla describes these models in client code instead
+     * of in a model JSON, so {@code family} selects one of the transcribed box lists, {@code parameters}
+     * carries the {@code texture}, {@code color}, {@code kind} and {@code pose} fields of the
+     * definition and {@code base} names the model the item borrows its display transforms from.
+     */
+    private record SpecialItem(String family, Map<String, Object> parameters, String base) {
+        String parameter(String name) {
+            Object value = parameters.get(name);
+            return value == null ? "" : String.valueOf(value);
         }
-        return switch (normalized) {
+    }
+
+    /** One colour layer of a banner or a shield: a pattern sprite and the dye colour it carries. */
+    private record PatternLayer(String name, int color) {}
+
+    /**
+     * Vanilla missing model: one 16³ cube whose six faces sample the missing texture, which is what
+     * the client draws for an item whose model could not be baked. It is built here instead of loaded
+     * from a file so that the fallback works inside the minimal resource context of this service.
+     */
+    private static Model missingModel() {
+        Model model = new Model("builtin/missing");
+        model.hasElements = true;
+        LinkedHashMap<String, FaceDefinition> faces = new LinkedHashMap<>();
+        for (String direction : new String[]{"down", "up", "north", "south", "west", "east"}) {
+            faces.put(direction, new FaceDefinition(MISSING_TEXTURE, -1, null, 0));
+        }
+        model.elements.add(new Element(new double[]{0, 0, 0}, new double[]{16, 16, 16}, faces));
+        return model;
+    }
+
+    /**
+     * The vanilla missing model, projected by the straight icon camera into a square icon. The model
+     * carries no display entry of its own, so the pose of an item without one centres its 0..16 box.
+     */
+    private BufferedImage renderMissingItemIcon(int size) throws IOException {
+        List<Quad> quads = new ArrayList<>();
+        addElementGeometry(quads, missingModel());
+        transformQuads(quads, displayMatrix(null, false));
+        return renderItemIcon(quads, size);
+    }
+
+    /**
+     * The families this service still draws as the legacy flat sprite of their entity texture: the
+     * chest family is a block model of its own and keeps the plane it used before this round, so an
+     * existing consumer sees no change for it.
+     */
+    private static final Set<String> FLAT_SPECIAL_FAMILIES = Set.of("chest", "ender_chest", "shulker_box");
+
+    /** The sixteen dye colours in {@code DyeColor} order with their vanilla texture diffuse colours. */
+    private static final String[] DYE_NAMES = {
+            "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+            "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"};
+    private static final int[] DYE_COLORS = {
+            0xF0F0F0, 0xEB8844, 0xC354CD, 0x6689D3, 0xDECF2A, 0x41CD34, 0xD88198, 0x434343,
+            0xABABAB, 0x287697, 0x7B2FBE, 0x253192, 0x51301A, 0x3B511A, 0xB3312C, 0x1E1B1B};
+
+    /** Every face of a vanilla {@code addBox} box, which is what the overload defaults to. */
+    private static final Set<String> ALL_FACES = Set.of("down", "up", "north", "south", "west", "east");
+
+    /** An empty face set, written out to read well at the call sites that skip nothing. */
+    private static final Set<String> NO_FACES = Set.of();
+
+    /** The flat sprite of the special families this service has not ported to geometry yet. */
+    private String specialItemTexture(String family) throws IOException {
+        return switch (family.toLowerCase(Locale.ROOT)) {
             case "ender_chest" -> "minecraft:entity/chest/ender";
             case "chest" -> "minecraft:entity/chest/normal";
-            default -> "minecraft:entity/shulker/shulker";
+            case "shulker_box" -> "minecraft:entity/shulker/shulker";
+            default -> throw new IOException("unsupported special item model: " + family);
         };
     }
+
+    /**
+     * The icon of a special item: its geometry in the vanilla item space, projected by the {@code gui}
+     * pose of the model the item points at and then by the straight icon camera. A family this service
+     * has not ported yet falls back to the missing model of {@link #renderItem}.
+     */
+    private BufferedImage renderSpecialItemIcon(SpecialItem special, Map<String, Object> item, int size) throws IOException {
+        if (FLAT_SPECIAL_FAMILIES.contains(special.family)) {
+            return generatedSprite(List.of(resources.texture(specialItemTexture(special.family))), size);
+        }
+        List<Quad> quads = new ArrayList<>();
+        addSpecialGeometry(quads, special, item);
+        transformQuads(quads, displayMatrix(specialDisplay(special, "gui"), false));
+        return renderItemIcon(quads, size);
+    }
+
+    /** Dispatches to the transcribed geometry of one special model family. */
+    private void addSpecialGeometry(List<Quad> quads, SpecialItem special, Map<String, Object> item) throws IOException {
+        switch (special.family) {
+            case "banner" -> addBannerGeometry(quads, special, item);
+            case "bed" -> addBedGeometry(quads, special);
+            case "head" -> addHeadGeometry(quads, special, item);
+            case "player_head" -> addPlayerHeadGeometry(quads, item);
+            case "shield" -> addShieldGeometry(quads, item);
+            case "conduit" -> addConduitGeometry(quads);
+            case "decorated_pot" -> addDecoratedPotGeometry(quads, item);
+            case "copper_golem_statue" -> addCopperGolemGeometry(quads, special);
+            case "trident" -> addTridentGeometry(quads);
+            default -> throw new IOException("unsupported special item model: " + special.family);
+        }
+    }
+
+    /** The display transform a special item borrows from the model its {@code base} field names. */
+    private DisplayTransform specialDisplay(SpecialItem special, String name) throws IOException {
+        if (special.base.isBlank()) {
+            return null;
+        }
+        return loadModel(special.base).displayTransform(name);
+    }
+
+    /**
+     * Vanilla 1.21.11 {@code hrd} (BannerSpecialRenderer) with {@code hgi} (BannerFlagModel) and
+     * {@code hgj} (BannerModel): {@code translate(0.5, 0, 0.5); scale(2/3, -2/3, -2/3)}. The pole and
+     * the bar sample {@code entity/banner_base}; the flag is drawn with that same texture and then once
+     * per colour layer — the base colour of the item against {@code entity/banner/base} and every
+     * banner pattern against its own sprite — which is the layer order of
+     * {@code BannerRenderer#renderPatterns}.
+     */
+    private void addBannerGeometry(List<Quad> quads, SpecialItem special, Map<String, Object> item) throws IOException {
+        BufferedImage structure = resources.texture("minecraft:entity/banner_base");
+        // hdf.o = standing_banner: hgj, pole texOffs(44, 0) box(-1, -42, -1, 2, 42, 2) and
+        // bar texOffs(0, 42) box(-10, -44, -1, 20, 2, 2), both at PartPose.ZERO.
+        addVanillaBox(quads, Mat4.identity(), new double[]{-1, -42, -1}, new double[]{1, 0, 1}, new double[]{2, 42, 2}, structure, 44, 0, PartPose.ZERO);
+        addVanillaBox(quads, Mat4.identity(), new double[]{-10, -44, -1}, new double[]{10, -42, 1}, new double[]{20, 2, 2}, structure, 0, 42, PartPose.ZERO);
+        // hdf.p = standing_banner flag: hgi, flag texOffs(0, 0) box(-10, 0, -2, 20, 40, 1) at
+        // PartPose.offset(0, -44, 0).
+        BufferedImage base = resources.texture("minecraft:entity/banner/base");
+        addBannerFlagLayer(quads, structure, 0xFFFFFF);
+        addBannerFlagLayer(quads, base, bannerColor(special, item));
+        for (PatternLayer layer : bannerPatterns(item, "entity/banner")) {
+            addBannerFlagLayer(quads, resources.texture("minecraft:entity/banner/" + layer.name()), layer.color());
+        }
+        transformQuads(quads, Mat4.translation(8, 0, 8).multiply(Mat4.scaling(0.6666667, -0.6666667, -0.6666667)));
+    }
+
+    /** One pass of the banner flag, tinted with the diffuse colour of a banner layer. */
+    private void addBannerFlagLayer(List<Quad> quads, BufferedImage texture, int color) {
+        List<Quad> flag = new ArrayList<>();
+        addVanillaBox(flag, Mat4.identity(), new double[]{-10, 0, -2}, new double[]{10, 40, -1}, new double[]{20, 40, 1},
+                dye(texture, color), 0, 0, 0, false, PartPose.offset(0, -44, 0), ALL_FACES);
+        quads.addAll(flag);
+    }
+
+    /**
+     * Vanilla {@code hrf} (BedRenderer) with the {@code hdf.u} head and {@code hdf.t} foot layers:
+     * {@code translate(0, 0.5625, foot ? -1 : 0); rotateX(90); translate(0.5, 0.5, 0.5);
+     * rotateZ(180 + facing.toYRot()); translate(-0.5, -0.5, -0.5)}. The item context renders both
+     * halves with the vanilla south facing, so the z rotation is a full turn and the two centring
+     * translations cancel, which leaves the tilt below.
+     */
+    private void addBedGeometry(List<Quad> quads, SpecialItem special) throws IOException {
+        String color = textureName(normalizeID(special.parameter("texture")));
+        BufferedImage texture = resources.texture("minecraft:entity/bed/" + (color.isBlank() ? "white" : color));
+        for (boolean foot : new boolean[]{false, true}) {
+            List<Quad> half = new ArrayList<>();
+            if (foot) {
+                // hrf.d(): main texOffs(0, 22) box(0, 0, 0, 16, 16, 6) at PartPose.ZERO,
+                // left_leg texOffs(50, 0) box(0, 6, -16, 3, 3, 3) at rotation(90, 0, 0),
+                // right_leg texOffs(50, 12) box(-16, 6, -16, 3, 3, 3) at rotation(90, 0, 270).
+                addVanillaBox(half, Mat4.identity(), new double[]{0, 0, 0}, new double[]{16, 16, 6}, new double[]{16, 16, 6}, texture, 0, 22, PartPose.ZERO);
+                addVanillaBox(half, Mat4.identity(), new double[]{0, 6, -16}, new double[]{3, 9, -13}, new double[]{3, 3, 3}, texture, 50, 0, PartPose.rotation(Math.PI / 2, 0, 0));
+                addVanillaBox(half, Mat4.identity(), new double[]{-16, 6, -16}, new double[]{-13, 9, -13}, new double[]{3, 3, 3}, texture, 50, 12, PartPose.rotation(Math.PI / 2, 0, Math.PI * 1.5));
+            } else {
+                // hrf.a(): main texOffs(0, 0) box(0, 0, 0, 16, 16, 6) at PartPose.ZERO,
+                // left_leg texOffs(50, 6) box(0, 6, 0, 3, 3, 3) at rotation(90, 0, 90),
+                // right_leg texOffs(50, 18) box(-16, 6, 0, 3, 3, 3) at rotation(90, 0, 180).
+                addVanillaBox(half, Mat4.identity(), new double[]{0, 0, 0}, new double[]{16, 16, 6}, new double[]{16, 16, 6}, texture, 0, 0, PartPose.ZERO);
+                addVanillaBox(half, Mat4.identity(), new double[]{0, 6, 0}, new double[]{3, 9, 3}, new double[]{3, 3, 3}, texture, 50, 6, PartPose.rotation(Math.PI / 2, 0, Math.PI / 2));
+                addVanillaBox(half, Mat4.identity(), new double[]{-16, 6, 0}, new double[]{-13, 9, 3}, new double[]{3, 3, 3}, texture, 50, 18, PartPose.rotation(Math.PI / 2, 0, Math.PI));
+            }
+            transformQuads(half, Mat4.translation(0, 9, foot ? -16 : 0).multiply(Mat4.rotationX(90)));
+            quads.addAll(half);
+        }
+    }
+
+    /**
+     * Vanilla {@code ijz} (ConduitSpecialRenderer) with the {@code hdf.al} shell of {@code hrq}:
+     * {@code translate(0.5, 0.5, 0.5)} around the 6³ shell on the 32x16
+     * {@code entity/conduit/base} texture. An item is never an active conduit, so the cage, wind and
+     * eye layers of the block entity renderer are not part of the icon.
+     */
+    private void addConduitGeometry(List<Quad> quads) throws IOException {
+        // hrq.f(): shell texOffs(0, 0) box(-3, -3, -3, 6, 6, 6) at PartPose.ZERO.
+        addVanillaBox(quads, Mat4.identity(), new double[]{-3, -3, -3}, new double[]{3, 3, 3}, new double[]{6, 6, 6},
+                resources.texture("minecraft:entity/conduit/base"), 0, 0, PartPose.ZERO);
+        transformQuads(quads, Mat4.translation(8, 8, 8));
+    }
+
+    /**
+     * Vanilla {@code ikl} (TridentSpecialRenderer) with {@code hhg} (TridentModel):
+     * {@code scale(1, -1, -1)} around the 32x32 {@code entity/trident} texture. The GUI context of the
+     * trident item selects the flat {@code item/trident} model instead, so this is the held pose.
+     */
+    private void addTridentGeometry(List<Quad> quads) throws IOException {
+        BufferedImage texture = resources.texture("minecraft:entity/trident");
+        // hhg.a(): pole texOffs(0, 6) box(-0.5, 2, -0.5, 1, 25, 1) with the base texOffs(4, 0)
+        // box(-1.5, 0, -0.5, 3, 2, 1), the left spike texOffs(4, 3) box(-2.5, -3, -0.5, 1, 4, 1),
+        // the middle spike texOffs(0, 0) box(-0.5, -4, -0.5, 1, 4, 1) and the mirrored right spike
+        // texOffs(4, 3) box(1.5, -3, -0.5, 1, 4, 1), all at PartPose.ZERO.
+        Mat4 root = Mat4.identity();
+        addVanillaBox(quads, root, new double[]{-0.5, 2, -0.5}, new double[]{0.5, 27, 0.5}, new double[]{1, 25, 1}, texture, 0, 6, PartPose.ZERO);
+        addVanillaBox(quads, root, new double[]{-1.5, 0, -0.5}, new double[]{1.5, 2, 0.5}, new double[]{3, 2, 1}, texture, 4, 0, PartPose.ZERO);
+        addVanillaBox(quads, root, new double[]{-2.5, -3, -0.5}, new double[]{-1.5, 1, 0.5}, new double[]{1, 4, 1}, texture, 4, 3, PartPose.ZERO);
+        addVanillaBox(quads, root, new double[]{-0.5, -4, -0.5}, new double[]{0.5, 0, 0.5}, new double[]{1, 4, 1}, texture, 0, 0, PartPose.ZERO);
+        addVanillaBox(quads, root, new double[]{1.5, -3, -0.5}, new double[]{2.5, 1, 0.5}, new double[]{1, 4, 1}, texture, 4, 3, 0, true, PartPose.ZERO, ALL_FACES);
+        transformQuads(quads, Mat4.scaling(1, -1, -1));
+    }
+
+    /**
+     * Vanilla {@code ikh} (the {@code head} special renderer) with {@code hsa} (SkullRenderer):
+     * {@code translate(0.5, 0, 0.5); scale(-1, -1, 1)} and a 180 degree y rotation of the head part, so
+     * the face of the skull looks at the viewer.
+     */
+    private void addHeadGeometry(List<Quad> quads, SpecialItem special, Map<String, Object> item) throws IOException {
+        String kind = textureName(normalizeID(special.parameter("kind")));
+        String override = special.parameter("texture");
+        List<Quad> parts = new ArrayList<>();
+        switch (kind) {
+            case "skeleton" -> addSkullHead(parts, headTexture(override, "skeleton/skeleton"), 64, 32, false);
+            case "wither_skeleton" -> addSkullHead(parts, headTexture(override, "skeleton/wither_skeleton"), 64, 32, false);
+            case "creeper" -> addSkullHead(parts, headTexture(override, "creeper/creeper"), 64, 32, false);
+            case "zombie" -> addSkullHead(parts, headTexture(override, "zombie/zombie"), 64, 64, true);
+            case "dragon" -> addDragonHead(parts, headTexture(override, "enderdragon/dragon"));
+            case "piglin" -> addPiglinHead(parts, headTexture(override, "piglin/piglin"));
+            default -> throw new IOException("unsupported head kind: " + kind);
+        }
+        transformQuads(parts, Mat4.translation(8, 0, 8).multiply(Mat4.scaling(-1, -1, 1)));
+        quads.addAll(parts);
+    }
+
+    /**
+     * Vanilla {@code ike} (the {@code player_head} special renderer): the same skull renderer with the
+     * humanoid head layer and the skin of the profile of the item, or the default skin of the client.
+     */
+    private void addPlayerHeadGeometry(List<Quad> quads, Map<String, Object> item) throws IOException {
+        List<Quad> parts = new ArrayList<>();
+        addSkullHead(parts, specialSkin(item), 64, 64, true);
+        transformQuads(parts, Mat4.translation(8, 0, 8).multiply(Mat4.scaling(-1, -1, 1)));
+        quads.addAll(parts);
+    }
+
+    /**
+     * Vanilla {@code hhl.a()} (the head cube) and {@code hhl.e()} (the humanoid head with the 0.25
+     * inflated hat overlay): {@code head} texOffs(0, 0) box(-4, -8, -4, 8, 8, 8) at PartPose.ZERO with
+     * the hat as its child at texOffs(32, 0), both turned 180 degrees by {@code SkullModel#setupAnim}.
+     */
+    private void addSkullHead(List<Quad> quads, BufferedImage texture, int width, int height, boolean humanoid) {
+        Mat4 root = PartPose.rotation(0, Math.PI, 0).matrix();
+        addVanillaBox(quads, root, new double[]{-4, -8, -4}, new double[]{4, 0, 4}, new double[]{8, 8, 8}, texture, 0, 0, PartPose.ZERO);
+        if (humanoid) {
+            addVanillaBox(quads, root, new double[]{-4, -8, -4}, new double[]{4, 0, 4}, new double[]{8, 8, 8},
+                    texture, 32, 0, 0.25, false, PartPose.ZERO, ALL_FACES);
+        }
+    }
+
+    /**
+     * Vanilla {@code hhj} (DragonHeadModel): the head is scaled to 0.75 and lowered, the jaw hangs on a
+     * PartPose of its own and {@code hhj#setupAnim} opens it by 0.2 radians for the idle animation of
+     * the icon. The nostril and scale boxes sit on the transparent corner of the dragon texture, which
+     * is why the client keeps them.
+     */
+    private void addDragonHead(List<Quad> quads, BufferedImage texture) throws IOException {
+        Mat4 root = PartPose.offset(0, -7.986666, 0).scaled(0.75).matrix();
+        Mat4 head = root.multiply(PartPose.rotation(0, Math.PI, 0).matrix());
+        // upper_lip texOffs(176, 44) box(-6, -1, -24, 12, 5, 16),
+        // upper_head texOffs(112, 30) box(-8, -8, -10, 16, 16, 16),
+        // nostril texOffs(112, 0) box(-5, -3, -22, 2, 2, 4) mirrored and box(3, -3, -22, 2, 2, 4),
+        // scale texOffs(0, 0) box(-5, -12, -4, 2, 4, 6) mirrored and box(3, -12, -4, 2, 4, 6).
+        addVanillaBox(quads, head, new double[]{-8, -8, -10}, new double[]{8, 8, 6}, new double[]{16, 16, 16}, texture, 112, 30, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{-6, -1, -24}, new double[]{6, 4, -8}, new double[]{12, 5, 16}, texture, 176, 44, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{-5, -3, -22}, new double[]{-3, -1, -18}, new double[]{2, 2, 4}, texture, 112, 0, 0, true, PartPose.ZERO, ALL_FACES);
+        addVanillaBox(quads, head, new double[]{3, -3, -22}, new double[]{5, -1, -18}, new double[]{2, 2, 4}, texture, 112, 0, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{-5, -12, -4}, new double[]{-3, -8, 2}, new double[]{2, 4, 6}, texture, 0, 0, 0, true, PartPose.ZERO, ALL_FACES);
+        addVanillaBox(quads, head, new double[]{3, -12, -4}, new double[]{5, -8, 2}, new double[]{2, 4, 6}, texture, 0, 0, PartPose.ZERO);
+        // jaw texOffs(176, 65) box(-6, 0, -16, 12, 4, 16) at offset(0, 4, -8), opened by the idle pose.
+        addVanillaBox(quads, head, new double[]{-6, 0, -16}, new double[]{6, 4, 0}, new double[]{12, 4, 16},
+                texture, 176, 65, 0, false, PartPose.offsetAndRotation(0, 4, -8, 0.2, 0, 0), ALL_FACES);
+    }
+
+    /**
+     * Vanilla {@code hev.a} (the piglin head) with the ear angles {@code hhk#setupAnim} applies for the
+     * idle animation of the icon: head texOffs(0, 0) box(-5, -8, -4, 10, 8, 8) with the snout, the ear
+     * parts at rotation(-PI/6) and rotation(PI/6) turned to -0.7 and 0.7 radians.
+     */
+    private void addPiglinHead(List<Quad> quads, BufferedImage texture) {
+        Mat4 head = PartPose.rotation(0, Math.PI, 0).matrix();
+        addVanillaBox(quads, head, new double[]{-5, -8, -4}, new double[]{5, 0, 4}, new double[]{10, 8, 8}, texture, 0, 0, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{-2, -4, -5}, new double[]{2, 0, -4}, new double[]{4, 4, 1}, texture, 31, 1, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{2, -2, -5}, new double[]{3, 0, -4}, new double[]{1, 2, 1}, texture, 2, 4, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{-3, -2, -5}, new double[]{-2, 0, -4}, new double[]{1, 2, 1}, texture, 2, 0, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{0, 0, -2}, new double[]{1, 5, 2}, new double[]{1, 5, 4}, texture, 51, 6,
+                0, false, PartPose.offsetAndRotation(4.5, -6, 0, 0, 0, -0.7), ALL_FACES);
+        addVanillaBox(quads, head, new double[]{-1, 0, -2}, new double[]{0, 5, 2}, new double[]{1, 5, 4}, texture, 39, 6,
+                0, false, PartPose.offsetAndRotation(-4.5, -6, 0, 0, 0, 0.7), ALL_FACES);
+    }
+
+    /**
+     * Vanilla {@code ikf} (ShieldSpecialRenderer) with {@code hha} (ShieldModel): {@code scale(1, -1,
+     * -1)}. The handle samples {@code entity/shield_base} or {@code entity/shield_base_nopattern}; the
+     * plate is drawn with the same sprite and, when the item carries patterns, once more per colour
+     * layer against {@code entity/shield/base} and {@code entity/shield/<pattern>}.
+     */
+    private void addShieldGeometry(List<Quad> quads, Map<String, Object> item) throws IOException {
+        List<PatternLayer> patterns = bannerPatterns(item, "entity/shield");
+        BufferedImage texture = resources.texture(patterns.isEmpty()
+                ? "minecraft:entity/shield_base_nopattern" : "minecraft:entity/shield_base");
+        // hdf.dd = shield: plate texOffs(0, 0) box(-6, -11, -2, 12, 22, 1) and
+        // handle texOffs(26, 0) box(-1, -3, -1, 2, 6, 6), both at PartPose.ZERO.
+        double[] plateFrom = {-6, -11, -2};
+        double[] plateTo = {6, 11, -1};
+        double[] plateSize = {12, 22, 1};
+        List<BufferedImage> plateLayers = new ArrayList<>();
+        plateLayers.add(texture);
+        if (!patterns.isEmpty()) {
+            plateLayers.add(dye(resources.texture("minecraft:entity/shield/base"), bannerColor(null, item)));
+            for (PatternLayer layer : patterns) {
+                plateLayers.add(dye(resources.texture("minecraft:entity/shield/" + layer.name()), layer.color()));
+            }
+        }
+        addVanillaBox(quads, Mat4.identity(), new double[]{-1, -3, -1}, new double[]{1, 3, 5}, new double[]{2, 6, 6}, texture, 26, 0, PartPose.ZERO);
+        for (BufferedImage layer : plateLayers) {
+            addVanillaBox(quads, Mat4.identity(), plateFrom, plateTo, plateSize, layer, 0, 0, PartPose.ZERO);
+        }
+        transformQuads(quads, Mat4.scaling(1, -1, -1));
+    }
+
+    /**
+     * Vanilla {@code hrs} (DecoratedPotRenderer) with the {@code hdf.aC} base and {@code hdf.aD} side
+     * layers. The special renderer adds no pose of its own, so the box list is the item space; every
+     * side samples its own pottery pattern sprite and falls back to {@code decorated_pot_side}.
+     */
+    private void addDecoratedPotGeometry(List<Quad> quads, Map<String, Object> item) throws IOException {
+        BufferedImage base = resources.texture("minecraft:entity/decorated_pot/decorated_pot_base");
+        // hrs.a(): neck texOffs(0, 0) box(4, 17, 4, 8, 3, 8) inset by 0.1 and texOffs(0, 5)
+        // box(5, 20, 5, 6, 1, 6) grown by 0.2, at PartPose.offsetAndRotation(0, 37, 16, PI, 0, 0);
+        // top and bottom are the same texOffs(-14, 13) box(0, 0, 0, 14, 0, 14) at offset(1, 16, 1)
+        // and offset(1, 0, 1). Only the face that looks out of the pot is kept.
+        Mat4 root = Mat4.identity();
+        PartPose neck = PartPose.offsetAndRotation(0, 37, 16, Math.PI, 0, 0);
+        double[] roundFrom = {0, 0, 0};
+        double[] roundTo = {14, 0, 14};
+        double[] roundSize = {14, 0, 14};
+        addVanillaBox(quads, root, new double[]{4, 17, 4}, new double[]{12, 20, 12}, new double[]{8, 3, 8}, base, 0, 0, -0.1, false, neck, ALL_FACES);
+        addVanillaBox(quads, root, new double[]{5, 20, 5}, new double[]{11, 21, 11}, new double[]{6, 1, 6}, base, 0, 5, 0.2, false, neck, ALL_FACES);
+        addVanillaBox(quads, root, roundFrom, roundTo, roundSize, base, -14, 13, 0, false, PartPose.offset(1, 16, 1), Set.of("down"));
+        addVanillaBox(quads, root, roundFrom, roundTo, roundSize, base, -14, 13, 0, false, PartPose.offset(1, 0, 1), Set.of("up"));
+        // hrs.d(): one 14x16 plane per side at texOffs(1, 0) with the north face skipped, in the
+        // vanilla back, left, right, front order.
+        List<PatternLayer> sherds = potDecorations(item);
+        addPotSide(quads, sherds.get(0), PartPose.offsetAndRotation(15, 16, 1, 0, 0, Math.PI));
+        addPotSide(quads, sherds.get(1), PartPose.offsetAndRotation(1, 16, 1, 0, -Math.PI / 2, Math.PI));
+        addPotSide(quads, sherds.get(2), PartPose.offsetAndRotation(15, 16, 15, 0, Math.PI / 2, Math.PI));
+        addPotSide(quads, sherds.get(3), PartPose.offsetAndRotation(1, 16, 15, Math.PI, 0, 0));
+    }
+
+    private void addPotSide(List<Quad> quads, PatternLayer sherd, PartPose pose) throws IOException {
+        String sprite = sherd.name().isEmpty()
+                ? "minecraft:entity/decorated_pot/decorated_pot_side"
+                : "minecraft:entity/decorated_pot/" + sherd.name();
+        addVanillaBox(quads, Mat4.identity(), new double[]{0, 0, 0}, new double[]{14, 16, 0}, new double[]{14, 16, 0},
+                resources.texture(sprite), 1, 0, 0, false, pose, Set.of("north"));
+    }
+
+    /**
+     * Vanilla {@code ika} (CopperGolemStatueSpecialRenderer) with the {@code hdf.an} standing layer of
+     * {@code hbq} (CopperGolemModel): {@code translate(0.5, 1.5, 0.5); scale(-1, -1, 1)}, with the root
+     * pose {@code hho#setupAnim} applies to the statue — the y offset of the layer is cleared and the
+     * model is rolled by half a turn, which the scale of the renderer cancels again. The other three
+     * poses the item can select (sitting, running, star) are not transcribed yet and use this one.
+     */
+    private void addCopperGolemGeometry(List<Quad> quads, SpecialItem special) throws IOException {
+        String texture = special.parameter("texture");
+        BufferedImage skin = resources.texture(texture.isBlank()
+                ? "minecraft:entity/copper_golem/copper_golem" : normalizeID(texture));
+        Mat4 root = PartPose.offsetAndRotation(0, 0, 0, 0, 0, Math.PI).matrix();
+        Mat4 body = root.multiply(PartPose.offset(0, -5, 0).matrix());
+        Mat4 head = body.multiply(PartPose.offset(0, -6, 0).matrix());
+        // hbq.e(): body texOffs(0, 15) box(-4, -6, -3, 8, 6, 6); head texOffs(0, 0)
+        // box(-4, -5, -5, 8, 5, 10) grown by 0.015 with the snout texOffs(56, 0) box(-1, -2, -6, 2, 3, 2)
+        // and the antenna texOffs(37, 8) and texOffs(37, 0) inset by 0.015; right_arm texOffs(36, 16)
+        // box(-3, -1, -2, 3, 10, 4) and left_arm texOffs(50, 16) box(0, -1, -2, 3, 10, 4);
+        // right_leg texOffs(0, 27) box(-4, 0, -2, 4, 5, 4) and left_leg texOffs(16, 27) box(0, 0, -2, 4, 5, 4).
+        addVanillaBox(quads, body, new double[]{-4, -6, -3}, new double[]{4, 0, 3}, new double[]{8, 6, 6}, skin, 0, 15, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{-4, -5, -5}, new double[]{4, 0, 5}, new double[]{8, 5, 10}, skin, 0, 0, 0.015, false, PartPose.ZERO, ALL_FACES);
+        addVanillaBox(quads, head, new double[]{-1, -2, -6}, new double[]{1, 1, -4}, new double[]{2, 3, 2}, skin, 56, 0, PartPose.ZERO);
+        addVanillaBox(quads, head, new double[]{-1, -9, -1}, new double[]{1, -5, 1}, new double[]{2, 4, 2}, skin, 37, 8, -0.015, false, PartPose.ZERO, ALL_FACES);
+        addVanillaBox(quads, head, new double[]{-2, -13, -2}, new double[]{2, -9, 2}, new double[]{4, 4, 4}, skin, 37, 0, -0.015, false, PartPose.ZERO, ALL_FACES);
+        addVanillaBox(quads, body, new double[]{-3, -1, -2}, new double[]{0, 9, 2}, new double[]{3, 10, 4}, skin, 36, 16, 0, false, PartPose.offset(-4, -6, 0), ALL_FACES);
+        addVanillaBox(quads, body, new double[]{0, -1, -2}, new double[]{3, 9, 2}, new double[]{3, 10, 4}, skin, 50, 16, 0, false, PartPose.offset(4, -6, 0), ALL_FACES);
+        addVanillaBox(quads, root, new double[]{-4, 0, -2}, new double[]{0, 5, 2}, new double[]{4, 5, 4}, skin, 0, 27, 0, false, PartPose.offset(0, -5, 0), ALL_FACES);
+        addVanillaBox(quads, root, new double[]{0, 0, -2}, new double[]{4, 5, 2}, new double[]{4, 5, 4}, skin, 16, 27, 0, false, PartPose.offset(0, -5, 0), ALL_FACES);
+        transformQuads(quads, Mat4.translation(8, 24, 8).multiply(Mat4.scaling(-1, -1, 1)));
+    }
+
+    /** The texture of a head family, either the explicit one of the definition or the vanilla default. */
+    private BufferedImage headTexture(String override, String fallback) throws IOException {
+        String path = override.isBlank() ? fallback : override;
+        path = normalizeID(path);
+        int separator = path.indexOf(':');
+        path = separator < 0 ? path : path.substring(separator + 1);
+        return resources.texture("minecraft:textures/entity/" + path + ".png");
+    }
+
+    /**
+     * The 64x64 skin of a player head: the inline texture of the {@code minecraft:profile} component,
+     * or the default skin of the client when the item carries none. Only an embedded
+     * {@code data:image/png;base64} skin URL is read; a remote texture hash is left to the caller.
+     */
+    private BufferedImage specialSkin(Map<String, Object> item) throws IOException {
+        Object profile = itemComponent(item, "profile");
+        if (profile instanceof Map<?, ?> raw && castMap(raw).get("properties") instanceof List<?> list) {
+            for (Object entry : list) {
+                if (!(entry instanceof Map<?, ?> property)) {
+                    continue;
+                }
+                Map<String, Object> value = castMap(property);
+                if (!"textures".equalsIgnoreCase(Json.string(value, "name", ""))) {
+                    continue;
+                }
+                BufferedImage skin = profileSkin(Json.string(value, "value", ""));
+                if (skin != null) {
+                    return skin;
+                }
+            }
+        }
+        return resources.texture("minecraft:entity/player/wide/steve");
+    }
+
+    /**
+     * The skin a {@code minecraft:profile} property points at. The property is the base64 payload of
+     * the profile document and only its embedded {@code data:image/png:base64} image is supported, so a
+     * profile that names a remote texture hash returns null and the caller falls back to the default.
+     */
+    private BufferedImage profileSkin(String property) throws IOException {
+        if (property.isBlank()) {
+            return null;
+        }
+        Map<String, Object> profile;
+        try {
+            profile = Json.object(Json.parse(new String(Base64.getDecoder().decode(property), StandardCharsets.UTF_8)), "profile");
+        } catch (IllegalArgumentException error) {
+            return null;
+        }
+        if (!(profile.get("textures") instanceof Map<?, ?> textures)) {
+            return null;
+        }
+        Object skin = castMap(textures).get("SKIN");
+        if (!(skin instanceof Map<?, ?> entry)) {
+            return null;
+        }
+        String url = Json.string(castMap(entry), "url", "");
+        if (!url.startsWith("data:image/png;base64,")) {
+            return null;
+        }
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("texture", url);
+        return skinTexture(value);
+    }
+
+    /**
+     * The pattern layers of an item in the vanilla order: the {@code banner_patterns} component with
+     * the dye colour of every layer, resolved against the atlas of the family.
+     */
+    private List<PatternLayer> bannerPatterns(Map<String, Object> item, String atlas) throws IOException {
+        List<PatternLayer> layers = new ArrayList<>();
+        if (itemComponent(item, "banner_patterns") instanceof List<?> patterns) {
+            for (Object value : patterns) {
+                if (!(value instanceof Map<?, ?> raw)) {
+                    continue;
+                }
+                Map<String, Object> pattern = castMap(raw);
+                String name = textureName(normalizeID(Json.string(pattern, "pattern", "")));
+                if (name.isBlank()) {
+                    continue;
+                }
+                layers.add(new PatternLayer(name, componentColor(pattern.get("color"), 0xFFFFFF)));
+            }
+        }
+        if (layers.size() > 16) {
+            throw new IOException("a " + atlas + " item cannot carry more than 16 patterns");
+        }
+        return layers;
+    }
+
+    /**
+     * The base colour of a dyeable item. Vanilla takes it from the {@code color} field of the special
+     * model definition — which is where the sixteen coloured banner items carry it — and a
+     * {@code base_color} component of the item overrides it.
+     */
+    private int bannerColor(SpecialItem special, Map<String, Object> item) {
+        int fallback = special == null ? 0xFFFFFF : componentColor(special.parameter("color"), 0xFFFFFF);
+        return componentColor(itemComponent(item, "base_color"), fallback);
+    }
+
+    /** The four pottery patterns of a pot in the vanilla back, left, right, front order. */
+    private List<PatternLayer> potDecorations(Map<String, Object> item) {
+        List<PatternLayer> sherds = new ArrayList<>(List.of(
+                new PatternLayer("", 0xFFFFFF), new PatternLayer("", 0xFFFFFF),
+                new PatternLayer("", 0xFFFFFF), new PatternLayer("", 0xFFFFFF)));
+        if (itemComponent(item, "pot_decorations") instanceof List<?> values) {
+            for (int index = 0; index < 4 && index < values.size(); index++) {
+                String id = textureName(normalizeID(String.valueOf(values.get(index))));
+                if (id.endsWith("_pottery_sherd")) {
+                    sherds.set(index, new PatternLayer(
+                            id.substring(0, id.length() - "_pottery_sherd".length()) + "_pottery_pattern", 0xFFFFFF));
+                }
+            }
+        }
+        return sherds;
+    }
+
+    /**
+     * One item component, accepting the namespaced and the plain key and looking both inside the
+     * component map and on the item itself.
+     */
+    private static Object itemComponent(Map<String, Object> item, String name) {
+        Object value = item.get(name);
+        if (value != null) {
+            return value;
+        }
+        if (item.get("components") instanceof Map<?, ?> components) {
+            for (String key : List.of("minecraft:" + name, name)) {
+                if (components.containsKey(key)) {
+                    return components.get(key);
+                }
+            }
+        }
+        return null;
+    }
+
+    /** A dye colour of a component: the name of a vanilla dye or an explicit rgb value. */
+    private static int componentColor(Object value, int fallback) {
+        if (value instanceof Number number) {
+            return number.intValue() & 0xFFFFFF;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Object rgb = map.get("rgb");
+            return rgb instanceof Number number ? number.intValue() & 0xFFFFFF : fallback;
+        }
+        if (value == null) {
+            return fallback;
+        }
+        String name = String.valueOf(value).trim().toLowerCase(Locale.ROOT);
+        int separator = name.indexOf(':');
+        if (separator >= 0) {
+            name = name.substring(separator + 1);
+        }
+        for (int index = 0; index < DYE_NAMES.length; index++) {
+            if (DYE_NAMES[index].equals(name)) {
+                return DYE_COLORS[index];
+            }
+        }
+        return fallback;
+    }
+
+
 
     private String selectItemModel(Object value, Map<String, Object> item) throws IOException {
         if (!(value instanceof Map<?, ?> map)) {
@@ -1589,12 +2163,11 @@ final class Renderer {
             case "marker" -> "blue_marker";
             default -> name;
         };
-        try {
-            return resources.texture("minecraft:map/decorations/" + name);
-        } catch (IOException error) {
-            throw new IOException("unknown map marker type: " + type, error);
+        String sprite = "minecraft:map/decorations/" + name;
+        if (!resources.hasTexture(sprite)) {
+            throw new IOException("unknown map marker type: " + type);
         }
-    }
+        return resources.texture(sprite);    }
 
     private List<Integer> bytesToNumbers(byte[] bytes) {
         ArrayList<Integer> values = new ArrayList<>(bytes.length);
@@ -1837,11 +2410,18 @@ final class Renderer {
      * pixels above its border and always drawn with a shadow.
      */
     private void drawSlotItem(BufferedImage destination, Map<String, Object> item, int x, int y) throws IOException {
-        drawScaled(destination, renderItem(item, 16), x, y, 16, 16);
-        int count = Json.integer(item, "count", 0);
-        if (count > 1) {
-            String text = Integer.toString(count);
-            drawText(destination, x + 17 - textWidth(text, 1), y + 9, text, 0xFFFFFF, 1, true);
+        try {
+            drawScaled(destination, renderItem(item, 16), x, y, 16, 16);
+            int count = Json.integer(item, "count", 0);
+            if (count > 1) {
+                String text = Integer.toString(count);
+                drawText(destination, x + 17 - textWidth(text, 1), y + 9, text, 0xFFFFFF, 1, true);
+            }
+        } catch (RuntimeException error) {
+            // renderItem already reports and degrades its own failures; this keeps a slot alive even
+            // when the decoration or the canvas blit is what breaks.
+            System.err.println("slot item fell back to the missing model: " + error);
+            drawScaled(destination, renderMissingItemIcon(16), x, y, 16, 16);
         }
     }
 
@@ -2057,6 +2637,15 @@ final class Renderer {
     }
 
     private void addBoxQuads(List<Quad> quads, double[] from, double[] to, double[] uvSize, BufferedImage texture, int u, int v, boolean mirror) {
+        addBoxQuads(quads, from, to, uvSize, texture, u, v, mirror, NO_FACES);
+    }
+
+    /**
+     * The box layout of the player model, which predates the vanilla cube transcription of
+     * {@link #addVanillaBox} and is kept for it: the same six faces in the same texture layout, but
+     * with the y and z faces of this renderer's own conventions. {@code skip} drops individual faces.
+     */
+    private void addBoxQuads(List<Quad> quads, double[] from, double[] to, double[] uvSize, BufferedImage texture, int u, int v, boolean mirror, Set<String> skip) {
         double x0 = from[0];
         double y0 = from[1];
         double z0 = from[2];
@@ -2075,12 +2664,24 @@ final class Renderer {
             new Vec3(x0, y1, z1), new Vec3(x1, y1, z1), new Vec3(x1, y0, z1), new Vec3(x0, y0, z1),
             new Vec3(x0, y1, z0), new Vec3(x1, y1, z0), new Vec3(x1, y0, z0), new Vec3(x0, y0, z0)
         };
-        addQuad(quads, corners, texture, new int[]{0, 1, 3, 2}, new Vec3(0, 0, 1), u + d, v + d, u + d + w, v + d + h);
-        addQuad(quads, corners, texture, new int[]{5, 4, 6, 7}, new Vec3(0, 0, -1), u + w + 2 * d, v + d, u + 2 * w + 2 * d, v + d + h);
-        addQuad(quads, corners, texture, new int[]{4, 0, 7, 3}, new Vec3(-1, 0, 0), u, v + d, u + d, v + d + h);
-        addQuad(quads, corners, texture, new int[]{1, 5, 2, 6}, new Vec3(1, 0, 0), u + w + d, v + d, u + w + 2 * d, v + d + h);
-        addQuad(quads, corners, texture, new int[]{4, 5, 0, 1}, new Vec3(0, 1, 0), u + d, v, u + d + w, v + d);
-        addQuad(quads, corners, texture, new int[]{3, 2, 7, 6}, new Vec3(0, -1, 0), u + d + w, v, u + 2 * w + d, v + d);
+        if (!skip.contains("south")) {
+            addQuad(quads, corners, texture, new int[]{0, 1, 3, 2}, new Vec3(0, 0, 1), u + d, v + d, u + d + w, v + d + h);
+        }
+        if (!skip.contains("north")) {
+            addQuad(quads, corners, texture, new int[]{5, 4, 6, 7}, new Vec3(0, 0, -1), u + w + 2 * d, v + d, u + 2 * w + 2 * d, v + d + h);
+        }
+        if (!skip.contains("west")) {
+            addQuad(quads, corners, texture, new int[]{4, 0, 7, 3}, new Vec3(-1, 0, 0), u, v + d, u + d, v + d + h);
+        }
+        if (!skip.contains("east")) {
+            addQuad(quads, corners, texture, new int[]{1, 5, 2, 6}, new Vec3(1, 0, 0), u + w + d, v + d, u + w + 2 * d, v + d + h);
+        }
+        if (!skip.contains("up")) {
+            addQuad(quads, corners, texture, new int[]{4, 5, 0, 1}, new Vec3(0, 1, 0), u + d, v, u + d + w, v + d);
+        }
+        if (!skip.contains("down")) {
+            addQuad(quads, corners, texture, new int[]{3, 2, 7, 6}, new Vec3(0, -1, 0), u + d + w, v, u + 2 * w + d, v + d);
+        }
     }
 
     private void addQuad(List<Quad> quads, Vec3[] corners, BufferedImage texture, int[] order, Vec3 normal, double u0, double v0, double u1, double v1) {
@@ -2210,6 +2811,99 @@ final class Renderer {
         int green = ((source >> 8) & 0xFF) * sourceAlpha + ((destination >> 8) & 0xFF) * destinationAlpha * (255 - sourceAlpha) / 255;
         int blue = (source & 0xFF) * sourceAlpha + (destination & 0xFF) * destinationAlpha * (255 - sourceAlpha) / 255;
         return (outAlpha << 24) | ((red / outAlpha) << 16) | ((green / outAlpha) << 8) | (blue / outAlpha);
+    }
+
+
+    /**
+     * The straight orthographic camera of a vanilla GUI item icon: one unit of the 0..16 item box is
+     * {@code size / 16} pixels, the box centre lands on the canvas centre and the viewer looks along
+     * {@code -z}. Every 3D orientation of an icon comes from the display transform of its model, not
+     * from the camera, which is what makes the icon match the slot render of the client.
+     */
+    private BufferedImage renderItemIcon(List<Quad> quads, int size) {
+        BufferedImage canvas = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        Scene scene = new Scene(0, 0);
+        scene.scale = size / 16.0;
+        scene.offsetX = size / 2.0;
+        scene.offsetY = size / 2.0;
+        paintScene(canvas, quads, scene);
+        return canvas;
+    }
+
+    /** Moves a list of quads into another space, transforming their corners and their normals. */
+    private static void transformQuads(List<Quad> quads, Mat4 transform) {
+        for (Quad quad : quads) {
+            for (int index = 0; index < 4; index++) {
+                double[] point = transform.point(quad.corners[index].x(), quad.corners[index].y(), quad.corners[index].z());
+                quad.corners[index] = new Vec3(point[0], point[1], point[2]);
+            }
+            double[] normal = transform.normal(quad.normal.x(), quad.normal.y(), quad.normal.z());
+            quad.normal = new Vec3(normal[0], normal[1], normal[2]);
+        }
+    }
+
+    /**
+     * One box of a vanilla model, transcribed exactly as {@code ModelPart.Cube} bakes it: the six
+     * faces in the vanilla texture layout (one unit of depth, then the width, then the mirrored width
+     * that closes the top row) and the pose of the part the box belongs to, applied below the matrix of
+     * its parents. Vanilla describes the special item models in client code rather than in a model
+     * JSON, so the numbers passed here are the {@code addBox} and {@code texOffs} arguments of the
+     * decompiled classes, unchanged.
+     *
+     * <p>{@code faces} is the face set of the vanilla {@code addBox} overload: an empty set means all
+     * six faces, and a model that lists a subset — the decorates pot sides list only their north face —
+     * emits exactly those. A zero depth box keeps only the two faces of its plane.</p>
+     */
+    private void addVanillaBox(List<Quad> quads, Mat4 parent, double[] from, double[] to, double[] uvSize,
+            BufferedImage texture, int u, int v, double deformation, boolean mirror, PartPose pose, Set<String> faces) {
+        double[] box = inflate(from, to, deformation);
+        double x0 = box[0];
+        double y0 = box[1];
+        double z0 = box[2];
+        double x1 = box[3];
+        double y1 = box[4];
+        double z1 = box[5];
+        if (mirror) {
+            double swap = x0;
+            x0 = x1;
+            x1 = swap;
+        }
+        double w = uvSize[0];
+        double h = uvSize[1];
+        double d = uvSize[2];
+        Vec3[] corners = {
+            new Vec3(x0, y0, z0), new Vec3(x1, y0, z0), new Vec3(x1, y1, z0), new Vec3(x0, y1, z0),
+            new Vec3(x0, y0, z1), new Vec3(x1, y0, z1), new Vec3(x1, y1, z1), new Vec3(x0, y1, z1)
+        };
+        List<Quad> local = new ArrayList<>();
+        // The order of the corners of every face and the rectangle it samples are the vanilla ones,
+        // including the inverted v range of the top face.
+        if (faces.contains("down")) {
+            addQuad(local, corners, texture, new int[]{4, 5, 0, 1}, new Vec3(0, -1, 0), u + d, v, u + d + w, v + d);
+        }
+        if (faces.contains("up")) {
+            addQuad(local, corners, texture, new int[]{3, 2, 7, 6}, new Vec3(0, 1, 0), u + d + w, v + d, u + d + 2 * w, v);
+        }
+        if (faces.contains("north")) {
+            addQuad(local, corners, texture, new int[]{0, 1, 3, 2}, new Vec3(0, 0, -1), u + d, v + d, u + d + w, v + d + h);
+        }
+        if (faces.contains("south")) {
+            addQuad(local, corners, texture, new int[]{5, 4, 6, 7}, new Vec3(0, 0, 1), u + 2 * d + w, v + d, u + 2 * d + 2 * w, v + d + h);
+        }
+        if (faces.contains("west")) {
+            addQuad(local, corners, texture, new int[]{4, 0, 7, 3}, new Vec3(-1, 0, 0), u, v + d, u + d, v + d + h);
+        }
+        if (faces.contains("east")) {
+            addQuad(local, corners, texture, new int[]{1, 5, 2, 6}, new Vec3(1, 0, 0), u + d + w, v + d, u + 2 * d + w, v + d + h);
+        }
+        transformQuads(local, parent.multiply(pose.matrix()));
+        quads.addAll(local);
+    }
+
+    /** A box of a model whose part poses are already folded into {@code parent}. */
+    private void addVanillaBox(List<Quad> quads, Mat4 parent, double[] from, double[] to, double[] uvSize,
+            BufferedImage texture, int u, int v, PartPose pose) {
+        addVanillaBox(quads, parent, from, to, uvSize, texture, u, v, 0, false, pose, ALL_FACES);
     }
 
 
@@ -2489,24 +3183,33 @@ final class Renderer {
         List<Quad> local = new ArrayList<>();
         boolean frontLit;
         DisplayTransform display;
-        if (!selection.special.isBlank()) {
-            // Special block style items are not part of the model JSON format; the project already
-            // falls back to a single layer sprite for them, which becomes the generated plate here.
-            BufferedImage texture = resources.texture(specialItemTexture(selection.special));
-            addGeneratedPlate(local, texture);
+        try {
+            if (selection.special != null) {
+                // A special model is the same geometry in every display context; only the display
+                // transform of the model the item points at changes, which the chain below applies.
+                SpecialItem special = selection.special;
+                addSpecialGeometry(local, special, item);
+                frontLit = "front".equalsIgnoreCase(special.base.isBlank()
+                        ? "" : loadModel(special.base).guiLight);
+                display = specialDisplay(special, offhand ? "thirdperson_lefthand" : "thirdperson_righthand");
+            } else {
+                Model model = loadModelWithOverrides(selection.model, item);
+                display = model.displayTransform(offhand ? "thirdperson_lefthand" : "thirdperson_righthand");
+                if (model.isGenerated()) {
+                    addGeneratedGeometry(local, model);
+                } else if (!model.elements.isEmpty()) {
+                    addElementGeometry(local, model);
+                } else {
+                    throw new IOException("item model has no renderable elements or generated layer: " + id);
+                }
+                frontLit = "front".equalsIgnoreCase(model.guiLight);
+            }
+        } catch (IOException | RuntimeException error) {
+            System.err.println("held item " + id + " fell back to the missing model: " + error);
+            local.clear();
+            addElementGeometry(local, missingModel());
             frontLit = true;
             display = null;
-        } else {
-            Model model = loadModelWithOverrides(selection.model, item);
-            display = model.displayTransform(offhand ? "thirdperson_lefthand" : "thirdperson_righthand");
-            if (model.isGenerated()) {
-                addGeneratedGeometry(local, model);
-            } else if (!model.elements.isEmpty()) {
-                addElementGeometry(local, model);
-            } else {
-                throw new IOException("item model has no renderable elements or generated layer: " + id);
-            }
-            frontLit = "front".equalsIgnoreCase(model.guiLight);
         }
         Mat4 transform = heldItemTransform(offhand, slim, display);
         for (Quad quad : local) {
@@ -2905,6 +3608,40 @@ final class Renderer {
         return id;
     }
 
+    /**
+     * Vanilla {@code PartPose} of a {@code PartDefinition}: an offset in sixteenths of a block, a
+     * rotation in radians around x, y and z and a uniform scale, applied in that order.
+     */
+    private record PartPose(double[] offset, double x, double y, double z, double scale) {
+        static final PartPose ZERO = new PartPose(new double[]{0, 0, 0}, 0, 0, 0, 1);
+
+        static PartPose offset(double x, double y, double z) {
+            return new PartPose(new double[]{x, y, z}, 0, 0, 0, 1);
+        }
+
+        static PartPose rotation(double x, double y, double z) {
+            return new PartPose(new double[]{0, 0, 0}, x, y, z, 1);
+        }
+
+        static PartPose offsetAndRotation(double x, double y, double z, double xRot, double yRot, double zRot) {
+            return new PartPose(new double[]{x, y, z}, xRot, yRot, zRot, 1);
+        }
+
+        PartPose scaled(double value) {
+            return new PartPose(offset, x, y, z, value);
+        }
+
+        /** Vanilla {@code ModelPart#translateAndRotate} followed by the scale of the pose. */
+        Mat4 matrix() {
+            return Mat4.translation(offset[0], offset[1], offset[2])
+                    .multiply(Mat4.rotationZ(Math.toDegrees(z)))
+                    .multiply(Mat4.rotationY(Math.toDegrees(y)))
+                    .multiply(Mat4.rotationX(Math.toDegrees(x)))
+                    .multiply(Mat4.scaling(scale, scale, scale));
+        }
+    }
+
+
     private record Vec3(double x, double y, double z) {
     }
 
@@ -2917,6 +3654,8 @@ final class Renderer {
     private static final class ResourceStack {
         private final List<Path> roots;
         private final Map<String, BufferedImage> textureCache = new HashMap<>();
+        private final Set<String> missingWarnings = java.util.Collections.newSetFromMap(new HashMap<>());
+        private BufferedImage missingTexture;
         private Map<String, Object> language;
 
         private ResourceStack(List<Path> roots) {
@@ -2954,7 +3693,15 @@ final class Renderer {
             return Json.object(value, relative);
         }
 
+        /**
+         * Reads a texture, falling back to the generated missing texture. A missing sprite degrades
+         * that single layer of the picture instead of failing the whole render; the reason is written
+         * to stderr once per texture so a broken pack stays diagnosable.
+         */
         BufferedImage texture(String textureID) throws IOException {
+            if (MISSING_TEXTURE.equals(textureID)) {
+                return missingTexture();
+            }
             String relative = texturePath(textureID);
             BufferedImage cached = textureCache.get(relative);
             if (cached != null) {
@@ -2962,14 +3709,43 @@ final class Renderer {
             }
             byte[] data = bytes(relative);
             if (data == null) {
-                throw new IOException("missing texture " + textureID);
+                if (missingWarnings.add(relative)) {
+                    System.err.println("missing texture " + textureID + ", drawing the missing texture instead");
+                }
+                return missingTexture();
             }
             BufferedImage image = ImageIO.read(new ByteArrayInputStream(data));
             if (image == null) {
-                throw new IOException("invalid PNG texture " + textureID);
+                if (missingWarnings.add(relative)) {
+                    System.err.println("invalid PNG texture " + textureID + ", drawing the missing texture instead");
+                }
+                return missingTexture();
             }
             textureCache.put(relative, image);
             return image;
+        }
+
+        /** Whether a texture file exists, for the call sites that must still report a bad reference. */
+        boolean hasTexture(String textureID) throws IOException {
+            return MISSING_TEXTURE.equals(textureID) || bytes(texturePath(textureID)) != null;
+        }
+
+        /**
+         * The vanilla missing texture, generated instead of loaded so that it is available in every
+         * resource context: a 16x16 checkerboard of two 8x8 quadrants, black on the top left and the
+         * bottom right and {@code 0xFFF800F8} on the other two.
+         */
+        BufferedImage missingTexture() {
+            if (missingTexture == null) {
+                BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+                for (int y = 0; y < 16; y++) {
+                    for (int x = 0; x < 16; x++) {
+                        image.setRGB(x, y, (x < 8) ^ (y < 8) ? 0xFFF800F8 : 0xFF000000);
+                    }
+                }
+                missingTexture = image;
+            }
+            return missingTexture;
         }
 
         /** Sprite metadata of a texture, used for the tooltip nine slice borders. Null when absent. */

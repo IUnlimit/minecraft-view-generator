@@ -29,7 +29,12 @@ public final class RendererSmokeTest {
         testAchievement(renderer, root);
         testTooltip(renderer, root);
         testHeldItems(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/achievement/tooltip/hand paths passed");
+        testSpecialItems(renderer, root);
+        testSpecialComponents(renderer, root);
+        testSpecialHeldItems(renderer, root);
+        testSpecialItemList(renderer, root);
+        testMissingResources(renderer, root);
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/achievement/tooltip/hand/special/resources paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -467,6 +472,252 @@ public final class RendererSmokeTest {
         require(slimBounds[0] > heldBounds[0], "slim arm does not move the held item towards the body");
     }
 
+
+
+
+    /**
+     * The seven special model families the renderer transcribes from the client code. Every fixture
+     * texture paints one rectangle per region of the vanilla cube layout with its own colour, and the
+     * smoke test matches colours by their channel ratios because face shading scales all three
+     * channels by the same factor: a colour that shows up proves which region was sampled.
+     */
+    private static void testSpecialItems(Renderer renderer, Path root) throws Exception {
+        // The banner is the pole and the bar around a flag that carries the dye colour of the model
+        // definition; the flag of banner_base must end up covered by the dyed layer on top of it.
+        BufferedImage banner = renderItem(renderer, root, "minecraft:lime_banner", Map.of());
+        requireContentSize(banner, "banner", 28, 58);
+        require(countColor(banner, ColorKind.BANNER_FLAG) > 50, "banner flag is not the diffuse colour of its dye");
+        require(countColor(banner, ColorKind.BANNER_POLE) > 20, "banner pole or bar did not sample entity/banner_base");
+        require(countColor(banner, ColorKind.BANNER_HIDDEN) == 0, "the plain flag layer of banner_base is still visible");
+
+        // The bed renders its head and foot layers with the tilt of BedRenderer.
+        BufferedImage bed = renderItem(renderer, root, "minecraft:fixture_bed", Map.of());
+        requireContentSize(bed, "bed", 55, 49);
+        require(countColor(bed, ColorKind.BED_HEAD) > 100, "bed head layer missing");
+        require(countColor(bed, ColorKind.BED_FOOT) > 100, "bed foot layer missing");
+
+        // A skull is the head cube of its kind, turned to face the viewer.
+        BufferedImage skull = renderItem(renderer, root, "minecraft:skeleton_skull", Map.of());
+        requireContentSize(skull, "skeleton skull", 45, 49);
+        require(countColor(skull, ColorKind.SKULL) > 100, "skeleton skull did not sample its head cube");
+        // A player head adds the 0.25 inflated hat overlay, which hides the head cube underneath it.
+        BufferedImage head = renderItem(renderer, root, "minecraft:player_head", Map.of());
+        requireContentSize(head, "player head", 48, 52);
+        require(countColor(head, ColorKind.HAT) > 100, "player head is missing the hat overlay");
+        require(countColor(head, ColorKind.SKULL) == 0, "the head cube shows through the hat overlay");
+
+        // The conduit icon is the inactive 6³ shell of the block entity renderer.
+        BufferedImage conduit = renderItem(renderer, root, "minecraft:conduit", Map.of());
+        requireContentSize(conduit, "conduit", 35, 37);
+        require(countColor(conduit, ColorKind.CONDUIT) > 50, "conduit did not sample the shell texture");
+
+        // The shield plate is drawn with the patternless sprite when the item carries no pattern.
+        BufferedImage shield = renderItem(renderer, root, "minecraft:shield", Map.of());
+        requireContentSize(shield, "shield", 35, 61);
+        require(countColor(shield, ColorKind.SHIELD_PLATE) > 100, "shield plate missing");
+
+        // The pot is the neck, the lid and the four sides of DecoratedPotRenderer.
+        BufferedImage pot = renderItem(renderer, root, "minecraft:decorated_pot", Map.of());
+        requireContentSize(pot, "decorated pot", 48, 59);
+        require(countColor(pot, ColorKind.POT_NECK) > 20, "pot neck missing");
+        require(countColor(pot, ColorKind.POT_LID) > 20, "pot lid missing");
+        require(countColor(pot, ColorKind.POT_SIDE) > 100, "pot side plane missing");
+
+        // The statue is the standing pose of the copper golem model.
+        BufferedImage golem = renderItem(renderer, root, "minecraft:copper_golem_statue", Map.of());
+        requireContentSize(golem, "copper golem statue", 29, 41);
+        require(countColor(golem, ColorKind.GOLEM_HEAD) > 50, "copper golem head missing");
+        require(countColor(golem, ColorKind.GOLEM_BODY) > 50, "copper golem body missing");
+
+        // The chest family keeps the flat sprite of its entity texture.
+        require(countExact(renderItem(renderer, root, "minecraft:chest", Map.of()), 0x204020) > 500,
+                "chest family is not the flat sprite of its entity texture");
+    }
+
+    /**
+     * The component driven layers of the special families: banner and shield patterns, the pot sherds
+     * and the inline skin of a player head.
+     */
+    private static void testSpecialComponents(Renderer renderer, Path root) throws Exception {
+        Map<String, Object> patterns = Map.of("banner_patterns", List.of(
+                Map.of("pattern", "minecraft:fixture_pattern", "color", "purple")));
+        BufferedImage patterned = renderItem(renderer, root, "minecraft:lime_banner", patterns);
+        require(countColor(patterned, ColorKind.BANNER_PATTERN) > 4, "banner pattern layer is missing");
+        require(countColor(patterned, ColorKind.BANNER_FLAG) > 50, "banner pattern layer replaced the flag");
+
+        // A base_color component overrides the dye the model definition names.
+        BufferedImage recoloured = renderItem(renderer, root, "minecraft:white_banner", Map.of("base_color", "purple"));
+        require(countColor(recoloured, ColorKind.BANNER_PATTERN) > 50, "base_color does not override the model colour");
+
+        BufferedImage shield = renderItem(renderer, root, "minecraft:fixture_shield", patterns);
+        require(countColor(shield, ColorKind.SHIELD_PATTERN) > 4, "shield pattern layer is missing");
+
+        // The pot decorations select one pottery pattern sprite per side, in the vanilla order.
+        BufferedImage pot = renderItem(renderer, root, "minecraft:decorated_pot", Map.of("pot_decorations", List.of(
+                "minecraft:fixture_pottery_sherd", "minecraft:fixture_pottery_sherd",
+                "minecraft:fixture_pottery_sherd", "minecraft:fixture_pottery_sherd")));
+        require(countColor(pot, ColorKind.POT_PATTERN) > 100, "pottery pattern sprite is not used");
+        require(countColor(pot, ColorKind.POT_SIDE) == 0, "a plain pot side survived the pottery pattern");
+
+        // A player head reads the inline skin of its profile property; its hat overlay then carries the
+        // colour of that skin instead of the one of the default skin.
+        String document = "{\"textures\":{\"SKIN\":{\"url\":\"" + inlineSkin() + "\"}}}";
+        String property = java.util.Base64.getEncoder().encodeToString(document.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        BufferedImage profile = renderItem(renderer, root, "minecraft:player_head", Map.of("profile", Map.of(
+                "properties", List.of(Map.of("name", "textures", "value", property)))));
+        require(countColor(profile, ColorKind.PROFILE_HAT) > 100, "the inline profile skin is not used");
+        require(countColor(profile, ColorKind.HAT) == 0, "the default skin survived the inline profile");
+        // A profile that names a remote skin returns to the default skin of the client.
+        BufferedImage remote = renderItem(renderer, root, "minecraft:player_head", Map.of("profile", Map.of(
+                "properties", List.of(Map.of("name", "textures",
+                        "value", java.util.Base64.getEncoder().encodeToString(
+                                "{\"textures\":{\"SKIN\":{\"url\":\"http://example.invalid/skin\"}}}"
+                                        .getBytes(java.nio.charset.StandardCharsets.UTF_8)))))));
+        require(countColor(remote, ColorKind.HAT) > 100, "a remote profile does not fall back to the default skin");
+    }
+
+    /**
+     * A 64x64 skin whose head and hat rectangles carry their own colours: the humanoid head samples
+     * {@code 0..32 x 0..16} for the cube and {@code 32..64 x 0..16} for the hat overlay, so the second
+     * rectangle is what a head icon shows.
+     */
+    private static String inlineSkin() throws Exception {
+        BufferedImage image = new BufferedImage(64, 64, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 64; x++) {
+                image.setRGB(x, y, 0xFF000000 | (x < 32 ? 0x3030B0 : 0xFF9F40));
+            }
+        }
+        java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
+        ImageIO.write(image, "png", output);
+        return "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(output.toByteArray());
+    }
+
+    /** A held special item is a 3D model of its own, so it must sit in front of the torso like a sword. */
+    private static void testSpecialHeldItems(Renderer renderer, Path root) throws Exception {
+        BufferedImage none = renderPlayer(renderer, root, "classic", false, List.of());
+        for (String id : List.of("minecraft:lime_banner", "minecraft:conduit", "minecraft:decorated_pot",
+                "minecraft:copper_golem_statue", "minecraft:trident", "minecraft:skeleton_skull")) {
+            BufferedImage held = renderEquipment(renderer, root, Map.of("mainHand", Map.of("id", id)));
+            int[] bounds = contentBounds(held);
+            require(bounds[0] > 0 && bounds[2] < held.getWidth() - 1
+                            && bounds[1] > 0 && bounds[3] < held.getHeight() - 1,
+                    "held " + id + " is clipped by the canvas: " + java.util.Arrays.toString(bounds));
+            require(diffCountIn(none, held, 0, 0, held.getWidth(), held.getHeight()) > 40,
+                    "held " + id + " is not visible");
+        }
+        // The banner is the only family whose fixture texture can prove that the item hangs in front of
+        // the body rather than behind its back: its pole colour is unique to that item.
+        BufferedImage banner = renderEquipment(renderer, root, Map.of("mainHand", Map.of("id", "minecraft:lime_banner")));
+        int overBody = overModelPixels(none, banner, bannerPole(banner), -1);
+        require(countColor(banner, ColorKind.BANNER_FLAG) > 20, "held banner is missing its flag");
+        require(overBody > 20, "held banner is not drawn in front of the torso");
+    }
+
+    /** The exact colour of the fixture banner pole, read back from the icon to keep the assertion shade free. */
+    private static int bannerPole(BufferedImage image) {
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int pixel = image.getRGB(x, y);
+                if ((pixel >>> 24) > 200 && matches(pixel, ColorKind.BANNER_POLE)) {
+                    return pixel & 0xFFFFFF;
+                }
+            }
+        }
+        throw new AssertionError("no banner pole pixels found");
+    }
+
+    /**
+     * The item list of the consumer that used to be rejected with a 422: every one of the 51 items
+     * whose model is a special model outside the chest family must render a non-empty icon.
+     */
+    private static void testSpecialItemList(Renderer renderer, Path root) throws Exception {
+        String[] items = {
+                "black_banner", "black_bed", "blue_banner", "blue_bed", "brown_banner", "brown_bed", "conduit",
+                "copper_golem_statue", "creeper_head", "cyan_banner", "cyan_bed", "decorated_pot", "dragon_head",
+                "exposed_copper_golem_statue", "gray_banner", "gray_bed", "green_banner", "green_bed",
+                "light_blue_banner", "light_blue_bed", "light_gray_banner", "light_gray_bed", "lime_banner",
+                "lime_bed", "magenta_banner", "magenta_bed", "orange_banner", "orange_bed",
+                "oxidized_copper_golem_statue", "piglin_head", "pink_banner", "pink_bed", "player_head",
+                "purple_banner", "purple_bed", "red_banner", "red_bed", "shield", "skeleton_skull", "trident",
+                "waxed_copper_golem_statue", "waxed_exposed_copper_golem_statue",
+                "waxed_oxidized_copper_golem_statue", "waxed_weathered_copper_golem_statue",
+                "weathered_copper_golem_statue", "white_banner", "white_bed", "wither_skeleton_skull",
+                "yellow_banner", "yellow_bed", "zombie_head"};
+        require(items.length == 51, "the special item list changed size: " + items.length);
+        for (String item : items) {
+            BufferedImage icon = renderItem(renderer, root, "minecraft:" + item, Map.of());
+            require(icon.getWidth() == 64 && icon.getHeight() == 64, item + " icon dimensions");
+            require(countAlpha(icon, 40) > 100, item + " rendered an empty icon");
+        }
+    }
+
+    /**
+     * A broken resource must never take the whole picture down: an unknown item, an absent texture and a
+     * special family this service has not ported all fall back to the vanilla missing model.
+     */
+    private static void testMissingResources(Renderer renderer, Path root) throws Exception {
+        BufferedImage missingModel = renderItem(renderer, root, "minecraft:not_an_item", Map.of());
+        requireMissingModel(missingModel, "an unknown item");
+
+        // The vanilla missing texture is the generated checkerboard, and it is reported on stderr.
+        BufferedImage missingTexture = renderItem(renderer, root, "minecraft:diamond_sword",
+                Map.of("minecraft:item_model", "minecraft:item/absent_model"));
+        requireMissingModel(missingTexture, "an absent model");
+
+        // An unimplemented special family degrades the same way instead of failing the request.
+        BufferedImage unsupported = renderItem(renderer, root, "minecraft:fixture_unsupported_special", Map.of());
+        requireMissingModel(unsupported, "an unported special family");
+
+        // The same fallback keeps a container render alive when one slot is broken.
+        BufferedImage container = renderContainer(renderer, root, "inventory", Map.of("rows", 3,
+                "slots", List.of(Map.of("slot", 0, "item", Map.of("id", "minecraft:not_an_item")))));
+        requireMissingModel(container, "a broken slot item");
+
+        // A structural request error stays a hard failure.
+        Map<String, Object> empty = new LinkedHashMap<>();
+        empty.put("operation", "item");
+        empty.put("resourceRoot", root.toString());
+        empty.put("item", Map.of());
+        requireFails(renderer, empty, "item.id is required");
+    }
+
+    /**
+     * The size of the model one family produced, which catches a misread box or scale: the fixture
+     * paints one flat colour per texture rectangle, so the silhouette is the geometry itself.
+     */
+    private static void requireContentSize(BufferedImage image, String what, int width, int height) {
+        int[] bounds = contentBounds(image);
+        int actualWidth = bounds[2] - bounds[0] + 1;
+        int actualHeight = bounds[3] - bounds[1] + 1;
+        require(Math.abs(actualWidth - width) <= 3 && Math.abs(actualHeight - height) <= 3,
+                what + " is not the vanilla size: " + actualWidth + "x" + actualHeight
+                        + " instead of " + width + "x" + height);
+    }
+
+    /**
+     * The vanilla missing model is a 16³ cube of the generated missing texture: its two magenta and its
+     * two black quadrants are shaded per face, so the check matches the magenta by its channel ratio.
+     */
+    private static void requireMissingModel(BufferedImage image, String what) {
+        require(countColor(image, ColorKind.MISSING_MAGENTA) > 40 && countColor(image, ColorKind.DECORATION_BLACK) > 40,
+                what + " does not fall back to the missing model");
+    }
+
+    private static BufferedImage renderItem(Renderer renderer, Path root, String id, Map<String, Object> components) throws Exception {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", "item");
+        request.put("resourceRoot", root.toString());
+        request.put("width", 64);
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", id);
+        if (!components.isEmpty()) {
+            item.put("components", components);
+        }
+        request.put("item", item);
+        return renderer.render(request);
+    }
+
     private static BufferedImage renderSlimEquipment(Renderer renderer, Path root) throws Exception {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("operation", "player");
@@ -535,6 +786,21 @@ public final class RendererSmokeTest {
         for (int y = 0; y < image.getHeight(); y++) {
             for (int x = 0; x < image.getWidth(); x++) {
                 if ((image.getRGB(x, y) >>> 24) == 0) {
+                    continue;
+                }
+                bounds = extend(bounds, x, y);
+            }
+        }
+        require(bounds != null, "image is fully transparent");
+        return bounds;
+    }
+
+    /** Bounding box of every pixel that is visible at all, for the clipping assertions. */
+    private static int[] contentBounds(BufferedImage image) {
+        int[] bounds = null;
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                if ((image.getRGB(x, y) >>> 24) < 40) {
                     continue;
                 }
                 bounds = extend(bounds, x, y);
@@ -661,7 +927,10 @@ public final class RendererSmokeTest {
     private enum ColorKind {
         HEAD, BODY, RIGHT_ARM, LEFT_ARM, RIGHT_LEG, LEFT_LEG, HAT,
         ARMOUR_HEAD, ARMOUR_BODY, ARMOUR_LEG, ARMOUR_BOOT,
-        MAP_GRASS, MAP_SAND, DECORATION_WHITE, DECORATION_BLACK, PING
+        MAP_GRASS, MAP_SAND, DECORATION_WHITE, DECORATION_BLACK, PING,
+        BANNER_FLAG, BANNER_POLE, BANNER_HIDDEN, BANNER_PATTERN,
+        BED_HEAD, BED_FOOT, SKULL, CONDUIT, SHIELD_PLATE, SHIELD_PATTERN,
+        POT_NECK, POT_LID, POT_SIDE, POT_PATTERN, GOLEM_HEAD, GOLEM_BODY, PROFILE_HAT, MISSING_MAGENTA
     }
 
     /** Expected texture colours normalised by their brightest channel (face shading scales them). */
@@ -680,6 +949,27 @@ public final class RendererSmokeTest {
             case ARMOUR_BOOT -> new double[]{0.45, 0.3, 1};
             case MAP_GRASS -> new double[]{0.71, 1, 0.31};
             case MAP_SAND -> new double[]{1, 0.94, 0.66};
+            // The special item fixture: every colour below is the flat colour of one texture rectangle
+            // of the vanilla cube layout, chosen to be distinct from all the other kinds.
+            case BANNER_FLAG -> new double[]{0.32, 1, 0.25};
+            case BANNER_POLE -> new double[]{0.6, 0.6, 1};
+            case BANNER_HIDDEN -> new double[]{0.27, 0.27, 1};
+            case BANNER_PATTERN -> new double[]{0.65, 0.25, 1};
+            case BED_HEAD -> new double[]{0.6, 1, 0.6};
+            case BED_FOOT -> new double[]{0.6, 1, 1};
+            case SKULL -> new double[]{0.43, 0.71, 1};
+            case CONDUIT -> new double[]{0.33, 0.56, 1};
+            case SHIELD_PLATE -> new double[]{0.43, 1, 0.43};
+            case SHIELD_PATTERN -> new double[]{0.65, 0.25, 1};
+            case POT_NECK -> new double[]{0.43, 1, 1};
+            case POT_LID -> new double[]{0.27, 1, 0.45};
+            case POT_SIDE -> new double[]{0.27, 1, 0.64};
+            case POT_PATTERN -> new double[]{0.27, 1, 0.82};
+            case GOLEM_HEAD -> new double[]{0.27, 1, 1};
+            case GOLEM_BODY -> new double[]{1, 0.6, 1};
+            case PROFILE_HAT -> new double[]{1, 0.62, 0.25};
+            // The magenta quadrant of the generated vanilla missing texture.
+            case MISSING_MAGENTA -> new double[]{1, 0, 1};
             case DECORATION_WHITE, DECORATION_BLACK, PING -> new double[]{0, 0, 0};
         };
     }
