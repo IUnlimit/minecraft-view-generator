@@ -42,17 +42,19 @@ curl -X POST http://localhost:4666/api/v1/render \
 | `item` | 1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、select/condition/range dispatch、支持 shulker/chest special、damage/glint |
 | `tooltip` | 原版九宫格背景（`gui/sprites/tooltip/background`，border 从 `.mcmeta` 读取）与 advanced 边框（`tooltip/frame`）、`§` 颜色与修饰符、原版行生成顺序（悬停名 → advanced id → lore → 附魔 → 属性修饰符 → 单值组件 → 组件/NBT 计数）、按真实文本宽度折行、`icon` 开关 |
 | `inventory` | 官方 `generic_54` chest GUI，1–6 行九列、标题、主容器槽、玩家区槽位、堆叠数量 |
-| `item_container` | hopper、furnace/blast_furnace/smoker、crafting_table、anvil、brewing_stand；未知容器返回 `unsupported_container` |
-| `enderchest` | 固定 3×9，官方 GUI + 末影紫色效果 + 官方 ender chest 标识 |
-| `playerInventory` | 原版 InventoryScreen 1:1 布局（默认 176×166，面板贴图不缩放）、原版预览视口内的 3D 玩家（26→75 / 8→78，30 像素每方块）、外层与披风、`equipment/*.json` 盔甲分层（染色层、elytra 翼）、手持物 thirdperson 3D 变换、背包与 hotbar 槽位 |
-| `skin` | 原版 3D 玩家模型：64×64 classic/slim、legacy 64×32（自动补齐左侧肢体）、外层第二层、原版斗篷 UV、手持物 thirdperson 3D 变换 |
-| `playerlist` | 原版 TAB 布局：行距 9px（2 倍渲染）、皮肤头像、官方 ping 图标与阈值、header/footer 居中、多列（每列 20 行），最多 500 人；`gameMode` 接受校验但不绘制 |
+| `item_container` | hopper（176×133）、furnace/blast_furnace/smoker、crafting_table、anvil、brewing_stand（176×166）；槽位取自各自原版菜单；未知容器返回 `unsupported_container` |
+| `enderchest` | 固定 3×9，与普通三行箱子完全一致（同一 `generic_54` 贴图、配色与槽位，无额外叠加） |
+| `playerInventory` | 原版 InventoryScreen 1:1 布局（默认 176×166，面板贴图不缩放）、标题 `(97, 6)`、原版预览视口内的 3D 玩家（26→75 / 8→78，30 像素每方块）、外层与披风、`equipment/*.json` 盔甲分层（染色层、elytra 翼）、手持物 thirdperson 3D 变换（手部高度、躯干前方）、InventoryMenu 槽位（背包 / 快捷栏 / 装备 / 副手） |
+| `skin` | 原版 3D 玩家模型：64×64 classic/slim、legacy 64×32（自动补齐左侧肢体）、外层第二层、原版斗篷 UV、手持物 thirdperson 3D 变换（含在自适应缩放内） |
+| `playerlist` | 原版 TAB 布局：行距 9px、8×8 头像、官方 ping 图标与阈值、header/footer 居中、多列（每列 20 行），最多 500 人，整体 2 倍渲染（字体同步放大）；`gameMode` 接受校验但不绘制 |
 | `map` | 原版地图图像：`map/map_background` 羊皮纸背景 + 内缩的完整 128×128 像素网格（默认 140×140，内容 1:1）+ `map/decorations/*` 原版装饰图标，最多 16384 项 pixels 或解码后最多 16384 字节 pixelData、marker rotation/type/name、dimension/locked/scale |
-| `achievement` | 官方 advancement toast、task/goal/challenge obtained/unobtained frame、icon、title/description |
+| `achievement` | 官方 advancement toast（160×32 内容，默认放大 3 倍到 480×96）、task/goal/challenge obtained/unobtained frame、icon、标题与描述在 x=30 的第 7/18 行 |
 
 ## 字体
 
 英文字符使用 [tryashtar/minecraft-ttf v1.6](https://github.com/tryashtar/minecraft-ttf/releases/tag/v1.6) 发布的 `MinecraftDefault-Regular.ttf`；中文等字符保留原始 Unicode 字符，并使用同一发布包的 `MinecraftDefaultUniformBMP-Regular.ttf`，不做拼音化、转写或替换。字体随 Java renderer 打包，服务运行时不联网下载。
+
+该字体在 **字号 12** 时精确复现原版 8px 字形单元（数字与大写字母宽 5、步进 6、空格 4），字形墨迹占基线上方 7px。渲染器据此把「字号 = 12 × GUI 缩放」「行顶到基线 = 7 × GUI 缩放」作为唯一文本度量：传入坐标即原版 `GuiGraphics.drawString` 的行顶坐标，容器标题 `(8, 6)`、物品栏标签、提示行等一律直接使用原版数值。所有 GUI 文本均以最近邻缩放渲染，缩放渲染（playerlist 2 倍、achievement 3 倍）的字体同步放大。
 
 ## skin 示例
 
@@ -60,7 +62,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 渲染使用原版 `PlayerModel` 几何与 `ModelPart.Cube` 的贴图布局：每单位 1 像素皮肤（16 单位 = 1 方块），3/4 视角正交相机（绕 Y 轴 30°、俯角 20°），逐面按原版 shader 公式着色（`min(1, (max(0,l0·n)+max(0,l1·n))*0.6+0.4)`）。`outerLayer` 控制头发/外套/袖子/裤腿第二层。
 
-`mainHand` / `offhand` 用原版 `ItemInHandLayer` 的挂载链渲染成 3D 几何，而不是贴图：`translateToHand(arm)` → `Rx(-90°)` → `Ry(180°)` → `T(±1/16, 0.125, -0.625)`，再叠加模型 JSON `display.thirdperson_righthand` / `thirdperson_lefthand` 的 `T·R(rotationXYZ)·S·T(-0.5,-0.5,-0.5)`（`thirdperson_lefthand` 缺省时按原版回退到 `thirdperson_righthand`）。`generated`/`handheld` 模型按原版 `ItemModelGenerator` 生成 16×16×1 的底板与逐像素 1px 轮廓条（z 7.5–8.5），带 `elements` 的模型直接使用元素面几何；`gui_light: front` 的模型全亮。手持物与玩家共用同一深度排序，且不参与模型自适应缩放。
+`mainHand` / `offhand` 用原版 `ItemInHandLayer` 的挂载链渲染成 3D 几何，而不是贴图：在原版实体模型空间中走 `translateToHand(arm)` → `Rx(-90°)` → `Ry(180°)` → `T(±1/16, 0.125, -0.625)`，再叠加模型 JSON `display.thirdperson_righthand` / `thirdperson_lefthand` 的 `T·R(rotationXYZ)·S·T(-0.5,-0.5,-0.5)`（`thirdperson_lefthand` 缺省时按原版回退到 `thirdperson_righthand`），最后整体乘上原版模型空间到场景空间的转换 `F = T(0, 24, 0)·Rx(180°)`（原版模型空间 y 向下、原点在颈部、模型朝 -z；场景空间 y 向上、脚底为原点、模型朝观察者 +z）。`generated`/`handheld` 模型按原版 `ItemModelGenerator` 生成 16×16×1 的底板与逐像素 1px 轮廓条（z 7.5–8.5），带 `elements` 的模型直接使用元素面几何；`gui_light: front` 的模型全亮。手持物与玩家共用同一深度排序，因此与原版一致地落在手部高度、躯干前方（`player` / `skin` 的自适应缩放把手持物一并框入画布；`playerInventory` 的预览视口固定，手持物不影响模型缩放）。
 
 ```json
 {
@@ -114,7 +116,17 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 ## 特殊容器示例
 
-`container` 支持 `hopper`、`furnace`/`blast_furnace`/`smoker`、`crafting_table`、`anvil`、`brewing_stand`。熔炉的专用槽位是 0 输入、1 燃料、2 输出，从 3 起是玩家背包区；未知容器名返回 `unsupported_container`。
+`container` 支持 `hopper`、`furnace`/`blast_furnace`/`smoker`、`crafting_table`、`anvil`、`brewing_stand`。每个界面都按反编译的 1.21.11 屏幕实现：画布尺寸、标题列与槽位坐标全部取自对应类。
+
+| 容器 | 贴图 | 画布 | 标题 x | 容器槽位（内容坐标，按菜单顺序） |
+| --- | --- | --- | --- | --- |
+| `hopper` | `hopper` | 176×133 | 8 | 5 格 `(44 + 18i, 20)` |
+| `furnace`/`blast_furnace`/`smoker` | 同名 | 176×166 | 居中 | 输入 `(56, 17)`、燃料 `(56, 53)`、输出 `(116, 35)` |
+| `crafting_table` | `crafting_table` | 176×166 | 29 | 3×3 从 `(30, 17)`、结果 `(124, 35)` |
+| `anvil` | `anvil` | 176×166 | 60 | `(27, 47)`、`(76, 47)`、`(134, 47)` |
+| `brewing_stand` | `brewing_stand` | 176×166 | 居中 | 药水 `(56, 51)`/`(79, 58)`/`(102, 51)`、燃料 `(79, 17)`、配料 `(17, 17)` |
+
+容器槽位之后紧跟玩家区：`hopper` 从菜单槽 5 起排在 `(8, 51)`，熔炉/工作台/铁砧/酿造台从各自槽位数起排在 `(8, 84)`；每个界面都是 27 格背包加 58px 下方的 9 格快捷栏。未知容器名返回 `unsupported_container`。
 
 ```json
 {
@@ -134,7 +146,9 @@ curl -X POST http://localhost:4666/api/v1/render \
 }
 ```
 
-`inventory` 的槽位语义相同：0 到 `rows*9-1` 属于容器区，之后是玩家背包区。
+`inventory` 的槽位语义相同：菜单槽 0 到 `rows*9-1` 属于容器区，之后是玩家背包区。箱子族的画布高度为 `17 + rows*18 + 96`（3 行 167），槽位坐标是 `generic_54` 贴图的坐标：容器区 `(8 + 18c, 18 + 18r)`，玩家背包第一行 `(8, 31 + rows*18)`，快捷栏再向下 58px。标题按原版画在 `(8, 6)`，堆叠数量画在槽位右下角（`x + 17 - 宽度, y + 9`，白色带阴影）。
+
+`enderchest` 是同一套渲染的 3 行固定版本：原版末影箱界面就是普通三行容器，因此输出与 `inventory` 的 3 行结果逐像素一致，没有紫色叠加或额外标识。
 
 ## playerInventory 与 playerlist 说明
 
@@ -142,11 +156,15 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 - `armor` 前四项依次是头盔、胸甲、护腿、靴子；材质名取自物品 id（`diamond_chestplate` → `diamond`），贴图与染色由 `assets/minecraft/equipment/<材质>.json` 的 `layers.humanoid` / `layers.humanoid_leggings` 决定（`dyeable` 层使用物品 `components["minecraft:dyed_color"]`，缺省用 `color_when_undyed`）。几何按原版 `CubeDeformation` 膨胀（头盔/胸甲/靴子 1.0，护腿 0.5），并按槽位只渲染对应部件；缺失定义返回 `422`（`missing equipment definition: <材质>`）。
 - 胸甲槽为 `minecraft:elytra` 时改画 `equipment/elytra.json` 的 `wings` 层（有披风时使用玩家披风贴图）。
-- `mainHand` / `offhand` 用原版 `ItemInHandLayer` 挂载链以 3D 几何绘制在左右手上（主手取 `thirdperson_righthand`、副手取 `thirdperson_lefthand`），与玩家模型共用同一深度排序。
+- `mainHand` / `offhand` 用原版 `ItemInHandLayer` 挂载链以 3D 几何绘制在左右手上（主手取 `thirdperson_righthand`、副手取 `thirdperson_lefthand`），经模型空间转换后落在手部高度、躯干前方，与玩家模型共用同一深度排序。
 
-`playerInventory` 的整体布局与原版 `InventoryScreen` 一致：默认输出 **176×166**，`gui/container/inventory` 贴图 1:1 绘制；3D 玩家渲染在原版预览视口内（`x` 26→75、`y` 8→78，缩放 30 像素/方块，脚底对齐视口中心 + `(bbHeight/2 + 0.0625) × 30`，视角与 `skin` 相同的 30°/20°）；槽位沿用原版坐标（背包第 0 号格 `(8, 84)`、装备 `(8, 8 + 18i)`、副手 `(77, 62)`）。显式传入 `options.width` / `options.height` 时输出整图最近邻缩放，语义与 `inventory` / `enderchest` 一致。
+`playerInventory` 的整体布局与原版 `InventoryScreen` 一致：默认输出 **176×166**，`gui/container/inventory` 贴图 1:1 绘制；标题按原版 `titleLabelX = 97`、行 6 绘制（避开左侧的合成网格区域）；3D 玩家渲染在原版预览视口内（`x` 26→75、`y` 8→78，缩放 30 像素/方块，脚底对齐视口中心 + `(bbHeight/2 + 0.0625) × 30`，视角与 `skin` 相同的 30°/20°）；槽位沿用原版 `InventoryMenu` 坐标（背包菜单槽 0–26 在 `(8 + 18c, 84 + 18r)`、快捷栏 27–35 在 `(8 + 18c, 142)`、装备 `(8, 8 + 18i)`、副手 `(77, 62)`）。
 
-`playerlist` 使用原版 TAB 列表几何（9px 行距与 8×8 头像，本服务按 2 倍渲染以便在 Discord 等场景查看）：每个玩家必须提供 `texture`（与 `skin` 相同的校验，不能是网络 URL），头像取皮肤 `(8,8)` 脸部与 `(40,8)` 外层，右侧 ping 图标按原版阈值选择 `gui/sprites/icon/ping_5..ping_1`（`<150`/`<300`/`<600`/`<1000`），`ping <= 0` 或缺失时使用 `ping_unknown`；每列最多 20 行、多列从左到右、header/footer 每行居中。`gameMode` 字段仍接受并校验，但不会绘制，以保持与原版一致的行布局。
+手持物按原版 `ItemInHandLayer` 链路计算，但整条链在乘入场景空间之前仍处于原版实体模型空间：原版模型空间 y 向下、原点在颈部（脚底 +24px）、模型朝 -z，而玩家模型、披风与装备层所在的场景空间 y 向上、脚底为 0、模型朝观察者 +z，两者相差绕 x 轴半圈 `F = T(0, 24, 0)·Rx(180°)`。乘上 F 后，手持物与原版一致地挂在手心高度、位于躯干之前（默认 3/4 视角下主手与副手物品都可见），而不是落到躯干背后。显式传入 `options.width` / `options.height` 时输出整图最近邻缩放，语义与 `inventory` / `enderchest` 一致。
+
+`playerlist` 使用原版 TAB 列表几何（9px 行距与 8×8 头像，本服务按 2 倍渲染以便在 Discord 等场景查看，字体同样放大 2 倍）：每个玩家必须提供 `texture`（与 `skin` 相同的校验，不能是网络 URL），头像取皮肤 `(8,8)` 脸部与 `(40,8)` 外层，右侧 ping 图标按原版阈值选择 `gui/sprites/icon/ping_5..ping_1`（`<150`/`<300`/`<600`/`<1000`），`ping <= 0` 或缺失时使用 `ping_unknown`；每列最多 20 行、多列从左到右、header/footer 每行居中。`gameMode` 字段仍接受并校验，但不会绘制，以保持与原版一致的行布局。
+
+`achievement` 按原版 `AdvancementToast` 渲染 160×32 的 toast 内容，再整图放大到默认 480×96：标题在 `(30, 7)`、描述在 `(30, 18)`，图标与 frame 贴图沿用原版位置。
 
 ## map 示例
 
