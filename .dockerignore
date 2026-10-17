@@ -1,0 +1,18 @@
+# 运行时数据：下载的原版资源、资源包栈与准备状态（本地可能已累积数百 MB）
+data/
+# 本地部署覆盖（例如 HOST_PORT）
+.env
+
+# 服务构建产物
+dist/
+# Java 渲染后端编译产物（镜像内会重新编译）
+renderer-backend/build/
+
+# 仓库元数据与会话产物
+.git/
+.narrafork/
+
+# 系统与编辑器
+.DS_Store
+*.log
+*.tmp

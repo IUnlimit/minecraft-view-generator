@@ -15,6 +15,9 @@ coverage.out
 # NarraFork 会话产物（计划与笔记）
 .narrafork/
 
+# 本地部署覆盖（宿主机端口、API key 等）
+.env
+
 # 系统与编辑器
 .DS_Store
 *.log

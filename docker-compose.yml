@@ -1,0 +1,50 @@
+# Minecraft View Generator — 单机部署
+#
+#   docker compose up -d --build      启动（首次构建镜像）
+#   docker compose logs -f app        看日志
+#   docker compose down               停止
+#
+# 首次启动后必须先准备资源，否则渲染请求不会返回真实图片：
+#   curl -X PUT http://localhost:${HOST_PORT:-4666}/api/v1/resources/1.21.11
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-unknown}
+    image: minecraft-view-generator:local
+    container_name: minecraft-view-generator
+    restart: unless-stopped
+    # 容器内固定监听 4666；宿主机端口用 HOST_PORT 覆盖（默认沿用 4666）
+    ports:
+      - "${HOST_PORT:-4666}:4666"
+    environment:
+      - TZ=Asia/Shanghai
+      - LISTEN_ADDR=:4666
+      - DATA_DIR=/app/data
+      - RENDERER_COMMAND=/app/renderer-backend/run.sh
+      # 需要鉴权时取消注释：除 /healthz、/docs、/scalar、/api/v1/openapi.json 外都要带 X-API-Key
+      # - API_KEY=${API_KEY:?set API_KEY in .env}
+      # 其他可调项见 README 的配置表
+      # - MAX_CONCURRENT_RENDERS=4
+      # - ADDON_ENABLED=true
+    volumes:
+      # 原版资源、资源包栈与准备状态都落在这里，整个目录可整体备份/迁移
+      - ./data:/app/data
+    healthcheck:
+      # /healthz 始终返回 200，status 字段才反映渲染后端是否就绪
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4666/healthz | grep -q '\"status\":\"ok\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    # 单次渲染最长 15s，留出优雅退出的时间
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
