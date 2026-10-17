@@ -1920,10 +1920,20 @@ final class Renderer {
 
     private static final double PLAYER_ARM_CLASSIC = 4;
     private static final double PLAYER_ARM_SLIM = 3;
-    /** Vanilla HumanoidModel / PlayerModel arm pivots, used by HumanoidModel.translateToHand. */
+    /**
+     * Vanilla HumanoidModel / PlayerModel arm pivots as written in the vanilla entity model space,
+     * where y grows downwards from the neck and the model looks along -z. They are consumed by
+     * {@link #heldItemTransform} only, which converts the whole vanilla chain through
+     * {@link #sceneSpace()} before the result reaches the scene.
+     */
     private static final double PLAYER_RIGHT_ARM_PIVOT_X = -5;
     private static final double PLAYER_LEFT_ARM_PIVOT_X = 5;
     private static final double PLAYER_ARM_PIVOT_Y = 2;
+    /**
+     * The vanilla model space origin — the neck, 24 skin pixels above the feet — expressed in the
+     * scene space, whose origin sits at the feet.
+     */
+    private static final double PLAYER_MODEL_ORIGIN_Y = 24;
     private static final double PLAYER_HEAD_MIN_X = -4;
     private static final double PLAYER_HEAD_MAX_X = 4;
     private static final double PLAYER_HEAD_MIN_Y = 24;
@@ -2436,7 +2446,9 @@ final class Renderer {
      * {@code translateToHand(arm)} -> {@code rotateX(-90)} -> {@code rotateY(180)} ->
      * {@code translate(±1/16, 0.125, -0.625)} and then the item model display transform. One world
      * unit of this renderer is one sixteenth of a block, which is exactly the unit vanilla uses for
-     * item model coordinates, so every term below stays in skin pixels.</p>
+     * item model coordinates, so every term below stays in skin pixels. The item geometry itself is
+     * built in the item model space, which both vanilla and this renderer define with y pointing up
+     * and the sprite facing +z, so only the surrounding entity model space has to be converted.</p>
      */
     private void addHeldItemQuads(List<Quad> quads, Map<String, Object> item, boolean offhand, boolean slim) throws IOException {
         String id = normalizeID(Json.string(item, "id", ""));
@@ -2479,19 +2491,44 @@ final class Renderer {
         }
     }
 
-    /** Vanilla ItemInHandLayer / HumanoidModel.translateToHand built as a single matrix. */
+    /**
+     * Vanilla ItemInHandLayer / HumanoidModel.translateToHand built as a single matrix, prefixed by
+     * the vanilla model space conversion. The five inner factors are the vanilla chain verbatim —
+     * translateToHand(arm), {@code rotateX(-90)}, {@code rotateY(180)} and the
+     * {@code translate(±1/16, 0.125, -0.625)} hand offset, all still in the vanilla entity model
+     * space — so they can be compared against the decompiled {@code ItemInHandLayer} one to one.
+     * {@link #sceneSpace()} then maps that pose into the scene space of this renderer, where the
+     * feet stand at zero and the model faces the viewer, which puts the item at hand height in
+     * front of the torso instead of behind its back.
+     */
     private Mat4 heldItemTransform(boolean offhand, boolean slim, DisplayTransform display) {
         double pivotX = offhand ? PLAYER_LEFT_ARM_PIVOT_X : PLAYER_RIGHT_ARM_PIVOT_X;
         if (slim) {
             // PlayerModel.translateToHand moves the slim arm pivot 0.5 px towards the body.
             pivotX += offhand ? -0.5 : 0.5;
         }
-        Mat4 chain = Mat4.translation(pivotX, PLAYER_ARM_PIVOT_Y, 0)
+        return sceneSpace()
+                .multiply(Mat4.translation(pivotX, PLAYER_ARM_PIVOT_Y, 0))
                 .multiply(Mat4.rotationX(-90))
                 .multiply(Mat4.rotationY(180))
                 .multiply(Mat4.translation(offhand ? -1 : 1, 2, -10))
                 .multiply(displayMatrix(display, offhand));
-        return Mat4.projectSpace().multiply(chain);
+    }
+
+    /**
+     * The vanilla entity model space expressed in the scene space used by every other constant of
+     * this renderer. Vanilla poses living entities in a space that grows y downwards with its
+     * origin at the neck — 24 skin pixels above the feet — and whose models look along -z, while
+     * the scene space grows y upwards with the feet at the origin and the model facing the viewer
+     * along +z. The two differ by a half turn around x, so the vanilla chain stays valid as is
+     * once this factor is multiplied in front of it.
+     *
+     * <p>Both halves are visible in this file: the vanilla arm box spans y 0..12 and the legs
+     * 12..24, {@link #addPlayerModel} draws the arm at 12..24 and the legs at 0..12, and the cloak
+     * of vanilla sits at +z while {@link #addCape} hangs it behind the body at -z.</p>
+     */
+    private static Mat4 sceneSpace() {
+        return Mat4.translation(0, PLAYER_MODEL_ORIGIN_Y, 0).multiply(Mat4.rotationX(180));
     }
 
     /**

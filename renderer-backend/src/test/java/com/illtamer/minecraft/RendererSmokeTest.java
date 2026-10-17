@@ -202,6 +202,28 @@ public final class RendererSmokeTest {
                 "slots", List.of(Map.of("slot", 0, "item", Map.of("id", "minecraft:diamond")))));
         BufferedImage withItem = renderer.render(occupied);
         require(countExact(withItem, 0x50DCFF) > 0, "player inventory slot icon missing");
+
+        // The held item hangs at hand height in front of the preview model, inside the vanilla
+        // viewport, and it must not rescale that model: the preview viewport is fixed.
+        Map<String, Object> heldRequest = new LinkedHashMap<>(request);
+        heldRequest.put("playerInventory", Map.of(
+                "skin", Map.of("texture", PlayerSkinFixture.png64()),
+                "mainHand", Map.of("id", "minecraft:diamond_sword")));
+        BufferedImage held = renderer.render(heldRequest);
+        int heldSword = countExact(held, SWORD & 0xFFFFFF);
+        require(heldSword > 20, "player inventory preview is missing the held item");
+        int[] heldItem = exactBounds(held, SWORD & 0xFFFFFF);
+        require(heldItem[0] >= PREVIEW_LEFT && heldItem[2] <= PREVIEW_RIGHT
+                        && heldItem[1] >= PREVIEW_TOP && heldItem[3] <= PREVIEW_BOTTOM,
+                "held item leaves the vanilla preview viewport: " + java.util.Arrays.toString(heldItem));
+        int overPreview = overModelPixels(image, held, SWORD & 0xFFFFFF, PANEL);
+        require(overPreview * 2 >= heldSword, "held item is not drawn in front of the preview model: "
+                + overPreview + "/" + heldSword);
+        int[] previewBounds = modelBounds(held);
+        for (int index = 0; index < 4; index++) {
+            require(Math.abs(previewBounds[index] - bounds[index]) <= 1,
+                    "held item changed the vanilla preview bounds: " + java.util.Arrays.toString(previewBounds));
+        }
     }
 
     private static void testTooltip(Renderer renderer, Path root) throws Exception {
@@ -252,27 +274,45 @@ public final class RendererSmokeTest {
 
     private static void testHeldItems(Renderer renderer, Path root) throws Exception {
         BufferedImage none = renderPlayer(renderer, root, "classic", false, List.of());
-        require(countExact(none, 0xE01080) == 0, "held item rendered without equipment");
-        int[] plain = skinBounds(none);
+        require(countExact(none, SWORD & 0xFFFFFF) == 0, "held item rendered without equipment");
 
         BufferedImage mainHand = renderEquipment(renderer, root, Map.of("mainHand", Map.of("id", "minecraft:diamond_sword")));
-        require(countExact(mainHand, 0xE01080) > 20, "main hand item is missing");
-        int[] heldBounds = exactBounds(mainHand, 0xE01080);
-        // The unmirrored third person pose tilts the blade back over the shoulder, which is behind the
-        // torso, so only the part that swings past the body silhouette is visible. It has to reach the
-        // viewer's left of the body, above the hips and behind the shoulder.
-        require(heldBounds[0] < 60, "main hand item is not held out to the side: " + heldBounds[0]);
-        require(heldBounds[3] > 250, "main hand item does not hang down from the hand: " + heldBounds[3]);
-        require(heldBounds[1] < 235, "main hand item does not reach the shoulder: " + heldBounds[1]);
+        int mainSword = countExact(mainHand, SWORD & 0xFFFFFF);
+        require(mainSword > 20, "main hand item is missing");
+        // The vanilla ItemInHandLayer pose hangs the item at hand height in front of the torso, so
+        // every visible item pixel has to be drawn over the body instead of behind its back.
+        int mainOverBody = overModelPixels(none, mainHand, SWORD & 0xFFFFFF, -1);
+        require(mainOverBody * 2 >= mainSword, "main hand item is not drawn in front of the torso: "
+                + mainOverBody + "/" + mainSword);
+        int[] heldBounds = exactBounds(mainHand, SWORD & 0xFFFFFF);
+        int[] bodyBounds = skinBounds(mainHand);
+        require(heldBounds[0] >= bodyBounds[0] && heldBounds[2] <= bodyBounds[2],
+                "main hand item is held outside the body silhouette: " + java.util.Arrays.toString(heldBounds)
+                        + " body=" + java.util.Arrays.toString(bodyBounds));
+        // The item belongs to the figure the fit is computed from and must stay inside the canvas.
+        require(heldBounds[0] > 0 && heldBounds[2] < mainHand.getWidth() - 1
+                        && heldBounds[1] > 0 && heldBounds[3] < mainHand.getHeight() - 1,
+                "main hand item is clipped by the canvas: " + java.util.Arrays.toString(heldBounds));
+        require(heldBounds[1] > (bodyBounds[1] + bodyBounds[3]) / 2,
+                "main hand item is not held at hand height: " + java.util.Arrays.toString(heldBounds));
+
+        // The offhand runs through the mirrored display transform and lands in front of the torso
+        // too. Its item hangs beside the far arm in this three quarter view, so only part of the rod
+        // overlaps the body, while a version rendered behind the back would be occluded instead.
+        BufferedImage offhand = renderEquipment(renderer, root, Map.of("offhand", Map.of("id", "minecraft:diamond_sword")));
+        int offhandSword = countExact(offhand, SWORD & 0xFFFFFF);
+        require(offhandSword > 20, "offhand item is missing");
+        int offhandOverBody = overModelPixels(none, offhand, SWORD & 0xFFFFFF, -1);
+        require(offhandOverBody * 4 >= offhandSword, "offhand item is not drawn in front of the torso: "
+                + offhandOverBody + "/" + offhandSword);
+        int[] offhandBounds = exactBounds(offhand, SWORD & 0xFFFFFF);
+        require(offhandBounds[0] > 0 && offhandBounds[2] < offhand.getWidth() - 1,
+                "offhand item is clipped by the canvas: " + java.util.Arrays.toString(offhandBounds));
+
         // A slim arm moves the pivot and therefore the item inward by half a pixel of skin.
         BufferedImage slim = renderSlimEquipment(renderer, root);
-        int[] slimBounds = exactBounds(slim, 0xE01080);
+        int[] slimBounds = exactBounds(slim, SWORD & 0xFFFFFF);
         require(slimBounds[0] > heldBounds[0], "slim arm does not move the held item towards the body");
-        // The held item must not take part in the model fit, so the body silhouette is unchanged.
-        int[] withItem = skinBounds(mainHand);
-        for (int index = 0; index < 4; index++) {
-            require(Math.abs(withItem[index] - plain[index]) <= 1, "held item changed the player model bounds");
-        }
     }
 
     private static BufferedImage renderSlimEquipment(Renderer renderer, Path root) throws Exception {
@@ -363,6 +403,28 @@ public final class RendererSmokeTest {
         return bounds;
     }
 
+    /**
+     * Counts the pixels of one exact colour in {@code after} that covered the model of
+     * {@code before} — opaque and, when a background colour is given, different from it — which is
+     * how a held item drawn in front of the body is told apart from one hidden behind it.
+     */
+    private static int overModelPixels(BufferedImage before, BufferedImage after, int rgb, int background) {
+        require(before.getWidth() == after.getWidth() && before.getHeight() == after.getHeight(), "diffed images differ in size");
+        int count = 0;
+        for (int y = 0; y < after.getHeight(); y++) {
+            for (int x = 0; x < after.getWidth(); x++) {
+                if ((after.getRGB(x, y) & 0xFFFFFF) != rgb) {
+                    continue;
+                }
+                int pixel = before.getRGB(x, y);
+                if ((pixel >>> 24) <= 200 || (background >= 0 && (pixel & 0xFFFFFF) == (background & 0xFFFFFF))) {
+                    continue;
+                }
+                count++;
+            }
+        }
+        return count;
+    }
     /** Counts pixels with exactly this RGB value and a fully opaque alpha channel. */
     private static int countExact(BufferedImage image, int rgb) {
         int count = 0;
