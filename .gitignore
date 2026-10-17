@@ -7,9 +7,6 @@ dist/
 # Java 渲染后端编译产物（classes 与 minecraft-renderer.jar）
 renderer-backend/build/
 
-# 渲染冒烟测试用的合成贴图：本地生成，不入库
-renderer-backend/fixture/**/*.png
-
 # 其他编译/测试临时产物
 *.class
 *.test
