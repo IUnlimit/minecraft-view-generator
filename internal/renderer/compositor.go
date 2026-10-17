@@ -90,15 +90,39 @@ func (c *Compositor) renderContainer(ctx context.Context, kind string, options m
 	if columns > 18 || rows > 12 {
 		return nil, fmt.Errorf("%s grid exceeds 18x12", kind)
 	}
-	cell := 18
 	width, height := options.Width, options.Height
+	defaultWidth, defaultHeight := containerCanvasSize(kind, data, rows)
 	if width == 0 {
-		width = columns*cell + 14
+		width = defaultWidth
 	}
 	if height == 0 {
-		height = rows*cell + 17 + 96
+		height = defaultHeight
 	}
 	return c.Adapter.RenderContainer(ctx, resource, kind, *data, width, height)
+}
+
+// containerCanvasSize returns the native size of the vanilla screen that owns the container
+// texture: 176 px wide everywhere, with the generic_54 family growing one 18 px row per container
+// row on top of its 17 px frame and 96 px player inventory band.
+func containerCanvasSize(kind string, data *model.ContainerData, rows int) (int, int) {
+	const (
+		width       = 176
+		genericTop  = 17
+		genericBand = 96
+		screenBody  = 166
+		hopperBody  = 133
+	)
+	switch kind {
+	case model.TypeItemContainer:
+		if strings.EqualFold(strings.TrimSpace(data.Container), "hopper") {
+			return width, hopperBody
+		}
+		return width, screenBody
+	case model.TypeEnderchest:
+		return width, genericTop + 3*18 + genericBand
+	default:
+		return width, genericTop + rows*18 + genericBand
+	}
 }
 
 func (c *Compositor) renderSkin(ctx context.Context, options model.Options, data *model.SkinData, resource resources.Context) (image.Image, error) {
@@ -171,12 +195,6 @@ func parseColor(value string) color.RGBA {
 		return color.RGBA{r, g, b, 255}
 	}
 	return color.RGBA{0, 0, 0, 0}
-}
-func defaultSize(value, fallback int) int {
-	if value > 0 {
-		return value
-	}
-	return fallback
 }
 func min(a, b int) int {
 	if a < b {
