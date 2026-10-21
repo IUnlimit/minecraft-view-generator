@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -94,6 +95,7 @@ func (PrimitiveAdapter) RenderItem(_ context.Context, _ resources.Context, item 
 }
 
 func (PrimitiveAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, width, height int) (image.Image, error) {
+	textFont := fontFor(resource)
 	columns, rows := data.Columns, data.Rows
 	if columns == 0 {
 		columns = 9
@@ -115,7 +117,7 @@ func (PrimitiveAdapter) RenderContainer(ctx context.Context, resource resources.
 	fillRect(canvas, 8, 8, width-16, height-16, color.RGBA{194, 194, 194, 255})
 	strokeRect(canvas, 8, 8, width-16, height-16, color.RGBA{55, 55, 55, 255})
 	if data.Title != "" {
-		drawCenteredText(canvas, 18, data.Title, 2, color.RGBA{30, 30, 30, 255})
+		drawCenteredText(canvas, textFont, 18, data.Title, 2, color.RGBA{30, 30, 30, 255})
 	}
 	gridY := 40
 	if data.Title == "" {
@@ -147,7 +149,7 @@ func (PrimitiveAdapter) RenderContainer(ctx context.Context, resource resources.
 		}
 		drawScaledImage(canvas, icon, 20+column*cell, gridY+row*cell+4, cell-8, cell-8)
 		if slot.Item.Count > 1 {
-			drawText(canvas, 20+column*cell+cell-22, gridY+row*cell+cell-16, fmt.Sprint(slot.Item.Count), 1, color.White, 20)
+			drawText(canvas, textFont, 20+column*cell+cell-22, gridY+row*cell+cell-16, fmt.Sprint(slot.Item.Count), 1, color.White, 20)
 		}
 	}
 	return canvas, nil
@@ -178,7 +180,8 @@ func (PrimitiveAdapter) RenderPlayerInventory(ctx context.Context, resource reso
 	return canvas, nil
 }
 
-func (PrimitiveAdapter) RenderPlayerList(_ context.Context, _ resources.Context, data model.PlayerListData, width, height int) (image.Image, error) {
+func (PrimitiveAdapter) RenderPlayerList(_ context.Context, resource resources.Context, data model.PlayerListData, width, height int) (image.Image, error) {
+	textFont := fontFor(resource)
 	if width == 0 {
 		width = max(360, data.Columns*190)
 	}
@@ -203,7 +206,7 @@ func (PrimitiveAdapter) RenderPlayerList(_ context.Context, _ resources.Context,
 	fillRect(canvas, 8, 8, width-16, height-16, color.RGBA{10, 15, 24, 235})
 	strokeRect(canvas, 8, 8, width-16, height-16, color.RGBA{60, 75, 95, 255})
 	if data.Header != "" {
-		drawCenteredText(canvas, 16, data.Header, 2, color.White)
+		drawCenteredText(canvas, textFont, 16, data.Header, 2, color.White)
 	}
 	for index, player := range data.Players {
 		column, row := index%columns, index/columns
@@ -214,13 +217,13 @@ func (PrimitiveAdapter) RenderPlayerList(_ context.Context, _ resources.Context,
 		if label == "" {
 			label = player.Name
 		}
-		drawText(canvas, x+24, y+4, label, 1, color.RGBA{230, 230, 230, 255}, cellWidth-48)
+		drawText(canvas, textFont, x+24, y+4, label, 1, color.RGBA{230, 230, 230, 255}, cellWidth-48)
 		if player.Ping > 0 {
-			drawText(canvas, x+cellWidth-40, y+4, fmt.Sprint(player.Ping), 1, color.RGBA{160, 190, 220, 255}, 36)
+			drawText(canvas, textFont, x+cellWidth-40, y+4, fmt.Sprint(player.Ping), 1, color.RGBA{160, 190, 220, 255}, 36)
 		}
 	}
 	if data.Footer != "" {
-		drawText(canvas, 16, height-22, data.Footer, 1, color.RGBA{180, 180, 180, 255}, width-32)
+		drawText(canvas, textFont, 16, height-22, data.Footer, 1, color.RGBA{180, 180, 180, 255}, width-32)
 	}
 	return canvas, nil
 }
@@ -275,6 +278,7 @@ func (PrimitiveAdapter) RenderMap(_ context.Context, _ resources.Context, data m
 }
 
 func (PrimitiveAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, width, height int) (image.Image, error) {
+	textFont := fontFor(resource)
 	if width == 0 {
 		width = 480
 	}
@@ -289,17 +293,18 @@ func (PrimitiveAdapter) RenderAchievement(ctx context.Context, resource resource
 		return nil, err
 	}
 	drawScaledImage(canvas, icon, 16, 8, min(80, width/5), min(80, height-16))
-	drawText(canvas, 112, 24, data.Title, 2, color.RGBA{255, 215, 80, 255}, width-128)
-	drawText(canvas, 112, 54, data.Description, 1, color.RGBA{230, 230, 230, 255}, width-128)
+	drawText(canvas, textFont, 112, 24, data.Title, 2, color.RGBA{255, 215, 80, 255}, width-128)
+	drawText(canvas, textFont, 112, 54, data.Description, 1, color.RGBA{230, 230, 230, 255}, width-128)
 	return canvas, nil
 }
 
 func (PrimitiveAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, width, height int) (image.Image, error) {
+	textFont := fontFor(resource)
 	if width == 0 {
 		width = 360
 	}
 	if height == 0 {
-		height = 96 + len(data.Lines)*18
+		height = 96 + len(data.Item.Lore)*18
 	}
 	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
 	fillRect(canvas, 3, 3, width-6, height-6, color.RGBA{22, 19, 30, 245})
@@ -316,11 +321,13 @@ func (PrimitiveAdapter) RenderTooltip(ctx context.Context, resource resources.Co
 		x = 42
 	}
 	if data.Title != "" {
-		drawText(canvas, x, 18, data.Title, 2, color.RGBA{255, 255, 255, 255}, width-x-12)
+		drawText(canvas, textFont, x, 18, data.Title, 2, color.RGBA{255, 255, 255, 255}, width-x-12)
 	}
+	// Lore is the only free form line source of a tooltip: it sits with the vanilla dark purple of
+	// the lore component and explicit formatting codes still override the colour.
 	lineY := 42
-	for _, line := range data.Lines {
-		drawText(canvas, x, lineY, line, 1, color.RGBA{210, 210, 210, 255}, width-x-12)
+	for _, line := range data.Item.Lore {
+		drawText(canvas, textFont, x, lineY, line, 1, color.RGBA{170, 0, 170, 255}, width-x-12)
 		lineY += 16
 	}
 	return canvas, nil
@@ -455,61 +462,62 @@ func (a UnavailableAdapter) RenderAchievement(context.Context, resources.Context
 }
 
 func (a CommandAdapter) RenderItem(ctx context.Context, resource resources.Context, item model.Item, size int) (image.Image, error) {
-	payload := commandPayload{Operation: "item", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, Item: item, Width: size, Height: size}
+	payload := commandPayload{Operation: "item", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Item: item, Width: size, Height: size}
 	return a.run(ctx, payload)
 }
 
 func (a CommandAdapter) RenderPlayer(ctx context.Context, resource resources.Context, skin model.SkinData, equipment Equipment, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "player", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, Skin: skin, Equipment: equipment, Width: width, Height: height}
+	payload := commandPayload{Operation: "player", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Skin: skin, Equipment: equipment, Width: width, Height: height}
 	return a.run(ctx, payload)
 }
 
 func (a CommandAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "tooltip", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, Tooltip: data, Width: width, Height: height}
+	payload := commandPayload{Operation: "tooltip", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Tooltip: data, Width: width, Height: height}
 	return a.run(ctx, payload)
 }
 
 func (a CommandAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: kind, Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, Container: data, Width: width, Height: height}
+	payload := commandPayload{Operation: kind, Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Container: data, Width: width, Height: height}
 	return a.run(ctx, payload)
 }
 
 func (a CommandAdapter) RenderPlayerInventory(ctx context.Context, resource resources.Context, data model.PlayerInventoryData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "player_inventory", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, PlayerInventory: data, Width: width, Height: height}
+	payload := commandPayload{Operation: "player_inventory", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, PlayerInventory: data, Width: width, Height: height}
 	return a.run(ctx, payload)
 }
 
 func (a CommandAdapter) RenderPlayerList(ctx context.Context, resource resources.Context, data model.PlayerListData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "playerlist", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, PlayerList: data, Width: width, Height: height}
+	payload := commandPayload{Operation: "playerlist", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, PlayerList: data, Width: width, Height: height}
 	return a.run(ctx, payload)
 }
 
 func (a CommandAdapter) RenderMap(ctx context.Context, resource resources.Context, data model.MapData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "map", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, Map: data, Width: width, Height: height}
+	payload := commandPayload{Operation: "map", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Map: data, Width: width, Height: height}
 	return a.run(ctx, payload)
 }
 
 func (a CommandAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "achievement", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, Achievement: data, Width: width, Height: height}
+	payload := commandPayload{Operation: "achievement", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Achievement: data, Width: width, Height: height}
 	return a.run(ctx, payload)
 }
 
 type commandPayload struct {
-	Operation       string                    `json:"operation"`
-	Version         string                    `json:"version"`
-	ResourceRoot    string                    `json:"resourceRoot"`
-	PackRoots       []string                  `json:"packRoots,omitempty"`
-	Item            model.Item                `json:"item,omitempty"`
-	Skin            model.SkinData            `json:"skin,omitempty"`
-	Equipment       Equipment                 `json:"equipment,omitempty"`
-	Tooltip         model.TooltipData         `json:"tooltip,omitempty"`
-	Container       model.ContainerData       `json:"container,omitempty"`
-	PlayerInventory model.PlayerInventoryData `json:"playerInventory,omitempty"`
-	PlayerList      model.PlayerListData      `json:"playerList,omitempty"`
-	Map             model.MapData             `json:"map,omitempty"`
-	Achievement     model.AchievementData     `json:"achievement,omitempty"`
-	Width           int                       `json:"width"`
-	Height          int                       `json:"height"`
+	Operation       string                     `json:"operation"`
+	Version         string                     `json:"version"`
+	ResourceRoot    string                     `json:"resourceRoot"`
+	PackRoots       []string                   `json:"packRoots,omitempty"`
+	CustomArt       map[string]model.CustomArt `json:"customArt,omitempty"`
+	Item            model.Item                 `json:"item,omitempty"`
+	Skin            model.SkinData             `json:"skin,omitempty"`
+	Equipment       Equipment                  `json:"equipment,omitempty"`
+	Tooltip         model.TooltipData          `json:"tooltip,omitempty"`
+	Container       model.ContainerData        `json:"container,omitempty"`
+	PlayerInventory model.PlayerInventoryData  `json:"playerInventory,omitempty"`
+	PlayerList      model.PlayerListData       `json:"playerList,omitempty"`
+	Map             model.MapData              `json:"map,omitempty"`
+	Achievement     model.AchievementData      `json:"achievement,omitempty"`
+	Width           int                        `json:"width"`
+	Height          int                        `json:"height"`
 }
 
 func (a CommandAdapter) run(ctx context.Context, payload commandPayload) (image.Image, error) {
@@ -538,11 +546,37 @@ func (a CommandAdapter) run(ctx context.Context, payload commandPayload) (image.
 		}
 		return nil, fmt.Errorf("external renderer failed: %s", message)
 	}
+	// A renderer that cannot find the font assets still answers with a picture, in which every
+	// label is the missing glyph box. Its stderr is the only place that says so, so it is repeated
+	// here instead of being dropped with the exit code.
+	logRendererDiagnostics(stderr.String())
 	decoded, err := decodePNG(stdout.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("external renderer returned invalid PNG: %w", err)
 	}
 	return decoded, nil
+}
+
+// rendererDiagnosticsLines bounds how much of the renderer's stderr the service repeats. Every code
+// point without a glyph is one line, so an unbounded copy would bury the log of a single request.
+const rendererDiagnosticsLines = 4
+
+// logRendererDiagnostics reports the warnings of a renderer run that still produced a picture.
+func logRendererDiagnostics(stderr string) {
+	trimmed := strings.TrimSpace(stderr)
+	if trimmed == "" {
+		return
+	}
+	lines := strings.Split(trimmed, "\n")
+	kept := lines
+	if len(kept) > rendererDiagnosticsLines {
+		kept = kept[:rendererDiagnosticsLines]
+	}
+	message := strings.Join(kept, "; ")
+	if remaining := len(lines) - len(kept); remaining > 0 {
+		message += fmt.Sprintf(" (+%d more)", remaining)
+	}
+	slog.Warn("renderer diagnostics", "message", message)
 }
 
 type limitedBuffer struct {

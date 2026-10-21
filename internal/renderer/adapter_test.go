@@ -1,8 +1,11 @@
 package renderer
 
 import (
+	"bytes"
 	"context"
 	"image"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/illtamer/minecraft-view-generator2/internal/model"
@@ -43,5 +46,36 @@ func TestCompositorMapDefaultsToPixelExactMap(t *testing.T) {
 	}
 	if result.Bounds() != image.Rect(0, 0, 140, 140) {
 		t.Fatalf("bounds = %v, want 140x140", result.Bounds())
+	}
+}
+
+// A renderer that produced a picture can still have something to say — a resource pack without a
+// glyph is the common case — and that copy is the only explanation of why a label looks empty. It
+// has to reach the log, but a run that misses Thai, Chinese and Hangul would otherwise repeat one
+// line per code point.
+func TestLogRendererDiagnosticsSummarizesLongOutput(t *testing.T) {
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	logRendererDiagnostics("\n")
+	if output.Len() != 0 {
+		t.Fatalf("an empty diagnosis must stay quiet: %s", output.String())
+	}
+
+	logRendererDiagnostics("no font provider covers U+4E2D, drawing the missing glyph\nextra line\nthird\nfourth\nfifth\n")
+	message := output.String()
+	if !strings.Contains(message, "renderer diagnostics") {
+		t.Fatalf("the diagnosis was not logged: %s", message)
+	}
+	if !strings.Contains(message, "U+4E2D") {
+		t.Fatalf("the first diagnosis line is missing: %s", message)
+	}
+	if !strings.Contains(message, "(+1 more)") {
+		t.Fatalf("the summary does not count the dropped lines: %s", message)
+	}
+	if strings.Contains(message, "fifth") {
+		t.Fatalf("the summary copied every line: %s", message)
 	}
 }
