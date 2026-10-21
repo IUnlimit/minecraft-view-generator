@@ -33,14 +33,65 @@ curl -X POST http://localhost:4666/api/v1/render \
   -o item.png
 ```
 
-`output=png` 返回 `image/png`；`output=base64` 返回 `{ "mimeType":"image/png", "encoding":"base64", "data":"...", "width":n, "height":n }`。
+`output=png` 返回 `image/png`；`output=base64` 返回 `{ "mimeType":"image/png", "encoding":"base64", "data":"...", "width":n, "height":n }`。响应里的 `width`/`height` 就是这张图的最终尺寸。
+
+## 图片尺寸与放大倍率
+
+`options` 里的 `width`、`height`、`scale` 决定输出图片的大小，三者可以组合：
+
+| 字段 | 语义 |
+| --- | --- |
+| `width` | 画布宽度（渲染分辨率，≥ 16）。只给宽度时高度按该类型的原生画布比例换算，不会拉伸 |
+| `height` | 画布高度（渲染分辨率，≥ 16）。只给高度时宽度同样按原生比例换算 |
+| `width` + `height` | 直接使用这对画布尺寸（与该类型原有的拉伸语义一致） |
+| `scale` | 成品图的放大倍率，见下表的两种写法；与 `width`/`height` 的画布尺寸相互独立 |
+
+`scale` 支持固定比例与按目标尺寸自动缩放两种写法：
+
+| 写法 | 语义 |
+| --- | --- |
+| `"scale": 2` / `"scale": {"ratio": 2}` | 固定倍率，允许小数（如 `1.5`）；`0` 与 `1` 表示不放大，上限 16，小于 1 时做最近邻缩小 |
+| `"scale": {"width": 800}` | 目标最终宽度：按画布宽度求出倍率，高度等比换算 |
+| `"scale": {"width": 800, "height": 600}` | 目标最终尺寸框：取 `min(800/画布宽, 600/画布高)`，把图片等比放进框内，不拉伸 |
+
+放大在画布渲染完成后应用，按画布实际尺寸计算倍率，因此高度由内容决定的类型也能用 `{"height": N}` 指定最终高度。小数倍率会让像素行/列宽窄交替，整数倍率则保持方块像素；目标框的非约束轴可能出现 ±1px 的取整误差。
+
+各类型的原生画布：`item` 正方形（缺省 128×128）、`tooltip` 宽 360 高由内容决定、`inventory` / `enderchest` / `item_container` 取各自界面贴图尺寸（普通容器 176×166，盒子按行数 `176×(17 + 18×行数 + 96)`，hopper 176×133）、`skin` 256×384、`playerInventory` 176×166、`playerlist` 宽度按列数（最少 360）高由人数决定、`map` 140×140、`achievement` 480×96。原生高度由内容决定的类型（`tooltip`、`playerlist`）只接受画布宽度，高度仍交给渲染器自算；需要限制最终高度时用 `scale` 的目标框。
+
+最终尺寸仍需满足 `MAX_IMAGE_WIDTH` / `MAX_IMAGE_HEIGHT`：`scale` 目标尺寸或“显式画布 × 固定倍率”超限时在入口以 `400 invalid_image_options` 拒绝，原生画布放大后超限则返回 `422 image_too_large`。
+
+```sh
+# 60×60 的方块图标
+curl -X POST http://localhost:4666/api/v1/render \
+  -H 'Content-Type: application/json' \
+  --data '{"version":"1.21.11","type":"item","output":"png","options":{"width":60},"data":{"id":"minecraft:red_shulker_box"}}' \
+  -o shulker.png
+
+# 原生 480×96 的成就 toast，整体放大 2 倍 → 960×192
+curl -X POST http://localhost:4666/api/v1/render \
+  -H 'Content-Type: application/json' \
+  --data '{"version":"1.21.11","type":"achievement","output":"png","options":{"scale":2},"data":{"title":"Stone Age","icon":{"id":"minecraft:stone"}}}' \
+  -o achievement.png
+
+# 按目标最终尺寸自动缩放：成就 toast 放进 1000×400 的框 → 1000×200
+curl -X POST http://localhost:4666/api/v1/render \
+  -H 'Content-Type: application/json' \
+  --data '{"version":"1.21.11","type":"achievement","output":"png","options":{"scale":{"width":1000,"height":400}},"data":{"title":"Stone Age","icon":{"id":"minecraft:stone"}}}' \
+  -o achievement-target.png
+
+# 先取 32×32 的画布，再整体放大 2.5 倍 → 80×80
+curl -X POST http://localhost:4666/api/v1/render \
+  -H 'Content-Type: application/json' \
+  --data '{"version":"1.21.11","type":"item","output":"png","options":{"width":32,"scale":2.5},"data":{"id":"minecraft:diamond_sword"}}' \
+  -o sword.png
+```
 
 ## 类型支持矩阵
 
 | type | 真实 Java 后端能力 |
 | --- | --- |
-| `item` | 1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、select/condition/range dispatch、八类 `minecraft:special` 几何（旗帜 / 床 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟）与箱子族平面贴图、图案与染色组件、damage/glint、资源缺失时画原版缺失模型 |
-| `tooltip` | 原版九宫格背景（`gui/sprites/tooltip/background`，border 从 `.mcmeta` 读取）与 advanced 边框（`tooltip/frame`）、`§` 与 `&` 颜色/修饰符前缀、原版行生成顺序（悬停名 → advanced id → lore → 附魔 → 属性修饰符 → 单值组件 → 组件/NBT 计数）、按真实文本宽度折行、`icon` 开关 |
+| `item` | 1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、select/condition/range dispatch、九类 `minecraft:special` 几何（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟）与箱子族平面贴图、图案与染色组件、damage/glint、资源缺失时画原版缺失模型 |
+| `tooltip` | 原版九宫格背景（`gui/sprites/tooltip/background`，border 从 `.mcmeta` 读取）与 advanced 边框（`tooltip/frame`）、`§` 与 `&` 颜色/修饰符前缀、原版行生成顺序（悬停名 → advanced id → lore → 附魔 → 属性修饰符 → 单值组件 → 组件/NBT 计数，lore 只来自 `item.lore`）、按真实文本宽度折行、`icon` 开关 |
 | `inventory` | 官方 `generic_54` chest GUI，1–6 行九列、标题、主容器槽、玩家区槽位、堆叠数量 |
 | `item_container` | hopper（176×133）、furnace/blast_furnace/smoker、crafting_table、anvil、brewing_stand（176×166）；槽位取自各自原版菜单；未知容器返回 `unsupported_container` |
 | `enderchest` | 固定 3×9，与普通三行箱子完全一致（同一 `generic_54` 贴图、配色与槽位，无额外叠加） |
@@ -52,9 +103,24 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 ## 字体
 
-英文字符使用 [tryashtar/minecraft-ttf v1.6](https://github.com/tryashtar/minecraft-ttf/releases/tag/v1.6) 发布的 `MinecraftDefault-Regular.ttf`；中文等字符保留原始 Unicode 字符，并使用同一发布包的 `MinecraftDefaultUniformBMP-Regular.ttf`，不做拼音化、转写或替换。字体随 Java renderer 打包，服务运行时不联网下载。
+文本完全走原版 `FontManager` 的 provider 管线：`assets/minecraft/font/default.json` 依次声明 `space` → `bitmap` → `reference`（`include/unifont`）→ `unihex`，Java renderer 与 Go 简化后端（`internal/font`）解析同一份资源、执行同一套规则。渲染器不再内嵌任何 TTF，服务运行时不联网下载字体。
 
-该字体在 **字号 12** 时精确复现原版 8px 字形单元（数字与大写字母宽 5、步进 6、空格 4），字形墨迹占基线上方 7px。渲染器据此把「字号 = 12 × GUI 缩放」「行顶到基线 = 7 × GUI 缩放」作为唯一文本度量：传入坐标即原版 `GuiGraphics.drawString` 的行顶坐标，容器标题 `(8, 6)`、物品栏标签、提示行等一律直接使用原版数值。所有 GUI 文本均以最近邻缩放渲染，缩放渲染（playerlist 2 倍、achievement 3 倍）的字体同步放大。
+| provider | 资产 | 行为 |
+| --- | --- | --- |
+| `space` | `default.json` 内联 | 空格步进 4px，不产生像素 |
+| `bitmap` | `textures/font/ascii.png`（ascent 7）、`accented.png`（ascent 10、高 12）、`nonlatin_european.png` | 拉丁与重音字形；保留左空距，只裁掉右侧空列，步进 = 墨迹宽 + 1 |
+| `reference` | `font/include/unifont.json` | 内联 Unifont 子定义（含 `size_overrides`），可继续嵌套 |
+| `unihex` | `font/unifont.zip` | 16×16 Unifont 点阵按 2×2 覆盖度降到 8×8，每个像素保留 0/1/2/3/4 五档覆盖度（半透明灰阶）；`size_overrides` 把 CJK 块固定为全角，步进 9 |
+
+`filter`（`uniform` / `jp`）按原版语义求值：默认字体不启用任何选项，因此 `uniform: false` 的 bitmap 组保留、`jp: true` 的日文 Unifont 变体被跳过。中文保留原始 Unicode 码点，不做拼音化、转写或替换，字形来自 `unifont.zip` 的点阵而非矢量字体。
+
+度量与原版一致：传入坐标就是 `GuiGraphics.drawString` 的行顶坐标（基线 = 行顶 + 7），空格 4、普通字形「墨迹宽 + 1」、CJK 全角 9，tooltip 行高 10。`bitmap` 贴图是绘制好的位图，像素只有「有墨 / 无墨」两态；`unihex` 的 16×16 点阵是 2×2 归并到 8×8，所以每个输出像素按覆盖的 texel 数取 5 档（`0`、`1`、`2`、`3`、`4` 四分之一），1 档与 2 档以半透明绘制——细笔画因此不会被二值化丢掉，放大（`options.scale`）之后仍是柔边而不是硬块。所有文本按最近邻采样放大，无抗锯齿插值，缩放渲染（playerlist 2 倍、achievement 3 倍）的字体同步放大。上述字体资产由 `prepare` 阶段从官方 asset index 物化到 `data/resources/<version>/vanilla/assets/minecraft/font/`，与其它原版资源一同按 SHA-1 缓存，并在资源根目录写一份 `font-overlay.json` 记录本次物化的文件清单。
+
+客户端 jar 自带的 `font/default.json` 和 `include/{default,space}.json` 只是占位，真正的 Unifont 定义与压缩包只存在于 asset index。因此：
+
+- 服务启动时会按清单检查每个 ready 版本的资源树，缺文件就用本地对象缓存补齐（不联网），日志出现 `msg=restored missing font assets`；
+- 连对象缓存也缺失时该版本不再是 ready，渲染返回 `409 resources_not_ready`，重新 `PUT /api/v1/resources/<version>` 即可；
+- 渲染成功但渲染进程在 stderr 上报告了缺字（例如资源包只覆盖了部分字形）时，服务端会以 `msg=renderer diagnostics` 记录最多 4 行，而不是让图片静默变成缺字方块。
 
 ## skin 示例
 
@@ -84,7 +150,9 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 - **几何**：内容区 = 文本块（宽 = 最长行折叠后的宽度，高 = 行数 × 10，单行时再减 2）；背景九宫格铺在内容区各外扩 12px 的矩形上，border 从 `gui/sprites/tooltip/background.png.mcmeta` 读取（缺省 9）；`advanced: true` 时叠加 `gui/sprites/tooltip/frame`（缺省 border 10）。文本起点为背景左上 + 12，每行步进 10px，标题行之后额外留 2px，文本始终带阴影。
 - **样式**：所有文本支持 `§` 颜色与修饰符（`§0`–`§9`、`§a`–`§f`、`§l` 粗体、`§o` 斜体、`§n` 下划线、`§m` 删除线、`§k` 混淆、`§r` 重置）。`§k` 为确定性渲染（按原字符绘制），不做随机化。
-- **行生成顺序**（未显式给出 `title` 时，与 `ItemStack.getTooltipLines` 一致）：悬停名（`title` > `item.name` > `components["minecraft:custom_name"]` > `en_US` 语言文件 `item.minecraft.*`/`block.minecraft.*` > id 路径，颜色按 `components["minecraft:rarity"]`，自定义名斜体）→ `advanced` 时的物品 id（深灰）→ lore（`lines` 原样；否则 `item.lore` / `components["minecraft:lore"]`，缺省 `§5` 斜体）→ 附魔（`components["minecraft:enchantments"]`/`stored_enchantments` 的 `{levels:{id:等级}}` 或简化字段 `item.enchantments` 的 `"sharpness 5"`/`"sharpness V"`，灰色，等级 > 1 追加罗马数字）→ 属性修饰符（`components["minecraft:attribute_modifiers"].modifiers[]` 按 `slot` 分组，表头取 `item.modifiers.<slot>`，数值用 `#.##` 格式，蓝色）→ 单值组件（`unbreakable`、`dyed_color`，`advanced` 时的耐久度）→ `advanced` 时未识别组件的 `minecraft:<path>: <json>` dump 与 `item.components` 计数、`nbt` 存在时的 `item.nbt_tags` 计数。文案来自 `assets/minecraft/lang/en_us.json`。
+- **行生成顺序**（未显式给出 `title` 时，与 `ItemStack.getTooltipLines` 一致）：悬停名（`title` > `item.name` > `components["minecraft:custom_name"]` > `en_US` 语言文件 `item.minecraft.*`/`block.minecraft.*` > id 路径，颜色按 `components["minecraft:rarity"]`，自定义名斜体）→ `advanced` 时的物品 id（深灰）→ lore（只来自 `item.lore` / `components["minecraft:lore"]`，位置固定，缺省 `§5` 斜体；没有单独的 tooltip 行列表）→ 附魔（`components["minecraft:enchantments"]`/`stored_enchantments` 的 `{levels:{id:等级}}` 或简化字段 `item.enchantments` 的 `"sharpness 5"`/`"sharpness V"`，灰色，等级 > 1 追加罗马数字）→ 属性修饰符（`components["minecraft:attribute_modifiers"].modifiers[]` 按 `slot` 分组，表头取 `item.modifiers.<slot>`，数值用 `#.##` 格式，蓝色）→ 单值组件（`unbreakable`、`dyed_color`，`advanced` 时的耐久度）→ `advanced` 时未识别组件的 `minecraft:<path>: <json>` dump 与 `item.components` 计数、`nbt` 存在时的 `item.nbt_tags` 计数。文案来自 `assets/minecraft/lang/en_us.json`。
+- **正文行**：`tooltip` 没有独立的 `lines` 字段。需要自定义正文时写进 `item.lore`（最多 128 行、每行 1024 字符），每行可自带 `§`/`&` 格式码覆盖默认的紫色斜体；只要 `title` + `item.lore` 就足以渲染一个没有物品 id 的纯文本提示框。
+- **校验**：`item.id` 与 `title` 至少给出一个，否则返回 `400 invalid_data`。
 - **折行**：按真实文本宽度在空格处折行；单个单词超过可用宽度时按原版 `Font.split` 规则硬切。可用宽度 = `options.width`（缺省 360）− 24（`icon` 开启时再减去图标占位）。
 - **图标**：默认不绘制（与原版一致）；`icon: true` 且提供了 `item` 时在左侧绘制 72px 物品图标。
 - **尺寸**：`options.height` 缺省为 0，由内容自算（行数 × 10 + 2 + 24）；显式给出时使用该高度，九宫格会相应拉伸。
@@ -217,9 +285,96 @@ PY
 | `decorated_pot` | 颈 + 盖 + 四面侧壁（`entity/decorated_pot/*`），`pot_decorations` 按原版 back/left/right/front 顺序选陶片图案 `*_pottery_pattern`，没有陶片的侧面用 `decorated_pot_side` |
 | `copper_golem_statue` | 站立姿势的铜傀儡盒列表（`texture` 指向氧化程度贴图）；`sitting` / `running` / `star` 三种姿势尚未直译，暂用站立姿势 |
 | `trident` | 杆 + 基座 + 三叉（`entity/trident`）；GUI 上下文的 `select(display_context)` 会选中平面模型 `item/trident`，因此这条几何用于手持 |
-| `chest` / `ender_chest` / `shulker_box` | 仍是原版平面实体贴图（`entity/chest/*`、`entity/shulker/shulker`），与之前版本逐像素一致 |
+| `shulker_box` | 关闭状态的潜影盒：盒盖 `lid`（`texOffs(0, 0)`，16×12×16）与盒身 `base`（`texOffs(0, 28)`，16×8×16）两个盒子叠出 1×1×1 方块，`texture` 字段直接给出染色后的贴图（`entity/shulker/shulker` 为未染色，`entity/shulker/shulker_red` 等为 16 色），`display.gui` 的 30°/45° 与 0.625 让它在图标里呈等轴 3D 方块；盒盖底边 4 单位透明、盒身顶边透出的 8 像素凸起就是原版贴图的卡扣 |
+| `chest` / `ender_chest` | 仍是原版平面实体贴图（`entity/chest/normal`、`entity/chest/ender`），与之前版本逐像素一致 |
 
 图标与手持共用同一份几何：图标走「`display.gui` 的 `T·R(rotationXYZ)·S·T(-0.5,-0.5,-0.5)` + 正交直视相机（1 单位 = 1 像素、物品中心落在图标中心）」，手持走 `thirdperson_righthand` / `thirdperson_lefthand` 与 `ItemInHandLayer` 链条，深度排序与遮挡和玩家模型共用。
+
+## 自定义物品（`customData`）
+
+原版物品的图标由 item definition 决定，而 ItemsAdder 这类插件用的是「同一个基础材料 + 一个 `custom_model_data` 数值」来表达一件自定义物品。本服务直接把这条映射读到渲染链路里：请求的物品带上 `customData`，就会按用户包里的贴图与模型几何绘制，而不是画原版材料。
+
+```sh
+curl -X POST http://localhost:4666/api/v1/render \
+  -H 'Content-Type: application/json' \
+  --data '{"version":"1.21.11","type":"item","output":"png","data":{"id":"minecraft:paper","customData":1134}}' \
+  -o starfish.png
+```
+
+- **定位键 = 基础材料 + 数值**：`id` 的命名空间与 `customData` 组合成索引键（`minecraft:paper` + `1134` → `PAPER#1134`），与 `items_ids_cache.yml` 里的 `<MATERIAL>: {<namespace>:<name>: <cmd>}` 对应。同一数值在不同材料下是不同物品（`PAPER 1134` 与 `FISHING_ROD 1134` 互不相干），所以调用方必须传真实的基础材料。
+- **`customData` 与 `customModelData` 是两件事**：`customModelData` 仍然喂给原版的 `range_dispatch` 覆盖；`customData` 只用于自定义内容索引。
+- **任何物品位置都生效**：`item`、`tooltip.item`、`inventory/item_container/enderchest.slots[].item`、`playerInventory.armor/mainHand/offhand`、`achievement.icon`。
+- **绘制的是贴图 + 模型几何**：模型 JSON 的 `parent` 链会被逐层合并（遇到 `minecraft:` 父模型即停，并保留它以便沿用原版的 `display` 手部变换），`textures` 里的自定义贴图按需读文件并内联成 data URI 传给渲染后端。因此 `generated` 平面图标、带 `elements` 的 Blockbench 家具模型、以及**手持物品**都能画。
+- **未命中不报错**：材料不匹配、索引里没有这个数值、配置里没有这个物品、贴图缺失，都会回退成原版物品并记一条 `WARN`（每个键一次），HTTP 仍然返回 200。
+
+### 目录与索引
+
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CUSTOM_CONTENTS_DIR` | `<DATA_DIR>/contents` | 每个子目录是一个包，布局同 ItemsAdder `contents/`；不存在时启动会创建空目录并视为空索引 |
+| `CUSTOM_ITEMS_CACHE` | `<DATA_DIR>/items_ids_cache.yml` | ItemsAdder `storage/items_ids_cache.yml` 的副本或软链 |
+| `MAX_CUSTOM_ITEMS` / `MAX_CUSTOM_TEXTURE_BYTES` / `MAX_CUSTOM_LAYERS` | `50000` / `8 MiB` / `16` | 索引条目、单贴图、单物品贴图层数上限 |
+
+```
+data/
+  items_ids_cache.yml            # 材料 → (namespace:item → custom_model_data)
+  contents/
+    fishing_pack/
+      configs/*.yml              # info.namespace + items.<name>.resource.{material,generate,textures,model_path}
+      resourcepack/fishing_pack/{models,textures}/…
+    icon_pack/
+      configs/items.yml          # generate: true + textures: [item/1]
+      textures/item/1.png        # 没有 models/ 目录
+```
+
+解析器只读 `configs/**` 与 `items_packs/**` 下的 `*.yml`（深度 ≤ 4），只理解 ItemsAdder 配置用到的 YAML 子集：缩进映射、块序列（可与键同缩进，ItemsAdder 导出的配置多为此种写法，CRLF 同样处理）、行内 `[a, b]`、引号字符串与 `#` 注释；锚点 / 块标量 / 行内映射这类结构不会中断整包，最坏是那条记录被忽略。资源目录支持实测存在的几种布局：`resourcepack/assets/<ns>/…`、`resource_pack/assets/<ns>/…`、`assets/<ns>/…`、`resourcepack/<ns>/{models,textures}/…`、以及直接平铺的 `textures/`、`models/`。zip / rar 包不解析（ItemsAdder 装上后本来就会解压成目录）。
+
+`types`（材料、贴图、模型）全部由用户手动维护，服务只读取并在需要时内联贴图；索引在启动时后台预热，命中过缓存后单个物品的首帧开销只发生一次。
+
+## 资源路径（sources / reload）
+
+`GET /api/v1/resources/sources` 返回服务当前真正读取的每一类路径与状态，用来判断「图为什么不一样」是缺资源还是缺配置：
+
+```sh
+curl http://localhost:4666/api/v1/resources/sources
+```
+
+```json
+{
+  "dataDir": "/app/data",
+  "renderer": {"name": "java-minecraft-renderer", "status": "ready", "real": true, "backend": "..."},
+  "versions": [{
+    "version": "1.21.11",
+    "status": "ready",
+    "resourceRoot": "/app/data/resources/1.21.11",
+    "vanillaRoot": "/app/data/resources/1.21.11/vanilla",
+    "addonRoot": "/app/data/resources/1.21.11/addon",
+    "packRoots": ["/app/data/packs/pack-000"],
+    "font": {
+      "definition": "/app/data/resources/1.21.11/vanilla/assets/minecraft/font/default.json",
+      "definitionPresent": true,
+      "unifont": "/app/data/resources/1.21.11/vanilla/assets/minecraft/font/unifont.zip",
+      "unifontPresent": true,
+      "manifest": "/app/data/resources/1.21.11/font-overlay.json",
+      "manifestPresent": true
+    }
+  }],
+  "customContents": {
+    "root": "/app/data/contents",
+    "itemsCache": "/app/data/items_ids_cache.yml",
+    "status": "ready",
+    "cachePresent": true,
+    "scannedAt": "2026-01-01T00:00:00Z",
+    "packs": [{"name": "fishing_pack", "root": "…/fishing_pack", "namespaces": ["fishing_pack"], "items": 143, "configs": 3}],
+    "items": {"cached": 3164, "withDefinition": 2534, "resolved": 12},
+    "warnings": []
+  }
+}
+```
+
+`items.cached` 是索引里能读到的映射条数，`withDefinition` 是其中真正有包配置支持的条数，`resolved` 是本次进程已经成功解析过（并缓存）的物品数——`resolved` 按需增长，避免为了统计去读走整盘几千张贴图。
+
+`POST /api/v1/resources/custom/reload` 重新扫描用户包与索引并返回同一份 `customContents`。用户手动加了包、改了 `items_ids_cache.yml` 之后调用它即可生效，不需要重启服务；重建会丢弃已缓存的模型与贴图。
 
 ## 资源缺失时的行为
 
@@ -229,6 +384,17 @@ PY
 - 单个贴图缺失或不是合法 PNG：**只有那一层**用缺失贴图继续渲染，其余层照常；
 - 容器 / 背包 / tooltip / achievement 里单个槽位渲染异常只影响该槽位（同样画缺失模型），整图仍然产出；
 - 手持物失败时该手持物画缺失模型。
+
+## 调试日志（`DEBUG`）
+
+`DEBUG=true` 时日志级别升到 debug，并为每个请求打一行 `msg=request` 的 JSON 日志：`method`、`path`、`remote`、`status`、`duration`、`contentLength`、`bodyBytes`、`bodyTruncated`、`payload`。`payload` 就是收到的原始报文（含 `POST /api/v1/render` 的完整 JSON），便于排查客户端到底发了什么；报文是在 handler 读取过程中顺带复制的，不会被缓存或二次读取。
+
+单个报文的日志上限为 64 KiB（inline 皮肤等大字段可能触顶），超出时 `bodyTruncated=true`、`bodyBytes` 仍是真实字节数。默认 `DEBUG=false`，不打印任何报文内容。
+
+```sh
+DEBUG=true ./dist/minecraft-view-generator2
+# {"time":"...","level":"DEBUG","msg":"request","method":"POST","path":"/api/v1/render",...,"payload":"{\"version\":\"1.21.11\",...}"}
+```
 
 ## 健康与 fallback
 
