@@ -39,7 +39,13 @@ final class Renderer {
     private static final String MISSING_TEXTURE = "minecraft:missing";
 
     private final Map<String, Model> models = new HashMap<>();
-    private final Map<String, Font> fonts = new HashMap<>();
+    /**
+     * The models of the custom items this request names, under a synthetic id so that every call site
+     * resolves them exactly like a vanilla model. They come from the packs of the user content
+     * directory, whose files are not part of the resource tree.
+     */
+    private final Map<String, Model> inlineModels = new HashMap<>();
+    private MinecraftFont font;
     private ResourceStack resources;
 
     BufferedImage render(Map<String, Object> request) throws IOException {
@@ -49,6 +55,7 @@ final class Renderer {
             throw new IOException("resource context is not ready");
         }
         this.resources = ResourceStack.from(request, resourceRoot);
+        applyCustomArt(request);
         return switch (operation) {
             case "item" -> renderItem(Json.object(request.get("item"), "item"), Json.integer(request, "width", 128));
             case "player" -> renderPlayer(request, Json.integer(request, "width", 256), Json.integer(request, "height", 384));
@@ -131,7 +138,87 @@ final class Renderer {
         return model;
     }
 
+    /**
+     * Registers the custom items of this request: their models under a synthetic id, and their
+     * textures in the resource stack under the id the model references. A custom model inherits from
+     * the vanilla model that ended its parent chain, so it keeps the display transforms the hand slots
+     * need without the renderer ever reading a pack directory.
+     */
+    private void applyCustomArt(Map<String, Object> request) {
+        // The table belongs to one request: a render without custom art must never draw the custom
+        // item a previous render registered.
+        inlineModels.clear();
+        if (!(request.get("customArt") instanceof Map<?, ?> artMap)) {
+            return;
+        }
+        for (Map.Entry<?, ?> entry : artMap.entrySet()) {
+            if (!(entry.getKey() instanceof String key) || !(entry.getValue() instanceof Map<?, ?> rawArt)) {
+                continue;
+            }
+            Map<String, Object> art = castMap(rawArt);
+            if (art.get("model") instanceof Map<?, ?> rawModel) {
+                String id = customModelID(key);
+                try {
+                    inlineModels.put(id, loadInlineModel(id, castMap(rawModel)));
+                } catch (IOException | RuntimeException error) {
+                    System.err.println("custom item " + key + " could not be loaded: " + error.getMessage());
+                }
+            }
+            if (art.get("textures") instanceof Map<?, ?> textures) {
+                for (Map.Entry<?, ?> texture : textures.entrySet()) {
+                    if (texture.getKey() instanceof String id && texture.getValue() instanceof String encoded) {
+                        resources.putInlineTexture(id, encoded);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The model id a custom item is drawn from, or an empty string when this request names no custom
+     * item for the given id and custom model data value.
+     */
+    private String customModelSelection(String id, Map<String, Object> item) {
+        Object value = item.get("customData");
+        if (!(value instanceof Number number)) {
+            return "";
+        }
+        String key = itemIdPath(normalizeID(id)).toUpperCase(java.util.Locale.ROOT) + "#" + number.intValue();
+        String model = customModelID(key);
+        return inlineModels.containsKey(model) ? model : "";
+    }
+
+    /** The synthetic model id of one custom item: its base material and its custom model data value. */
+    private static String customModelID(String key) {
+        return "custom:" + key;
+    }
+
+    /**
+     * Loads an inline model and the vanilla model its chain ended on. A parent that cannot be read is
+     * not fatal: everything the parent would have contributed from the pack is already flattened into
+     * the inline model.
+     */
+    private Model loadInlineModel(String id, Map<String, Object> raw) throws IOException {
+        Model own = Model.from(id, raw);
+        String parentID = own.parent;
+        Model base = null;
+        if (!parentID.isBlank() && !parentID.startsWith("builtin/")) {
+            try {
+                base = loadModel(normalizeID(parentID));
+            } catch (IOException error) {
+                System.err.println("custom item " + id + " inherits from the missing model " + parentID);
+            }
+        }
+        Model merged = base == null ? new Model(id) : base.copyFor(id);
+        merged.merge(own);
+        return merged;
+    }
+
     private ItemSelection resolveItemSelection(String id, Map<String, Object> item) throws IOException {
+        String custom = customModelSelection(id, item);
+        if (!custom.isBlank()) {
+            return new ItemSelection(custom, null);
+        }
         String component = itemModelComponent(item);
         if (!component.isBlank()) {
             return new ItemSelection(component, null);
@@ -312,7 +399,7 @@ final class Renderer {
      * chest family is a block model of its own and keeps the plane it used before this round, so an
      * existing consumer sees no change for it.
      */
-    private static final Set<String> FLAT_SPECIAL_FAMILIES = Set.of("chest", "ender_chest", "shulker_box");
+    private static final Set<String> FLAT_SPECIAL_FAMILIES = Set.of("chest", "ender_chest");
 
     /** The sixteen dye colours in {@code DyeColor} order with their vanilla texture diffuse colours. */
     private static final String[] DYE_NAMES = {
@@ -333,7 +420,6 @@ final class Renderer {
         return switch (family.toLowerCase(Locale.ROOT)) {
             case "ender_chest" -> "minecraft:entity/chest/ender";
             case "chest" -> "minecraft:entity/chest/normal";
-            case "shulker_box" -> "minecraft:entity/shulker/shulker";
             default -> throw new IOException("unsupported special item model: " + family);
         };
     }
@@ -358,6 +444,7 @@ final class Renderer {
         switch (special.family) {
             case "banner" -> addBannerGeometry(quads, special, item);
             case "bed" -> addBedGeometry(quads, special);
+            case "shulker_box" -> addShulkerBoxGeometry(quads, special);
             case "head" -> addHeadGeometry(quads, special, item);
             case "player_head" -> addPlayerHeadGeometry(quads, item);
             case "shield" -> addShieldGeometry(quads, item);
@@ -440,6 +527,38 @@ final class Renderer {
             transformQuads(half, Mat4.translation(0, 9, foot ? -16 : 0).multiply(Mat4.rotationX(90)));
             quads.addAll(half);
         }
+    }
+
+    /**
+     * Vanilla {@code ShulkerBoxSpecialRenderer} with {@code ShulkerBoxModel}: the closed box is the
+     * {@code lid} and the {@code base}, both on {@code PartPose.offset(0, 24, 0)} — the part space of
+     * the entity models, whose y axis grows downwards and whose 24 is the floor of the block. The
+     * renderer then puts the 0..1 block onto the pose:
+     * {@code translate(0.5, 0.5, 0.5); scale(0.9995); rotateY(180); scale(1, -1, -1);
+     * translate(0, -1, 0)}, which is the translation to the block centre, the half turn of the closed
+     * box and the flip into the item space used by every other special model. The client shrink of
+     * 0.9995 only keeps the lid from z-fighting its own block, so it is left out here.
+     *
+     * <p>The two boxes overlap by four units: the bottom band of the lid keeps the eight middle texels
+     * of every side face transparent and the top band of the base shows through it, which is the
+     * clasp of the vanilla texture. The {@code texture} parameter already names the dye colour of the
+     * box — {@code entity/shulker/shulker} for the undyed one and {@code entity/shulker/shulker_red}
+     * for a red shulker box — so it is used as the sprite path directly.</p>
+     */
+    private void addShulkerBoxGeometry(List<Quad> quads, SpecialItem special) throws IOException {
+        String texture = textureName(normalizeID(special.parameter("texture")));
+        BufferedImage skin = resources.texture("minecraft:entity/shulker/" + (texture.isBlank() ? "shulker" : texture));
+        PartPose floor = PartPose.offset(0, 24, 0);
+        // lid texOffs(0, 0) box(-8, -16, -8, 16, 12, 16) and
+        // base texOffs(0, 28) box(-8, -8, -8, 16, 8, 16).
+        addVanillaBox(quads, Mat4.identity(), new double[]{-8, -16, -8}, new double[]{8, -4, 8},
+                new double[]{16, 12, 16}, skin, 0, 0, floor);
+        addVanillaBox(quads, Mat4.identity(), new double[]{-8, -8, -8}, new double[]{8, 0, 8},
+                new double[]{16, 8, 16}, skin, 0, 28, floor);
+        transformQuads(quads, Mat4.translation(8, 8, 8)
+                .multiply(Mat4.rotationY(180))
+                .multiply(Mat4.scaling(1, -1, -1))
+                .multiply(Mat4.translation(0, -16, 0)));
     }
 
     /**
@@ -908,6 +1027,10 @@ final class Renderer {
 
     private Model loadModel(String id) throws IOException {
         id = normalizeID(id);
+        Model inline = inlineModels.get(id);
+        if (inline != null) {
+            return inline;
+        }
         Model cached = models.get(id);
         if (cached != null) {
             return cached;
@@ -1091,7 +1214,7 @@ final class Renderer {
         int iconSize = icon ? 72 : 0;
         int left = icon ? iconSize + 18 : TOOLTIP_PADDING;
         int wrapWidth = Math.max(
-                FONT_SIZE * 4,
+                MIN_WRAP_WIDTH,
                 (requestedWidth <= 0 ? DEFAULT_TOOLTIP_WIDTH : requestedWidth) - left - TOOLTIP_PADDING);
         List<List<TextRun>> wrapped = new ArrayList<>();
         for (List<TextRun> line : lines) {
@@ -1157,7 +1280,8 @@ final class Renderer {
     // ---------------------------------------------------------------------------------------
     // Tooltip content. The order mirrors ItemStack#getTooltipLines: hover name, advanced item id,
     // lore, enchantments, attribute modifiers, the single value component lines and finally the
-    // advanced component dump.
+    // advanced component dump. Lore is the only free form line source, and it comes from the item:
+    // the renderer service has no separate tooltip line list.
     // ---------------------------------------------------------------------------------------
 
     private List<List<TextRun>> buildTooltipLines(Map<String, Object> tooltip, Map<String, Object> item, boolean advanced) throws IOException {
@@ -1175,7 +1299,7 @@ final class Renderer {
         if (advanced && !id.isBlank()) {
             lines.add(parseStyledText("\u00A78" + id));
         }
-        lines.addAll(loreLines(tooltip, item));
+        lines.addAll(loreLines(item));
         lines.addAll(enchantmentLines(item));
         lines.addAll(attributeLines(item));
         lines.addAll(componentLines(item, advanced));
@@ -1210,17 +1334,9 @@ final class Renderer {
         return parseStyledText(applyDefaultStyle(translated.isBlank() ? path : translated, rarity, false));
     }
 
-    private List<List<TextRun>> loreLines(Map<String, Object> tooltip, Map<String, Object> item) throws IOException {
+    private List<List<TextRun>> loreLines(Map<String, Object> item) throws IOException {
         List<List<TextRun>> lines = new ArrayList<>();
-        Object value = tooltip.get("lines");
-        if (value instanceof List<?> values) {
-            for (Object entry : values) {
-                if (entry instanceof String text && !text.isBlank()) {
-                    lines.add(parseStyledText(text));
-                }
-            }
-        }
-        if (!lines.isEmpty() || item == null) {
+        if (item == null) {
             return lines;
         }
         List<Object> lore = new ArrayList<>();
@@ -1546,6 +1662,8 @@ final class Renderer {
     private List<List<TextRun>> wrapStyledLine(List<TextRun> runs, int maxWidth) throws IOException {
         List<List<TextRun>> lines = new ArrayList<>();
         List<TextRun> current = new ArrayList<>();
+        // The word gap of the vanilla splitter is the advance of a space in the loaded font.
+        int spaceWidth = font().advance(' ');
         int width = 0;
         for (TextRun run : runs) {
             for (String word : run.text().replace('\n', ' ').split(" ", -1)) {
@@ -1554,7 +1672,7 @@ final class Renderer {
                 }
                 TextRun stretched = run.withText(word);
                 int wordWidth = styledWidth(List.of(stretched));
-                if (!current.isEmpty() && width + SPACE_WIDTH + wordWidth > maxWidth) {
+                if (!current.isEmpty() && width + spaceWidth + wordWidth > maxWidth) {
                     lines.add(current);
                     current = new ArrayList<>();
                     width = 0;
@@ -1585,7 +1703,7 @@ final class Renderer {
                     continue;
                 }
                 if (!current.isEmpty()) {
-                    width += SPACE_WIDTH;
+                    width += spaceWidth;
                 }
                 current.add(stretched);
                 width += wordWidth;
@@ -1642,34 +1760,30 @@ final class Renderer {
      * always pass {@code true}.
      */
     private void drawStyledLine(BufferedImage destination, int x, int lineTop, List<TextRun> line, int scale, boolean shadow) throws IOException {
-        Font regular = font(FONT_REGULAR, scale);
-        Font uniform = font(FONT_UNIFORM, scale);
+        MinecraftFont font = font();
         Graphics2D graphics = destination.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
-        FontRenderContext context = graphics.getFontRenderContext();
-        int baseline = lineTop + FONT_ASCENT * scale;
+        int baseline = lineTop + MinecraftFont.ASCENT * scale;
         for (int pass = shadow ? 0 : 1; pass < 2; pass++) {
             int offset = pass == 0 ? scale : 0;
             int cursor = x;
             for (TextRun run : line) {
-                graphics.setColor(new Color(pass == 0 ? shadowColor(run.color()) : run.color()));
+                int color = pass == 0 ? shadowColor(run.color()) : run.color();
                 for (int index = 0; index < run.text().length(); ) {
                     int codePoint = run.text().codePointAt(index);
                     index += Character.charCount(codePoint);
-                    String glyph = new String(Character.toChars(codePoint));
-                    Font base = codePoint <= 0x7F ? regular : uniform;
-                    Font font = run.italic() ? base.deriveFont(Font.ITALIC) : base;
-                    GlyphVector vector = font.createGlyphVector(context, glyph);
-                    int advance = Math.max(1, (int) Math.ceil(vector.getGlyphMetrics(0).getAdvance()));
-                    graphics.setFont(font);
-                    graphics.drawString(glyph, cursor + offset, baseline + offset);
+                    MinecraftFont.Glyph glyph = font.glyph(codePoint);
+                    int top = baseline - glyph.ascent() * scale;
+                    int advance = glyph.advance() * scale;
+                    glyph.draw(graphics, cursor + offset, top + offset, scale, color, run.italic());
                     if (run.bold()) {
-                        graphics.drawString(glyph, cursor + offset + scale, baseline + offset);
+                        glyph.draw(graphics, cursor + offset + scale, top + offset, scale, color, run.italic());
                     }
                     if (pass == 1 && run.underline()) {
+                        graphics.setColor(new Color(color & 0xFFFFFF));
                         graphics.fillRect(cursor, baseline + 2 * scale, advance, scale);
                     }
                     if (pass == 1 && run.strikethrough()) {
+                        graphics.setColor(new Color(color & 0xFFFFFF));
                         graphics.fillRect(cursor, baseline - 3 * scale, advance, scale);
                     }
                     cursor += advance + (run.bold() ? scale : 0);
@@ -1811,13 +1925,10 @@ final class Renderer {
     }
 
     private void drawText(BufferedImage destination, int x, int y, String text, int color, int scale, boolean shadow) throws IOException {
-        Font regular = font(FONT_REGULAR, scale);
-        Font uniform = font(FONT_UNIFORM, scale);
-        int baseline = y + FONT_ASCENT * scale;
+        MinecraftFont font = font();
+        int baseline = y + MinecraftFont.ASCENT * scale;
         int shadowColor = shadowColor(color);
         Graphics2D graphics = destination.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
-        FontRenderContext context = graphics.getFontRenderContext();
         int cursor = x;
         for (int position = 0; position < text.length(); ) {
             int codePoint = text.codePointAt(position);
@@ -1827,27 +1938,19 @@ final class Renderer {
             if (codePoint == 0xA7) {
                 continue;
             }
-            Font selected = codePoint <= 0x7F ? regular : uniform;
-            String glyph = new String(Character.toChars(codePoint));
-            GlyphVector vector = selected.createGlyphVector(context, glyph);
-            graphics.setFont(selected);
+            MinecraftFont.Glyph glyph = font.glyph(codePoint);
+            int top = baseline - glyph.ascent() * scale;
             if (shadow) {
-                graphics.setColor(new Color(shadowColor));
-                graphics.drawString(glyph, cursor + scale, baseline + scale);
+                glyph.draw(graphics, cursor + scale, top + scale, scale, shadowColor, false);
             }
-            graphics.setColor(new Color(color & 0xFFFFFF));
-            graphics.drawString(glyph, cursor, baseline);
-            cursor += Math.max(1, (int) Math.ceil(vector.getGlyphMetrics(0).getAdvance()));
+            glyph.draw(graphics, cursor, top, scale, color, false);
+            cursor += glyph.advance() * scale;
         }
         graphics.dispose();
     }
 
     private int textWidth(String text, int scale) throws IOException {
-        Font regular = font(FONT_REGULAR, scale);
-        Font uniform = font(FONT_UNIFORM, scale);
-        BufferedImage scratch = new BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D graphics = scratch.createGraphics();
-        FontRenderContext context = graphics.getFontRenderContext();
+        MinecraftFont font = font();
         int width = 0;
         for (int position = 0; position < text.length(); ) {
             int codePoint = text.codePointAt(position);
@@ -1855,38 +1958,21 @@ final class Renderer {
             if (codePoint == 0xA7) {
                 continue;
             }
-            Font selected = codePoint <= 0x7F ? regular : uniform;
-            GlyphVector vector = selected.createGlyphVector(context, new String(Character.toChars(codePoint)));
-            width += Math.max(1, (int) Math.ceil(vector.getGlyphMetrics(0).getAdvance()));
+            width += font.advance(codePoint) * scale;
         }
-        graphics.dispose();
         return width;
     }
 
-    /** The uniform font alone is ten megabytes, so every size is created once per process. */
-    private Font font(String name, int scale) throws IOException {
-        String key = name + "@" + scale;
-        Font cached = fonts.get(key);
-        if (cached == null) {
-            cached = bundledFont(name).deriveFont((float) (FONT_SIZE * scale));
-            fonts.put(key, cached);
+    /**
+     * The one font of this renderer: the client's own provider chain ({@code font/default.json}),
+     * loaded once per resource context so that every label — tooltip, container title, tab list,
+     * map label, toast and item count — is measured and drawn by the same glyphs.
+     */
+    private MinecraftFont font() throws IOException {
+        if (font == null) {
+            font = MinecraftFont.load(resources);
         }
-        return cached;
-    }
-
-    private Font bundledFont(String name) throws IOException {
-        Font cached = fonts.get(name);
-        if (cached != null) {
-            return cached;
-        }
-        try (var stream = Renderer.class.getResourceAsStream("/" + name)) {
-            if (stream == null) throw new IOException("missing bundled font: " + name);
-            cached = Font.createFont(Font.TRUETYPE_FONT, stream);
-        } catch (FontFormatException error) {
-            throw new IOException("invalid bundled font: " + name, error);
-        }
-        fonts.put(name, cached);
-        return cached;
+        return font;
     }
 
     private void drawNineSlice(BufferedImage destination, BufferedImage source, int left, int top, int right, int bottom, int x, int y, int width, int height) {
@@ -2503,22 +2589,16 @@ final class Renderer {
     private static final double[] ENTITY_LIGHT_1 = normalize(new double[]{0.2, -1.0, 0.7});
 
     /**
-     * Vanilla bitmap font metrics. Size 12 of the bundled Minecraft font reproduces the vanilla
-     * 8 px cell exactly — digits and capitals are five pixels wide with an advance of six, a space
-     * is four — and every glyph is seven pixels tall above its baseline, so both numbers scale
-     * with the GUI scale of a render.
+     * Vanilla tooltip geometry: 12 px of background around the text block, 10 px per text line.
+     * The font metrics themselves live in {@link MinecraftFont}: the client's seven pixel ascent,
+     * nine pixel line height and per glyph advances are shared by every text surface.
      */
-    private static final int FONT_SIZE = 12;
-    private static final int FONT_ASCENT = 7;
-    private static final String FONT_REGULAR = "MinecraftDefault-Regular.ttf";
-    private static final String FONT_UNIFORM = "MinecraftDefaultUniformBMP-Regular.ttf";
-
-    /** Vanilla tooltip geometry: 12 px of background around the text block, 10 px per text line. */
     private static final int DEFAULT_TOOLTIP_WIDTH = 360;
     private static final int TOOLTIP_PADDING = 12;
     private static final int TOOLTIP_LINE_HEIGHT = 10;
     private static final int TOOLTIP_TITLE_GAP = 2;
-    private static final int SPACE_WIDTH = 4;
+    /** Vanilla wraps a tooltip at a minimum of four font cells, however narrow the request is. */
+    private static final int MIN_WRAP_WIDTH = 48;
     private static final String TOOLTIP_BACKGROUND_SPRITE = "minecraft:gui/sprites/tooltip/background";
     private static final String TOOLTIP_FRAME_SPRITE = "minecraft:gui/sprites/tooltip/frame";
 
@@ -3700,9 +3780,15 @@ final class Renderer {
     private record Face(Path2D polygon, BufferedImage texture, double depth, int shade, boolean tint, int[] uv, int rotation) {
     }
 
-    private static final class ResourceStack {
+    static final class ResourceStack {
         private final List<Path> roots;
         private final Map<String, BufferedImage> textureCache = new HashMap<>();
+        /**
+         * Textures that arrive with the request instead of in the resource tree, keyed by the relative
+         * path the lookup would have used. They are the images of custom items, whose packs live
+         * outside the tree the service downloaded.
+         */
+        private final Map<String, BufferedImage> inlineTextures = new HashMap<>();
         private final Set<String> missingWarnings = java.util.Collections.newSetFromMap(new HashMap<>());
         private BufferedImage missingTexture;
         private Map<String, Object> language;
@@ -3752,6 +3838,10 @@ final class Renderer {
                 return missingTexture();
             }
             String relative = texturePath(textureID);
+            BufferedImage inline = inlineTextures.get(relative);
+            if (inline != null) {
+                return inline;
+            }
             BufferedImage cached = textureCache.get(relative);
             if (cached != null) {
                 return cached;
@@ -3776,7 +3866,34 @@ final class Renderer {
 
         /** Whether a texture file exists, for the call sites that must still report a bad reference. */
         boolean hasTexture(String textureID) throws IOException {
-            return MISSING_TEXTURE.equals(textureID) || bytes(texturePath(textureID)) != null;
+            if (MISSING_TEXTURE.equals(textureID)) {
+                return true;
+            }
+            String relative = texturePath(textureID);
+            return inlineTextures.containsKey(relative) || bytes(relative) != null;
+        }
+
+        /**
+         * Registers a texture that comes with the request, as the data URI the custom content index
+         * produced. A texture that does not decode is skipped with a note: one broken layer must not
+         * take the whole picture down.
+         */
+        void putInlineTexture(String textureID, String value) {
+            String prefix = "data:image/png;base64,";
+            if (value == null || !value.startsWith(prefix)) {
+                return;
+            }
+            try {
+                byte[] data = Base64.getDecoder().decode(value.substring(prefix.length()));
+                BufferedImage image = ImageIO.read(new ByteArrayInputStream(data));
+                if (image == null) {
+                    System.err.println("inline texture " + textureID + " is not a PNG, skipping it");
+                    return;
+                }
+                inlineTextures.put(texturePath(textureID), image);
+            } catch (IOException | IllegalArgumentException error) {
+                System.err.println("inline texture " + textureID + " is invalid, skipping it");
+            }
         }
 
         /**
@@ -3836,7 +3953,19 @@ final class Renderer {
             return "assets/" + namespace + "/textures/" + path;
         }
 
-        private byte[] bytes(String relative) throws IOException {
+        /**
+         * Reads one image of the stack without the missing texture fallback, for the files a font
+         * provider slices itself. A sheet that is absent answers null so the font can skip it.
+         */
+        BufferedImage image(String relative) throws IOException {
+            byte[] data = bytes(relative);
+            if (data == null) {
+                return null;
+            }
+            return ImageIO.read(new ByteArrayInputStream(data));
+        }
+
+        byte[] bytes(String relative) throws IOException {
             if (relative.startsWith("/") || relative.contains("..") || relative.indexOf('\0') >= 0) {
                 throw new IOException("unsafe resource path " + relative);
             }

@@ -30,12 +30,15 @@ public final class RendererSmokeTest {
         testTooltip(renderer, root);
         testHeldItems(renderer, root);
         testTextColours(renderer, root);
+        testChineseFont(renderer, root);
+        testMissingFontDefinition(root);
         testSpecialItems(renderer, root);
         testSpecialComponents(renderer, root);
         testSpecialHeldItems(renderer, root);
         testSpecialItemList(renderer, root);
+        testCustomArt(renderer, root);
         testMissingResources(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/achievement/tooltip/hand/text/special/resources paths passed");
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/achievement/tooltip/hand/text/special/custom/resources paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -46,8 +49,8 @@ public final class RendererSmokeTest {
         BufferedImage icon = renderer.render(request);
         require(icon.getWidth() == 128 && icon.getHeight() == 128, "item dimensions");
         require(hasPixels(icon), "item pixels");
-        require(Renderer.class.getResourceAsStream("/MinecraftDefault-Regular.ttf") != null, "regular font resource");
-        require(Renderer.class.getResourceAsStream("/MinecraftDefaultUniformBMP-Regular.ttf") != null, "uniform font resource");
+        require(java.nio.file.Files.isRegularFile(root.resolve("assets/minecraft/font/default.json")),
+                "the fixture must ship the vanilla font definition the renderer loads");
     }
 
     private static void testPlayerModel(Renderer renderer, Path root) throws Exception {
@@ -387,16 +390,20 @@ public final class RendererSmokeTest {
     }
 
     private static void testTooltip(Renderer renderer, Path root) throws Exception {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", "minecraft:diamond_sword");
+        item.put("lore", List.of("\u00A7cRed line", "\u00A77Gray line"));
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("operation", "tooltip");
         request.put("resourceRoot", root.toString());
         request.put("tooltip", Map.of(
                 "title", "\u00A7bFixture Title",
-                "lines", List.of("\u00A7cRed line", "\u00A77Gray line"),
+                "item", item,
                 "advanced", true));
         BufferedImage image = renderer.render(request);
-        // Three lines at ten pixels plus the twelve pixel background border on every side.
-        require(image.getWidth() > 24 && image.getHeight() == 3 * 10 + 24, "tooltip dimensions");
+        // Title, advanced item id, the two lore lines and the advanced component count: five lines at
+        // ten pixels plus the twelve pixel background border on every side.
+        require(image.getWidth() > 24 && image.getHeight() == 5 * 10 + 24, "tooltip dimensions");
         int[] bounds = opaqueBounds(image);
         require(bounds[0] == 8 && bounds[1] == 8, "tooltip background border is not twelve pixels: " + bounds[0] + "," + bounds[1]);
         require(bounds[2] == image.getWidth() - 9 && bounds[3] == image.getHeight() - 9, "tooltip background edge is wrong");
@@ -405,23 +412,31 @@ public final class RendererSmokeTest {
         require(countExact(image, 0xFF5555) > 4, "tooltip colour codes are ignored");
         require(countExact(image, 0xAAAAAA) > 4, "tooltip default colour is wrong");
 
-        // The vanilla line order: name, lore, enchantments, attribute header and modifiers.
-        Map<String, Object> item = new LinkedHashMap<>();
-        item.put("id", "minecraft:diamond_sword");
-        item.put("lore", List.of("Lore line"));
-        item.put("enchantments", List.of("minecraft:sharpness 5"));
-        item.put("components", Map.of("minecraft:attribute_modifiers", Map.of("modifiers", List.of(
+        // The vanilla line order: name, lore, enchantments, attribute header and modifiers. Lore is
+        // the only free form line source and always comes from the item.
+        Map<String, Object> contentItem = new LinkedHashMap<>();
+        contentItem.put("id", "minecraft:diamond_sword");
+        contentItem.put("lore", List.of("Lore line"));
+        contentItem.put("enchantments", List.of("minecraft:sharpness 5"));
+        contentItem.put("components", Map.of("minecraft:attribute_modifiers", Map.of("modifiers", List.of(
                 Map.of("type", "minecraft:attack_damage", "amount", 7, "operation", "add_value", "slot", "mainhand")))));
         Map<String, Object> content = new LinkedHashMap<>();
         content.put("operation", "tooltip");
         content.put("resourceRoot", root.toString());
-        content.put("tooltip", Map.of("item", item));
+        content.put("tooltip", Map.of("item", contentItem));
         BufferedImage lines = renderer.render(content);
         // name + lore + enchantment + attribute header + attribute modifier
         require(lines.getHeight() == 5 * 10 + 24, "tooltip line order or count changed: " + lines.getHeight());
         require(countExact(lines, 0xAA00AA) > 4, "lore lines are not dark purple");
         require(countExact(lines, 0xAAAAAA) > 4, "enchantment lines are not gray");
         require(countExact(lines, 0x5555FF) > 4, "attribute modifier lines are not blue");
+
+        // A tooltip without an item has no lore source and only the title line.
+        Map<String, Object> titleOnly = new LinkedHashMap<>();
+        titleOnly.put("operation", "tooltip");
+        titleOnly.put("resourceRoot", root.toString());
+        titleOnly.put("tooltip", Map.of("title", "Fixture Title"));
+        require(renderer.render(titleOnly).getHeight() == 1 * 10 + 24 - 2, "title only tooltip dimensions");
 
         Map<String, Object> icon = new LinkedHashMap<>();
         icon.put("operation", "tooltip");
@@ -473,6 +488,114 @@ public final class RendererSmokeTest {
         BufferedImage slim = renderSlimEquipment(renderer, root);
         int[] slimBounds = exactBounds(slim, SWORD & 0xFFFFFF);
         require(slimBounds[0] > heldBounds[0], "slim arm does not move the held item towards the body");
+    }
+
+    /**
+     * A custom item replaces the vanilla icon of its base material: the request carries the model and
+     * the textures of the item a base material plus a custom model data value resolve to, and the
+     * renderer has to draw that model — as a flat sprite, as geometry, in a hand, and inside a tooltip —
+     * while a value that was not resolved keeps the vanilla item.
+     */
+    private static void testCustomArt(Renderer renderer, Path root) throws Exception {
+        int starfish = 0xFF3FA7C8;
+        int crate = 0xFFC8A13F;
+        String sprite = solidPNG(starfish);
+
+        Map<String, Object> flatModel = Map.of(
+                "parent", "minecraft:item/generated",
+                "textures", Map.of("layer0", "test:item/starfish"));
+        Map<String, Object> flatArt = Map.of(
+                "model", flatModel,
+                "textures", Map.of("test:item/starfish", sprite));
+
+        // The icon comes from the inline texture, not from the vanilla paper model.
+        Map<String, Object> icon = new LinkedHashMap<>();
+        icon.put("operation", "item");
+        icon.put("resourceRoot", root.toString());
+        icon.put("item", Map.of("id", "minecraft:diamond", "customData", 1134));
+        icon.put("customArt", Map.of("DIAMOND#1134", flatArt));
+        icon.put("width", 64);
+        icon.put("height", 64);
+        BufferedImage custom = renderer.render(icon);
+        require(countExact(custom, starfish & 0xFFFFFF) > 400, "the custom icon texture was not drawn");
+        require(countExact(custom, starfish & 0xFFFFFF) != countExact(renderer.render(vanillaIcon(root)), starfish & 0xFFFFFF),
+                "the custom icon is indistinguishable from the vanilla one");
+
+        // A model with elements is drawn as geometry, so its silhouette leaves the canvas corners empty
+        // instead of filling the whole sprite.
+        Map<String, Object> faces = new LinkedHashMap<>();
+        for (String side : List.of("north", "south", "east", "west", "up", "down")) {
+            faces.put(side, Map.of("texture", "#0", "uv", List.of(0, 0, 16, 16)));
+        }
+        Map<String, Object> crateModel = Map.of(
+                "textures", Map.of("0", "test:bxtp/crate"),
+                "elements", List.of(Map.of(
+                        "from", List.of(0, 0, 0),
+                        "to", List.of(16, 16, 16),
+                        "faces", faces)));
+        Map<String, Object> crateArt = Map.of(
+                "model", crateModel,
+                "textures", Map.of("test:bxtp/crate", solidPNG(crate)));
+        Map<String, Object> geometry = new LinkedHashMap<>(icon);
+        geometry.put("item", Map.of("id", "minecraft:diamond", "customData", 10115));
+        geometry.put("customArt", Map.of("DIAMOND#10115", crateArt));
+        BufferedImage crateImage = renderer.render(geometry);
+        require(countExact(crateImage, crate & 0xFFFFFF) > 400, "the custom geometry was not drawn");
+        require((crateImage.getRGB(0, 0) >>> 24) == 0, "the geometry fills the whole canvas, it is not a model");
+
+        // The hand slots resolve the same item, which is the whole point of shipping model geometry.
+        Map<String, Object> hand = new LinkedHashMap<>();
+        hand.put("operation", "player");
+        hand.put("resourceRoot", root.toString());
+        hand.put("skin", Map.of("texture", PlayerSkinFixture.png64(), "model", "classic"));
+        hand.put("equipment", Map.of("mainHand", Map.of("id", "minecraft:diamond", "customData", 1134)));
+        hand.put("customArt", Map.of("DIAMOND#1134", flatArt));
+        hand.put("width", 320);
+        hand.put("height", 480);
+        require(countExact(renderer.render(hand), starfish & 0xFFFFFF) > 20, "the custom item is missing from the hand");
+        hand.remove("customArt");
+        require(countExact(renderer.render(hand), starfish & 0xFFFFFF) == 0,
+                "the custom item was drawn without custom art");
+
+        // A tooltip icon goes through the same selection, and a value the index did not resolve keeps
+        // the vanilla item instead of failing the render.
+        Map<String, Object> tooltip = new LinkedHashMap<>();
+        tooltip.put("operation", "tooltip");
+        tooltip.put("resourceRoot", root.toString());
+        tooltip.put("tooltip", Map.of(
+                "icon", true,
+                "item", Map.of("id", "minecraft:diamond", "customData", 1134, "name", "Starfish")));
+        tooltip.put("customArt", Map.of("DIAMOND#1134", flatArt));
+        require(countExact(renderer.render(tooltip), starfish & 0xFFFFFF) > 20, "the tooltip icon is not the custom item");
+
+        Map<String, Object> unresolved = new LinkedHashMap<>(icon);
+        unresolved.put("item", Map.of("id", "minecraft:diamond", "customData", 999999));
+        require(countExact(renderer.render(unresolved), starfish & 0xFFFFFF) == 0,
+                "an unresolved customData still drew the custom texture");
+        require(hasPixels(renderer.render(unresolved)), "an unresolved customData left the icon empty");
+    }
+
+    private static Map<String, Object> vanillaIcon(Path root) {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", "item");
+        request.put("resourceRoot", root.toString());
+        request.put("item", Map.of("id", "minecraft:diamond"));
+        request.put("width", 64);
+        request.put("height", 64);
+        return request;
+    }
+
+    /** A solid colour PNG as the data URI the Go service inlines for a custom texture. */
+    private static String solidPNG(int argb) throws Exception {
+        BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                image.setRGB(x, y, argb);
+            }
+        }
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        ImageIO.write(image, "png", buffer);
+        return "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(buffer.toByteArray());
     }
 
     /**
@@ -542,10 +665,11 @@ public final class RendererSmokeTest {
         Map<String, Object> tooltip = new LinkedHashMap<>();
         tooltip.put("operation", "tooltip");
         tooltip.put("resourceRoot", root.toString());
-        tooltip.put("tooltip", Map.of("title", "&cCoded", "lines", List.of("&aGreen line")));
+        tooltip.put("tooltip", Map.of("title", "&cCoded",
+                "item", Map.of("id", "minecraft:diamond_sword", "lore", List.of("&aGreen line"))));
         BufferedImage tooltipImage = renderer.render(tooltip);
         require(countExact(tooltipImage, 0xFF5555) > 4, "tooltip ignores the ampersand colour code");
-        require(countExact(tooltipImage, 0x55FF55) > 4, "tooltip ignores the ampersand colour code on its lines");
+        require(countExact(tooltipImage, 0x55FF55) > 4, "tooltip ignores the ampersand colour code on its lore");
 
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("operation", "map");
@@ -631,6 +755,19 @@ public final class RendererSmokeTest {
         // The chest family keeps the flat sprite of its entity texture.
         require(countExact(renderItem(renderer, root, "minecraft:chest", Map.of()), 0x204020) > 500,
                 "chest family is not the flat sprite of its entity texture");
+
+        // A shulker box is the closed lid and base cube of ShulkerBoxModel projected by the gui pose of
+        // its model, not the flat entity sprite: three shaded faces of the box silhouette show, and the
+        // texture parameter of the model definition picks the dye colour.
+        BufferedImage shulker = renderItem(renderer, root, "minecraft:shulker_box", Map.of());
+        requireContentSize(shulker, "shulker box", 56, 62);
+        require(countColor(shulker, ColorKind.SHULKER_BOX) > 500, "shulker box did not sample entity/shulker/shulker");
+        require(colourCount(shulker) >= 3, "shulker box is not a shaded 3D box");
+        BufferedImage redShulker = renderItem(renderer, root, "minecraft:red_shulker_box", Map.of());
+        requireContentSize(redShulker, "red shulker box", 56, 62);
+        require(countColor(redShulker, ColorKind.SHULKER_RED) > 500,
+                "red shulker box did not sample entity/shulker/shulker_red");
+        require(countColor(redShulker, ColorKind.SHULKER_BOX) == 0, "red shulker box kept the undyed texture");
     }
 
     /**
@@ -738,12 +875,13 @@ public final class RendererSmokeTest {
                 "light_blue_banner", "light_blue_bed", "light_gray_banner", "light_gray_bed", "lime_banner",
                 "lime_bed", "magenta_banner", "magenta_bed", "orange_banner", "orange_bed",
                 "oxidized_copper_golem_statue", "piglin_head", "pink_banner", "pink_bed", "player_head",
-                "purple_banner", "purple_bed", "red_banner", "red_bed", "shield", "skeleton_skull", "trident",
+                "purple_banner", "purple_bed", "red_banner", "red_bed", "red_shulker_box", "shield",
+                "shulker_box", "skeleton_skull", "trident",
                 "waxed_copper_golem_statue", "waxed_exposed_copper_golem_statue",
                 "waxed_oxidized_copper_golem_statue", "waxed_weathered_copper_golem_statue",
                 "weathered_copper_golem_statue", "white_banner", "white_bed", "wither_skeleton_skull",
                 "yellow_banner", "yellow_bed", "zombie_head"};
-        require(items.length == 51, "the special item list changed size: " + items.length);
+        require(items.length == 53, "the special item list changed size: " + items.length);
         for (String item : items) {
             BufferedImage icon = renderItem(renderer, root, "minecraft:" + item, Map.of());
             require(icon.getWidth() == 64 && icon.getHeight() == 64, item + " icon dimensions");
@@ -755,6 +893,141 @@ public final class RendererSmokeTest {
      * A broken resource must never take the whole picture down: an unknown item, an absent texture and a
      * special family this service has not ported all fall back to the vanilla missing model.
      */
+    /**
+     * Chinese text runs through the same font pipeline as every other label: the client's {@code
+     * default} provider chain, whose {@code unihex} provider draws the 16x16 Unifont bitmap at half
+     * scale. That gives a full width glyph an advance of nine font pixels, two by two supersampled
+     * ink, and the same seven pixel ascent a Latin glyph uses — which is what every surface below
+     * (tooltip, container title, tab list, map label, toast) is measured and drawn with.
+     */
+    private static void testChineseFont(Renderer renderer, Path root) throws Exception {
+        MinecraftFont font = MinecraftFont.load(Renderer.ResourceStack.from(Map.of(), root.toString()));
+
+        // Advances are the vanilla ones: five plus one for a capital, four for the space provider and
+        // half of the sixteen texel bitmap plus one for a full width character.
+        require(font.advance('A') == 6, "ASCII advance changed: " + font.advance('A'));
+        require(font.advance(' ') == 4, "space advance changed: " + font.advance(' '));
+        require(font.advance('\u4E2D') == 9, "Chinese advance is not nine pixels: " + font.advance('\u4E2D'));
+        require(font.advance('\uFF0C') == 9, "full width comma is not nine pixels: " + font.advance('\uFF0C'));
+        require(font.width("\u4E2D\u6587\u6D4B\u8BD5") == 36, "four Chinese characters are not 36 px wide");
+        require(font.width("\u4E2D\u6587ABC") == 9 + 9 + 6 * 3, "mixed Chinese and Latin width is wrong");
+
+        // Chinese ink is the Unifont bitmap, not a vector approximation: eight by eight pixels from
+        // the seven pixel ascent with the box and the centre stroke of the in game glyph.
+        MinecraftFont.Glyph zhong = font.glyph('\u4E2D');
+        require(zhong.width() == 8 && zhong.height() == 8 && zhong.ascent() == 7,
+                "Chinese glyph box is not the eight pixel Unifont cell");
+        String[] expected = {
+                "...#....", "...#....", ".######.", ".#.#..#.",
+                ".#.#..#.", ".######.", "...#....", "...#...."};
+        for (int row = 0; row < expected.length; row++) {
+            for (int column = 0; column < 8; column++) {
+                boolean wanted = expected[row].charAt(column) == '#';
+                require(zhong.inked(column, row) == wanted,
+                        "Unifont pixel " + column + "," + row + " of U+4E2D is wrong");
+            }
+        }
+        // Half scale means most CJK pixels cover two or three of their four texels, so the glyph keeps
+        // its greys instead of collapsing into solid ink; only a bitmap sheet paints whole pixels.
+        int[] stroke = {3, 2, 3, 2, 2, 2};
+        for (int column = 0; column < stroke.length; column++) {
+            require(zhong.coverage(column + 1, 2) == stroke[column],
+                    "coverage of the middle stroke of U+4E2D is not the texel share");
+        }
+        require(zhong.coverage(0, 0) == 0, "the empty corner of U+4E2D carries ink");
+
+        // Latin still comes from ascii.png and an accented glyph keeps the taller accented cell, so
+        // the sheet a code point belongs to is decided by the provider chain and not by its range.
+        MinecraftFont.Glyph capital = font.glyph('A');
+        require(capital.width() == 5 && capital.height() == 8 && capital.ascent() == 7, "ASCII glyph geometry changed");
+        MinecraftFont.Glyph accented = font.glyph('\u00E9');
+        require(accented.ascent() == 10 && accented.height() == 12, "accented sheet geometry changed");
+
+        // The tooltip derives its box from the Chinese advance and paints the glyphs.
+        Map<String, Object> tooltip = new LinkedHashMap<>();
+        tooltip.put("operation", "tooltip");
+        tooltip.put("resourceRoot", root.toString());
+        tooltip.put("tooltip", Map.of("title", "\u4E2D\u6587\u6D4B\u8BD5"));
+        BufferedImage tooltipImage = renderer.render(tooltip);
+        require(tooltipImage.getWidth() == 36 + 24, "tooltip width ignores the Chinese advance: " + tooltipImage.getWidth());
+        require(countBright(tooltipImage, 0xFFFFFF) > 40, "Chinese tooltip title drew no ink");
+
+        // A container title sits on the vanilla title column and spans four full width cells.
+        Map<String, Object> container = new LinkedHashMap<>();
+        container.put("operation", "inventory");
+        container.put("resourceRoot", root.toString());
+        container.put("container", Map.of("title", "\u00A7c\u4E2D\u6587\u6D4B\u8BD5", "rows", 3, "slots", List.of()));
+        BufferedImage containerImage = renderer.render(container);
+        int[] label = tintedBounds(containerImage, 0xFF5555, 40);
+        // Four full width cells advance 36 px from the vanilla title column at x = 8. The inked box
+        // of U+4E2D starts one pixel inside its cell and the ink of the last glyph stays inside the
+        // fourth cell, so the title ends before x = 8 + 36.
+        require(label[0] == 9, "container title fell outside its font cell: " + label[0]);
+        require(label[2] >= 40 && label[2] <= 43, "container title ink does not span four cells: " + label[2]);
+
+        // Tab list rows, header and footer, map labels and the advancement toast accept Chinese with
+        // the same metrics as the tooltip.
+        Map<String, Object> player = Map.of("name", "\u73A9\u5BB6", "texture", PlayerSkinFixture.png64(), "ping", 40);
+        BufferedImage list = renderPlayerList(renderer, root, "\u4E2D\u6587\u5934", "\u4E16\u754C", List.of(player));
+        require(countBright(list, 0xFFFFFF) > 40, "playerlist header drew no Chinese ink");
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("operation", "map");
+        map.put("resourceRoot", root.toString());
+        map.put("map", Map.of("dimension", "\u4E3B\u4E16\u754C",
+                "markers", List.of(Map.of("x", 32, "z", 32, "rotation", 0, "type", "player", "name", "\u57CE\u5E02"))));
+        BufferedImage mapImage = renderer.render(map);
+        require(countBright(mapImage, 0xFFFFFF) > 40, "map labels drew no Chinese ink");
+
+        Map<String, Object> achievement = new LinkedHashMap<>();
+        achievement.put("operation", "achievement");
+        achievement.put("resourceRoot", root.toString());
+        achievement.put("achievement", Map.of(
+                "title", "\u4EFB\u52A1", "description", "\u5B8C\u6210\u4E86", "frame", "task", "completed", true,
+                "icon", Map.of("id", "minecraft:diamond")));
+        BufferedImage toast = renderer.render(achievement);
+        require(countTinted(toast, 0xFFFF55, 40) > 20, "achievement title drew no Chinese ink");
+    }
+
+    /**
+     * A resource tree whose font definition is missing or whose whole provider chain fails to load
+     * has to fail with a message that names the repair. Drawing the missing glyph instead answers
+     * every request with a picture of empty boxes, which reads like a renderer bug rather than the
+     * missing {@code assets/minecraft/font} overlay it is.
+     */
+    private static void testMissingFontDefinition(Path root) throws Exception {
+        Path empty = Files.createTempDirectory("minecraft-font-missing");
+        try {
+            requireFontFailure(empty, "font/default.json", "a tree without font/default.json");
+            Path definition = empty.resolve("assets/minecraft/font/default.json");
+            Files.createDirectories(definition.getParent());
+            Files.copy(root.resolve("assets/minecraft/font/default.json"), definition);
+            requireFontFailure(empty, "no font provider", "a tree whose includes are all missing");
+        } finally {
+            try (var files = Files.walk(empty)) {
+                files.sorted(java.util.Comparator.reverseOrder()).forEach(path -> {
+                    try {
+                        Files.deleteIfExists(path);
+                    } catch (java.io.IOException ignored) {
+                        // Best effort cleanup of a temporary tree.
+                    }
+                });
+            }
+        }
+    }
+
+    private static void requireFontFailure(Path root, String expected, String what) throws Exception {
+        try {
+            MinecraftFont.load(Renderer.ResourceStack.from(Map.of(), root.toString()));
+        } catch (java.io.IOException error) {
+            String message = String.valueOf(error.getMessage());
+            require(message.contains(expected), what + " failed with an unexpected message: " + message);
+            require(message.contains("prepare"), what + " does not name the repair: " + message);
+            return;
+        }
+        require(false, what + " must not load a font");
+    }
+
     private static void testMissingResources(Renderer renderer, Path root) throws Exception {
         BufferedImage missingModel = renderItem(renderer, root, "minecraft:not_an_item", Map.of());
         requireMissingModel(missingModel, "an unknown item");
@@ -1012,6 +1285,80 @@ public final class RendererSmokeTest {
         return bounds;
     }
 
+    /**
+     * Counts the pixels that carry an untinted ink colour over a darker surface. A {@code unihex} glyph
+     * is drawn at half scale, so most Chinese pixels cover only part of their texels and are
+     * composited with a matching alpha: an exact colour match would only ever see the bitmap sheets.
+     * A pixel counts when every channel is at least a third of the ink's, which keeps the dark panels,
+     * shadows and sprite borders the labels sit on out of the count.
+     */
+    private static int countBright(BufferedImage image, int rgb) {
+        int red = rgb >> 16 & 0xFF;
+        int green = rgb >> 8 & 0xFF;
+        int blue = rgb & 0xFF;
+        int count = 0;
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int pixel = image.getRGB(x, y);
+                if ((pixel >>> 24) != 255) {
+                    continue;
+                }
+                if ((pixel >> 16 & 0xFF) * 3 >= red && (pixel >> 8 & 0xFF) * 3 >= green
+                        && (pixel & 0xFF) * 3 >= blue) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Counts the pixels that keep the channel pattern of a tinted ink over a neutral surface. Blending
+     * scales every channel difference by the coverage, so a translucent pixel of a styled Chinese
+     * label still shows the ink's order — which is what this compares, with {@code margin} keeping the
+     * grey panels and slot borders out of the count.
+     */
+    private static int countTinted(BufferedImage image, int rgb, int margin) {
+        int count = 0;
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                if (tinted(image.getRGB(x, y), rgb, margin)) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    private static int[] tintedBounds(BufferedImage image, int rgb, int margin) {
+        int[] bounds = null;
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                if (tinted(image.getRGB(x, y), rgb, margin)) {
+                    bounds = extend(bounds, x, y);
+                }
+            }
+        }
+        require(bounds != null, "no tinted pixels for colour " + Integer.toHexString(rgb));
+        return bounds;
+    }
+
+    private static boolean tinted(int pixel, int rgb, int margin) {
+        if ((pixel >>> 24) != 255) {
+            return false;
+        }
+        int[] ink = {rgb >> 16 & 0xFF, rgb >> 8 & 0xFF, rgb & 0xFF};
+        int[] channel = {pixel >> 16 & 0xFF, pixel >> 8 & 0xFF, pixel & 0xFF};
+        for (int first = 0; first < 3; first++) {
+            for (int second = 0; second < 3; second++) {
+                if (ink[first] - ink[second] > margin && channel[first] - channel[second] < margin) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     private static void requireFails(Renderer renderer, Map<String, Object> request, String expected) throws Exception {
         try {
             renderer.render(request);
@@ -1029,7 +1376,8 @@ public final class RendererSmokeTest {
         MAP_GRASS, MAP_SAND, DECORATION_WHITE, DECORATION_BLACK, PING,
         BANNER_FLAG, BANNER_POLE, BANNER_HIDDEN, BANNER_PATTERN,
         BED_HEAD, BED_FOOT, SKULL, CONDUIT, SHIELD_PLATE, SHIELD_PATTERN,
-        POT_NECK, POT_LID, POT_SIDE, POT_PATTERN, GOLEM_HEAD, GOLEM_BODY, PROFILE_HAT, MISSING_MAGENTA
+        POT_NECK, POT_LID, POT_SIDE, POT_PATTERN, GOLEM_HEAD, GOLEM_BODY, PROFILE_HAT, MISSING_MAGENTA,
+        SHULKER_BOX, SHULKER_RED
     }
 
     /** Expected texture colours normalised by their brightest channel (face shading scales them). */
@@ -1067,6 +1415,8 @@ public final class RendererSmokeTest {
             case GOLEM_HEAD -> new double[]{0.27, 1, 1};
             case GOLEM_BODY -> new double[]{1, 0.6, 1};
             case PROFILE_HAT -> new double[]{1, 0.62, 0.25};
+            case SHULKER_BOX -> new double[]{0.6, 0.6, 1};
+            case SHULKER_RED -> new double[]{1, 0.27, 0.25};
             // The magenta quadrant of the generated vanilla missing texture.
             case MISSING_MAGENTA -> new double[]{1, 0, 1};
             case DECORATION_WHITE, DECORATION_BLACK, PING -> new double[]{0, 0, 0};
@@ -1161,6 +1511,20 @@ public final class RendererSmokeTest {
             }
         }
         return right - left;
+    }
+
+    /** The number of distinct colours of the opaque pixels: a shaded box shows one per visible face. */
+    private static int colourCount(BufferedImage image) {
+        java.util.Set<Integer> colours = new java.util.HashSet<>();
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int pixel = image.getRGB(x, y);
+                if ((pixel >>> 24) > 200) {
+                    colours.add(pixel & 0xFFFFFF);
+                }
+            }
+        }
+        return colours.size();
     }
 
     private static int countAlpha(BufferedImage image, int alpha) {
