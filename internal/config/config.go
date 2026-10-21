@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -11,9 +12,11 @@ import (
 // Config contains process-wide settings. Resource downloads are only allowed
 // against the explicitly configured upstream hosts.
 type Config struct {
-	ListenAddr             string
-	DataDir                string
-	ResourcePackRoot       string
+	ListenAddr       string
+	DataDir          string
+	ResourcePackRoot string
+	// Debug raises the log level to debug, which prints every received request payload.
+	Debug                  bool
 	MaxBodyBytes           int64
 	MaxImageWidth          int
 	MaxImageHeight         int
@@ -34,6 +37,19 @@ type Config struct {
 	MaxDownloadBytes       int64
 	MaxArchiveFiles        int
 	MaxArchiveBytes        int64
+	// CustomContentsDir holds user supplied item packs in the layout of the ItemsAdder contents
+	// directory. An absent directory is an empty index, not an error: the service keeps rendering
+	// vanilla items.
+	CustomContentsDir string
+	// CustomItemsCache is the ItemsAdder items_ids_cache.yml that maps a base material plus a
+	// custom_model_data value to a namespaced item id.
+	CustomItemsCache string
+	// MaxCustomItems bounds the indexed entries, so a runaway directory cannot exhaust memory.
+	MaxCustomItems int
+	// MaxCustomTextureBytes bounds one inline texture of a custom item.
+	MaxCustomTextureBytes int
+	// MaxCustomLayers bounds how many textures one custom item may inline.
+	MaxCustomLayers int
 }
 
 func Default() Config {
@@ -59,6 +75,11 @@ func Default() Config {
 		MaxDownloadBytes:       512 << 20,
 		MaxArchiveFiles:        100_000,
 		MaxArchiveBytes:        2 << 30,
+		CustomContentsDir:      filepath.Join("./data", "contents"),
+		CustomItemsCache:       filepath.Join("./data", "items_ids_cache.yml"),
+		MaxCustomItems:         50_000,
+		MaxCustomTextureBytes:  8 << 20,
+		MaxCustomLayers:        16,
 	}
 }
 
@@ -67,7 +88,15 @@ func FromEnv() Config {
 	cfg.ListenAddr = envString("LISTEN_ADDR", cfg.ListenAddr)
 	cfg.DataDir = envString("DATA_DIR", cfg.DataDir)
 	cfg.ResourcePackRoot = envString("RESOURCE_PACK_ROOT", cfg.ResourcePackRoot)
+	// The custom content paths default next to the data directory, so a deployment only has to move
+	// DATA_DIR to carry its packs along.
+	cfg.CustomContentsDir = envString("CUSTOM_CONTENTS_DIR", filepath.Join(cfg.DataDir, "contents"))
+	cfg.CustomItemsCache = envString("CUSTOM_ITEMS_CACHE", filepath.Join(cfg.DataDir, "items_ids_cache.yml"))
+	cfg.MaxCustomItems = envInt("MAX_CUSTOM_ITEMS", cfg.MaxCustomItems)
+	cfg.MaxCustomTextureBytes = envInt("MAX_CUSTOM_TEXTURE_BYTES", cfg.MaxCustomTextureBytes)
+	cfg.MaxCustomLayers = envInt("MAX_CUSTOM_LAYERS", cfg.MaxCustomLayers)
 	cfg.APIKey = os.Getenv("API_KEY")
+	cfg.Debug = envBool("DEBUG", cfg.Debug)
 	cfg.AllowFallbackRenderer = envBool("ALLOW_FALLBACK_RENDERER", cfg.AllowFallbackRenderer)
 	cfg.RendererCommand = envString("RENDERER_COMMAND", cfg.RendererCommand)
 	cfg.RendererMaxOutputBytes = envInt64("RENDERER_MAX_OUTPUT_BYTES", cfg.RendererMaxOutputBytes)
@@ -96,6 +125,12 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.DataDir) == "" {
 		return fmt.Errorf("data directory is empty")
+	}
+	if strings.TrimSpace(c.CustomContentsDir) == "" || strings.TrimSpace(c.CustomItemsCache) == "" {
+		return fmt.Errorf("custom content paths must not be empty")
+	}
+	if c.MaxCustomItems <= 0 || c.MaxCustomTextureBytes <= 0 || c.MaxCustomLayers <= 0 || c.MaxCustomLayers > 64 {
+		return fmt.Errorf("custom content limits must be positive and at most 64 layers")
 	}
 	if c.MaxBodyBytes <= 0 || c.MaxBodyBytes > 64<<20 {
 		return fmt.Errorf("max body bytes must be between 1 and 67108864")

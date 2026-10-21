@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/illtamer/minecraft-view-generator2/internal/config"
+	"github.com/illtamer/minecraft-view-generator2/internal/custom"
 	"github.com/illtamer/minecraft-view-generator2/internal/httpapi"
 	"github.com/illtamer/minecraft-view-generator2/internal/renderer"
 	"github.com/illtamer/minecraft-view-generator2/internal/resources"
@@ -23,10 +24,15 @@ var (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	slog.SetDefault(logger)
-	logger.Info("starting", "version", version, "commit", commit)
 	cfg := config.FromEnv()
+	level := slog.LevelInfo
+	if cfg.Debug {
+		// Debug prints every received request payload, so it has to lift the handler level.
+		level = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(logger)
+	logger.Info("starting", "version", version, "commit", commit, "debug", cfg.Debug)
 	if err := cfg.Validate(); err != nil {
 		logger.Error("invalid configuration", "error", err)
 		os.Exit(2)
@@ -49,7 +55,21 @@ func main() {
 	} else if cfg.AllowFallbackRenderer {
 		adapter = renderer.PrimitiveAdapter{}
 	}
-	server := httpapi.NewServer(cfg, resourceManager, renderer.NewCompositor(adapter), logger)
+	compositor := renderer.NewCompositor(adapter)
+	compositor.MaxWidth = cfg.MaxImageWidth
+	compositor.MaxHeight = cfg.MaxImageHeight
+	catalog := custom.New(cfg, logger)
+	// The user content directory usually lives on a network share, so the index is built in the
+	// background: a request that names a custom item waits for it, every other request does not.
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logger.Error("custom content index failed", "error", recovered)
+			}
+		}()
+		catalog.Reload()
+	}()
+	server := httpapi.NewServer(cfg, resourceManager, compositor, catalog, logger)
 	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: server.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: cfg.HTTPTimeout, WriteTimeout: cfg.HTTPTimeout, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

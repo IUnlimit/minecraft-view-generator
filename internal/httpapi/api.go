@@ -1,21 +1,25 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/illtamer/minecraft-view-generator2/internal/config"
+	"github.com/illtamer/minecraft-view-generator2/internal/custom"
 	"github.com/illtamer/minecraft-view-generator2/internal/model"
 	"github.com/illtamer/minecraft-view-generator2/internal/renderer"
 	"github.com/illtamer/minecraft-view-generator2/internal/resources"
@@ -25,15 +29,18 @@ type Server struct {
 	cfg        config.Config
 	resources  *resources.Manager
 	compositor *renderer.Compositor
+	custom     *custom.Catalog
 	logger     *slog.Logger
 	renderSem  chan struct{}
 }
 
-func NewServer(cfg config.Config, resourceManager *resources.Manager, compositor *renderer.Compositor, logger *slog.Logger) *Server {
+// NewServer wires the HTTP layer. The custom content catalog may be nil, which is the same as an
+// empty index: every request then renders the vanilla items it names.
+func NewServer(cfg config.Config, resourceManager *resources.Manager, compositor *renderer.Compositor, catalog *custom.Catalog, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{cfg: cfg, resources: resourceManager, compositor: compositor, logger: logger, renderSem: make(chan struct{}, cfg.MaxConcurrentRenders)}
+	return &Server{cfg: cfg, resources: resourceManager, compositor: compositor, custom: catalog, logger: logger, renderSem: make(chan struct{}, cfg.MaxConcurrentRenders)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -42,11 +49,101 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/versions", s.versions)
 	mux.HandleFunc("PUT /api/v1/resources/{version}", s.prepare)
 	mux.HandleFunc("GET /api/v1/resources/{version}", s.resourceState)
+	mux.HandleFunc("GET /api/v1/resources/sources", s.sources)
+	mux.HandleFunc("POST /api/v1/resources/custom/reload", s.reloadCustom)
 	mux.HandleFunc("POST /api/v1/render", s.render)
 	mux.HandleFunc("GET /api/v1/openapi.json", s.openapi)
 	mux.HandleFunc("GET /docs", s.docs)
 	mux.HandleFunc("GET /scalar", s.docs)
-	return s.withCommon(s.withAuth(mux))
+	return s.withDebugLog(s.withCommon(s.withAuth(mux)))
+}
+
+// debugBodyLimit bounds the part of a request body the debug log keeps: a render request may carry an
+// inline skin PNG, and a single log line has to stay readable.
+const debugBodyLimit = 64 << 10
+
+// withDebugLog prints the received request payloads when debug mode is enabled. The body is copied
+// while the handler reads it, so a request is never buffered or read twice.
+func (s *Server) withDebugLog(next http.Handler) http.Handler {
+	if !s.cfg.Debug {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		body := &debugBody{reader: r.Body, limit: debugBodyLimit}
+		if r.Body != nil && r.Body != http.NoBody {
+			r.Body = body
+		}
+		status := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(status, r)
+		s.logger.Debug("request",
+			"method", r.Method,
+			"path", r.URL.RequestURI(),
+			"remote", r.RemoteAddr,
+			"status", status.code(),
+			"duration", time.Since(started).Round(time.Microsecond).String(),
+			"contentLength", r.ContentLength,
+			"bodyBytes", body.total,
+			"bodyTruncated", body.truncated(),
+			"payload", body.text(),
+		)
+	})
+}
+
+// debugBody copies a request body while it is being read, keeping at most limit bytes.
+type debugBody struct {
+	reader io.ReadCloser
+	buffer bytes.Buffer
+	limit  int
+	total  int64
+}
+
+func (b *debugBody) Read(value []byte) (int, error) {
+	read, err := b.reader.Read(value)
+	if read > 0 {
+		b.total += int64(read)
+		if room := b.limit - b.buffer.Len(); room > 0 {
+			b.buffer.Write(value[:min(read, room)])
+		}
+	}
+	return read, err
+}
+
+func (b *debugBody) Close() error {
+	return b.reader.Close()
+}
+
+func (b *debugBody) truncated() bool {
+	return b.total > int64(b.buffer.Len())
+}
+
+func (b *debugBody) text() string {
+	return b.buffer.String()
+}
+
+// statusRecorder remembers the status code a handler wrote without changing the response.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(value []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return r.ResponseWriter.Write(value)
+}
+
+func (r *statusRecorder) code() int {
+	if r.status == 0 {
+		return http.StatusOK
+	}
+	return r.status
 }
 
 func (s *Server) withCommon(next http.Handler) http.Handler {
@@ -207,6 +304,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request) {
 		}
 		resource = resources.Context{Version: request.Version}
 	}
+	resource = s.withCustomArt(resource, data)
 	backend := renderer.Info(s.compositor.Adapter)
 	if backend.Status != "ready" && !s.cfg.AllowFallbackRenderer {
 		writeError(w, http.StatusServiceUnavailable, "renderer_unavailable", backend.Error)
@@ -223,6 +321,10 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	imageValue, err := s.compositor.Render(ctx, request, data, resource)
 	if err != nil {
+		if errors.Is(err, renderer.ErrImageTooLarge) {
+			writeError(w, http.StatusUnprocessableEntity, "image_too_large", err.Error())
+			return
+		}
 		s.logger.Error("render failed", "type", request.Type, "version", request.Version, "error", err)
 		writeError(w, http.StatusUnprocessableEntity, "render_failed", err.Error())
 		return
@@ -281,6 +383,23 @@ func validateImageOptions(options model.Options, cfg config.Config) error {
 	}
 	if options.Width != 0 && options.Width < 16 || options.Height != 0 && options.Height < 16 {
 		return fmt.Errorf("requested image dimensions must be at least 16 pixels")
+	}
+	// A target size is checked as the final size of the picture; an explicit canvas is multiplied by
+	// the fixed ratio so an impossible magnification is rejected before rendering starts. A fixed
+	// ratio on a natural canvas is checked by the compositor, which only knows the canvas size after
+	// the resource renderer has produced it.
+	if targetWidth, targetHeight, ok := options.Scale.TargetSize(); ok {
+		if targetWidth > cfg.MaxImageWidth || targetHeight > cfg.MaxImageHeight {
+			return fmt.Errorf("requested output dimensions exceed configured limits")
+		}
+	}
+	if ratio, ok := options.Scale.FixedRatio(); ok && ratio > 1 {
+		if options.Width > 0 && int(math.Round(float64(options.Width)*ratio)) > cfg.MaxImageWidth {
+			return fmt.Errorf("requested image width exceeds configured limits after the %gx magnification", ratio)
+		}
+		if options.Height > 0 && int(math.Round(float64(options.Height)*ratio)) > cfg.MaxImageHeight {
+			return fmt.Errorf("requested image height exceeds configured limits after the %gx magnification", ratio)
+		}
 	}
 	return nil
 }

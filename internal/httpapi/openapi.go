@@ -30,22 +30,46 @@ func buildOpenAPIDocument() map[string]any {
 		"openapi": "3.1.0",
 		"info":    map[string]any{"title": "Minecraft View Generator API", "version": model.SupportedVersion, "description": "Minecraft 1.21.11 rendering API backed by a Java 21 resource-aware renderer. The service returns PNG or base64 PNG and fails explicitly when resources are unavailable."},
 		"paths": map[string]any{
-			"/healthz":                    map[string]any{"get": map[string]any{"summary": "Health and renderer capability check", "responses": map[string]any{"200": map[string]any{"description": "Service status and backend capability"}}}},
-			"/api/v1/versions":            map[string]any{"get": map[string]any{"summary": "List local resource contexts", "responses": map[string]any{"200": map[string]any{"description": "Version states"}}}},
-			"/api/v1/resources/{version}": map[string]any{"parameters": []any{map[string]any{"name": "version", "in": "path", "required": true, "schema": map[string]any{"type": "string"}}}, "put": map[string]any{"summary": "Prepare resources", "responses": map[string]any{"202": map[string]any{"description": "Preparation started"}, "200": map[string]any{"description": "Already ready"}}}, "get": map[string]any{"summary": "Read preparation state", "responses": map[string]any{"200": map[string]any{"description": "Resource state"}, "404": map[string]any{"description": "Unknown version"}}}},
-			"/api/v1/render":              renderOperation(),
+			"/healthz":                        map[string]any{"get": map[string]any{"summary": "Health and renderer capability check", "responses": map[string]any{"200": map[string]any{"description": "Service status and backend capability"}}}},
+			"/api/v1/versions":                map[string]any{"get": map[string]any{"summary": "List local resource contexts", "responses": map[string]any{"200": map[string]any{"description": "Version states"}}}},
+			"/api/v1/resources/{version}":     map[string]any{"parameters": []any{map[string]any{"name": "version", "in": "path", "required": true, "schema": map[string]any{"type": "string"}}}, "put": map[string]any{"summary": "Prepare resources", "responses": map[string]any{"202": map[string]any{"description": "Preparation started"}, "200": map[string]any{"description": "Already ready"}}}, "get": map[string]any{"summary": "Read preparation state", "responses": map[string]any{"200": map[string]any{"description": "Resource state"}, "404": map[string]any{"description": "Unknown version"}}}},
+			"/api/v1/resources/sources":       sourcesOperation(),
+			"/api/v1/resources/custom/reload": reloadOperation(),
+			"/api/v1/render":                  renderOperation(),
 		},
-		"components": map[string]any{"schemas": map[string]any{"RenderRequest": map[string]any{"type": "object", "required": []string{"version", "type", "output", "data"}, "properties": map[string]any{"version": map[string]any{"type": "string", "const": model.SupportedVersion}, "type": map[string]any{"type": "string", "enum": model.SupportedTypes()}, "output": map[string]any{"type": "string", "enum": []string{model.OutputPNG, model.OutputBase64}}, "data": map[string]any{"type": "object"}, "options": map[string]any{"type": "object", "properties": map[string]any{"projection": map[string]any{"type": "string", "enum": []string{"gui", "orthographic"}}, "width": map[string]any{"type": "integer", "minimum": 16}, "height": map[string]any{"type": "integer", "minimum": 16}, "scale": map[string]any{"type": "integer", "minimum": 0, "maximum": 4}, "frame": map[string]any{"type": "integer", "minimum": 0}, "transparent": map[string]any{"type": "boolean"}}}}}, "Error": map[string]any{"type": "object", "required": []string{"error"}, "properties": map[string]any{"error": map[string]any{"type": "object", "required": []string{"code", "message"}, "properties": map[string]any{"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}}}}}}},
+		"components": map[string]any{"schemas": map[string]any{"RenderRequest": map[string]any{"type": "object", "required": []string{"version", "type", "output", "data"}, "properties": map[string]any{"version": map[string]any{"type": "string", "const": model.SupportedVersion}, "type": map[string]any{"type": "string", "enum": model.SupportedTypes()}, "output": map[string]any{"type": "string", "enum": []string{model.OutputPNG, model.OutputBase64}}, "data": map[string]any{"type": "object"}, "options": map[string]any{"type": "object", "description": "图片尺寸与外观：width/height 是画布尺寸（渲染分辨率，只给一个时按该类型的原生画布比例换算）；scale 是成品图的放大倍率，数字表示固定倍率（支持小数），对象用 {ratio} 或目标尺寸 {width,height} 表达。", "properties": map[string]any{"projection": map[string]any{"type": "string", "enum": []string{"gui", "orthographic"}}, "width": map[string]any{"type": "integer", "minimum": 16, "description": "画布宽度（渲染分辨率）；与 height 同时给出时直接使用这对尺寸，不保持比例"}, "height": map[string]any{"type": "integer", "minimum": 16, "description": "画布高度（渲染分辨率）；只给出宽度时按原生画布比例换算"}, "scale": map[string]any{"description": "成品图的放大倍率：数字为固定倍率（0 与 1 表示不放大，支持小数）；对象可用 ratio，或用 width/height 给出目标最终尺寸并按画布等比取倍率。", "oneOf": []any{map[string]any{"type": "number", "minimum": 0, "maximum": model.MaxScaleRatio}, map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"ratio": map[string]any{"type": "number", "minimum": 0, "maximum": model.MaxScaleRatio}, "width": map[string]any{"type": "integer", "minimum": 16}, "height": map[string]any{"type": "integer", "minimum": 16}}}}}, "frame": map[string]any{"type": "integer", "minimum": 0}, "transparent": map[string]any{"type": "boolean"}}}}}, "Error": map[string]any{"type": "object", "required": []string{"error"}, "properties": map[string]any{"error": map[string]any{"type": "object", "required": []string{"code", "message"}, "properties": map[string]any{"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}}}}}}},
 	}
 }
 
 // renderOperation documents POST /api/v1/render together with one prefilled
 // payload per supported type; Scalar offers them through its example switcher.
+// sourcesOperation reports every directory and file a render reads: the prepared Minecraft versions
+// with their font assets, the resource pack stack, and the custom content index of the user packs.
+func sourcesOperation() map[string]any {
+	return map[string]any{
+		"get": map[string]any{
+			"summary":     "List the resource paths this service reads",
+			"description": "返回当前读取的各类资源路径：DATA_DIR、渲染器后端、每个已准备版本的 resourceRoot / vanillaRoot / addonRoot / packRoots 与字体文件（default.json、unifont.zip、font-overlay.json）是否存在，以及 data/contents 的目录、items_ids_cache.yml、解析到的 pack 与条目计数。目录不存在时状态为 ready、条目为 0，不会报错。",
+			"responses":   map[string]any{"200": map[string]any{"description": "Resource paths and their state"}},
+		},
+	}
+}
+
+func reloadOperation() map[string]any {
+	return map[string]any{
+		"post": map[string]any{
+			"summary":     "Rebuild the custom content index",
+			"description": "重新扫描 CUSTOM_CONTENTS_DIR 与 items_ids_cache.yml，返回与 GET /api/v1/resources/sources 相同的 customContents 段。用户手动维护 pack 或索引后调用即可生效，无需重启；扫描期间已缓存的模型与贴图会被丢弃。",
+			"responses":   map[string]any{"200": map[string]any{"description": "The rebuilt custom content index"}},
+		},
+	}
+}
+
 func renderOperation() map[string]any {
 	return map[string]any{
 		"post": map[string]any{
 			"summary":     "Render a Minecraft 1.21.11 asset",
-			"description": "requestBody 中的每个示例都是可直接发送的完整报文，覆盖 item、tooltip、inventory、item_container、enderchest、playerInventory、skin、playerlist、map、achievement。示例统一使用 output=base64，响应会返回 PNG 的 base64 与宽高，便于在文档内查看结果；需要二进制图片时把 output 改成 png。渲染前必须先 PUT /api/v1/resources/1.21.11。",
+			"description": "requestBody 中的每个示例都是可直接发送的完整报文，覆盖 item、tooltip、inventory、item_container、enderchest、playerInventory、skin、playerlist、map、achievement。示例统一使用 output=base64，响应会返回 PNG 的 base64 与宽高，便于在文档内查看结果；需要二进制图片时把 output 改成 png。渲染前必须先 PUT /api/v1/resources/1.21.11。物品入参可带 customData 指向 data/contents 的自定义物品；读取了哪些资源见 GET /api/v1/resources/sources。",
 			"requestBody": map[string]any{
 				"required": true,
 				"content": map[string]any{
@@ -75,7 +99,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeItem,
 			summary:     "item · 物品图标",
-			description: "1.21.11 item definition：模型继承、generated/handheld、纹理层与 glint 都由真实资源决定。minecraft:special 模型按客户端代码直译的几何渲染（旗帜 / 床 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟），组件驱动图案、染色、陶片与内联皮肤；箱子族仍为平面贴图。模型不可用时画原版紫黑缺失模型，不返回 422。",
+			description: "1.21.11 item definition：模型继承、generated/handheld、纹理层与 glint 都由真实资源决定。minecraft:special 模型按客户端代码直译的几何渲染（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟），组件驱动图案、染色、陶片与内联皮肤；潜影盒按 ShulkerBoxModel 的 lid + base 两个盒子渲染成 3D 方块，贴图取模型定义里已染色的 entity/shulker/shulker（16 色）而不再是平面贴图；箱子族仍为平面贴图。模型不可用时画原版紫黑缺失模型，不返回 422。物品可带 customData（ItemsAdder 的 custom_model_data 数值），与 id 的基础材料组合命中 data/contents 里的自定义物品；命中后按其贴图与模型几何绘制，未命中回退原版并记一条警告。options.scale 在这里演示固定倍率放大。",
 			payload: `{
   "version": "1.21.11",
   "type": "item",
@@ -83,13 +107,16 @@ func renderExamples() []renderExample {
   "data": {
     "id": "minecraft:diamond_sword",
     "count": 1
+  },
+  "options": {
+    "scale": 2
   }
 }`,
 		},
 		{
 			kind:        model.TypeTooltip,
 			summary:     "tooltip · 悬浮提示",
-			description: "按原版 1.21.11 TooltipRenderUtil 渲染：文本块四周各外扩 12px，用 gui/sprites/tooltip/background 九宫格铺底（advanced 时叠加 tooltip/frame），行高 10px、标题后额外 2px，文本始终带阴影。文本支持 § 与 & 两种颜色/修饰符前缀（0-9a-f、l/o/n/m/k/r；§k 为确定性渲染，不做随机化），只有后跟合法码字符时才算格式码。未显式给出 title 时按原版顺序生成行：悬停名、advanced 物品 id、lore、附魔、属性修饰符、单值组件、advanced 组件与 NBT 计数。icon 默认关闭，设为 true 时在左侧绘制物品图标。",
+			description: "按原版 1.21.11 TooltipRenderUtil 渲染：文本块四周各外扩 12px，用 gui/sprites/tooltip/background 九宫格铺底（advanced 时叠加 tooltip/frame），行高 10px、标题后额外 2px，文本始终带阴影。文本支持 § 与 & 两种颜色/修饰符前缀（0-9a-f、l/o/n/m/k/r；§k 为确定性渲染，不做随机化），只有后跟合法码字符时才算格式码。未显式给出 title 时按原版顺序生成行：悬停名、advanced 物品 id、lore、附魔、属性修饰符、单值组件、advanced 组件与 NBT 计数；lore 只来自 item.lore（或 components[\"minecraft:lore\"]），位置固定在悬停名之后，默认 §5 紫色斜体，显式格式码优先。icon 默认关闭，设为 true 时在左侧绘制物品图标。",
 			payload: `{
   "version": "1.21.11",
   "type": "tooltip",
@@ -98,7 +125,7 @@ func renderExamples() []renderExample {
     "item": {
       "id": "minecraft:diamond_sword",
       "count": 1,
-      "lore": ["Forged in the deep"],
+      "lore": ["§7深海锻造的剑", "§5字形来自 unifont.zip 的 16x16 点阵"],
       "enchantments": ["minecraft:sharpness 5"],
       "components": {
         "minecraft:unbreakable": {},
@@ -111,11 +138,11 @@ func renderExamples() []renderExample {
       },
       "nbt": {"CustomTag": 1}
     },
-    "lines": ["§7A grey lore style line"],
     "advanced": true
   },
   "options": {
-    "width": 420
+    "width": 420,
+    "scale": {"ratio": 2}
   }
 }`,
 		},
@@ -185,7 +212,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypePlayerInventory,
 			summary:     "playerInventory · 玩家背包",
-			description: "原版 InventoryScreen 1:1 布局：默认输出 176×166，container/inventory 贴图不缩放；标题按原版 titleLabelX=97、行 6 绘制（支持 § 或 & 颜色码）；3D 玩家按原版预览视口渲染（x 26→75、y 8→78，30 像素/方块，脚底对齐视口中心 + (bbHeight/2+0.0625)×30，3/4 正交视角），槽位沿用原版 InventoryMenu 坐标（背包第 0 格 8/84、快捷栏 8/142、装备 8/8+18i、副手 77/62）。armor 按顺序绘制头盔/胸甲/护腿/靴子的原版装备层（含染色与贴图分层），mainHand/offhand 用 display.thirdperson_righthand / thirdperson_lefthand 的 T·R·S 变换挂在对应手上，并乘上原版实体模型空间到场景空间的转换（y 向下/颈原点/朝 -z → y 向上/脚底原点/朝 +z），因此物品落在手心高度、躯干前方并参与同一深度排序；special 模型（旗帜/盾牌/头颅/潮涌核心/陶罐/铜傀儡雕像/三叉戟）在手持时也使用其 3D 几何而不是平面贴图。显式 width/height 时整图最近邻缩放。",
+			description: "原版 InventoryScreen 1:1 布局：默认输出 176×166，container/inventory 贴图不缩放；标题按原版 titleLabelX=97、行 6 绘制（支持 § 或 & 颜色码）；3D 玩家按原版预览视口渲染（x 26→75、y 8→78，30 像素/方块，脚底对齐视口中心 + (bbHeight/2+0.0625)×30，3/4 正交视角），槽位沿用原版 InventoryMenu 坐标（背包第 0 格 8/84、快捷栏 8/142、装备 8/8+18i、副手 77/62）。armor 按顺序绘制头盔/胸甲/护腿/靴子的原版装备层（含染色与贴图分层），mainHand/offhand 用 display.thirdperson_righthand / thirdperson_lefthand 的 T·R·S 变换挂在对应手上，并乘上原版实体模型空间到场景空间的转换（y 向下/颈原点/朝 -z → y 向上/脚底原点/朝 +z），因此物品落在手心高度、躯干前方并参与同一深度排序；special 模型（旗帜/盾牌/潜影盒/头颅/潮涌核心/陶罐/铜傀儡雕像/三叉戟）在手持时也使用其 3D 几何而不是平面贴图。显式给出 width 与 height 时整图最近邻缩放，只给一个时按 176×166 的比例换算。",
 			payload: `{
   "version": "1.21.11",
   "type": "playerInventory",

@@ -2,17 +2,23 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
 	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/illtamer/minecraft-view-generator2/internal/config"
+	"github.com/illtamer/minecraft-view-generator2/internal/custom"
 	"github.com/illtamer/minecraft-view-generator2/internal/model"
 	"github.com/illtamer/minecraft-view-generator2/internal/renderer"
 	"github.com/illtamer/minecraft-view-generator2/internal/resources"
@@ -20,15 +26,81 @@ import (
 
 func testServer(t *testing.T) *Server {
 	t.Helper()
+	server, _ := testServerWithAdapter(t)
+	return server
+}
+
+func testServerWithAdapter(t *testing.T) (*Server, *recordingAdapter) {
+	t.Helper()
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
+	cfg.CustomContentsDir = filepath.Join(cfg.DataDir, "contents")
+	cfg.CustomItemsCache = filepath.Join(cfg.CustomContentsDir, "items_ids_cache.yml")
 	cfg.RequireResources = false
 	cfg.AllowFallbackRenderer = true
 	manager, err := resources.NewManager(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewServer(cfg, manager, renderer.NewCompositor(renderer.PrimitiveAdapter{}), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	adapter := &recordingAdapter{inner: renderer.PrimitiveAdapter{}}
+	compositor := renderer.NewCompositor(adapter)
+	compositor.MaxWidth = cfg.MaxImageWidth
+	compositor.MaxHeight = cfg.MaxImageHeight
+	catalog := custom.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewServer(cfg, manager, compositor, catalog, slog.New(slog.NewTextHandler(io.Discard, nil))), adapter
+}
+
+// recordingAdapter keeps the resource context of the last render, which is how a test asserts what
+// the renderer was actually handed.
+type recordingAdapter struct {
+	inner renderer.PrimitiveAdapter
+	last  resources.Context
+}
+
+func (a *recordingAdapter) record(resource resources.Context) {
+	a.last = resource
+}
+
+func (a *recordingAdapter) Backend() string { return a.inner.Backend() }
+
+func (a *recordingAdapter) RenderItem(ctx context.Context, resource resources.Context, item model.Item, size int) (image.Image, error) {
+	a.record(resource)
+	return a.inner.RenderItem(ctx, resource, item, size)
+}
+
+func (a *recordingAdapter) RenderPlayer(ctx context.Context, resource resources.Context, skin model.SkinData, equipment renderer.Equipment, width, height int) (image.Image, error) {
+	a.record(resource)
+	return a.inner.RenderPlayer(ctx, resource, skin, equipment, width, height)
+}
+
+func (a *recordingAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, width, height int) (image.Image, error) {
+	a.record(resource)
+	return a.inner.RenderTooltip(ctx, resource, data, width, height)
+}
+
+func (a *recordingAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, width, height int) (image.Image, error) {
+	a.record(resource)
+	return a.inner.RenderContainer(ctx, resource, kind, data, width, height)
+}
+
+func (a *recordingAdapter) RenderPlayerInventory(ctx context.Context, resource resources.Context, data model.PlayerInventoryData, width, height int) (image.Image, error) {
+	a.record(resource)
+	return a.inner.RenderPlayerInventory(ctx, resource, data, width, height)
+}
+
+func (a *recordingAdapter) RenderPlayerList(ctx context.Context, resource resources.Context, data model.PlayerListData, width, height int) (image.Image, error) {
+	a.record(resource)
+	return a.inner.RenderPlayerList(ctx, resource, data, width, height)
+}
+
+func (a *recordingAdapter) RenderMap(ctx context.Context, resource resources.Context, data model.MapData, width, height int) (image.Image, error) {
+	a.record(resource)
+	return a.inner.RenderMap(ctx, resource, data, width, height)
+}
+
+func (a *recordingAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, width, height int) (image.Image, error) {
+	a.record(resource)
+	return a.inner.RenderAchievement(ctx, resource, data, width, height)
 }
 
 func TestHealth(t *testing.T) {
@@ -188,15 +260,27 @@ func decodeExample(t *testing.T, kind string, payload json.RawMessage) model.Req
 	return request
 }
 
-func assertASCIIText(t *testing.T, label string, values ...string) {
+// assertRenderableText allows everything the provider chain draws: ASCII from the bitmap sheets and
+// the CJK blocks from the Unifont archive, which is what the Chinese examples rely on.
+func assertRenderableText(t *testing.T, label string, values ...string) {
 	t.Helper()
 	for _, value := range values {
 		for _, char := range value {
-			if char < 32 || char > 126 {
-				t.Fatalf("%s is drawn with the ASCII font, but contains %q in %q", label, char, value)
+			if isRenderableRune(char) {
+				continue
 			}
+			t.Fatalf("%s contains %q in %q, which the font cannot draw", label, char, value)
 		}
 	}
+}
+
+func isRenderableRune(char rune) bool {
+	if char >= 32 && char <= 126 {
+		return true
+	}
+	// Unifont covers the CJK blocks and the full width punctuation around them; anything else is
+	// either a formatting code or a code point the renderer would draw as the missing box.
+	return char >= 0x2000 && char <= 0xFFEF
 }
 
 // assertStyledText allows the section sign formatting codes the tooltip renderer consumes, so the
@@ -218,8 +302,8 @@ func assertStyledText(t *testing.T, label string, values ...string) {
 				index++
 				continue
 			}
-			if char < 32 || char > 126 {
-				t.Fatalf("%s is drawn with the ASCII font, but contains %q in %q", label, char, value)
+			if !isRenderableRune(char) {
+				t.Fatalf("%s contains %q in %q, which the font cannot draw", label, char, value)
 			}
 		}
 	}
@@ -306,16 +390,16 @@ func TestOpenAPIRenderExamplesCarryRenderableAssets(t *testing.T) {
 			assertSkinTexture(t, kind, value.Texture)
 		case *model.PlayerInventoryData:
 			assertSkinTexture(t, kind, value.Skin.Texture)
-			assertASCIIText(t, kind+".title", value.Title)
+			assertRenderableText(t, kind+".title", value.Title)
 			for _, slot := range value.Armor {
 				if slot.Item.ID == "minecraft:diamond_helmet" {
 					inventoryHelmet = true
 				}
 			}
 		case *model.PlayerListData:
-			assertASCIIText(t, kind+".header", value.Header, value.Footer)
+			assertRenderableText(t, kind+".header", value.Header, value.Footer)
 			for _, player := range value.Players {
-				assertASCIIText(t, kind+".player", player.Display, player.Name)
+				assertRenderableText(t, kind+".player", player.Display, player.Name)
 				if player.Texture != "" {
 					assertSkinTexture(t, kind+".player", player.Texture)
 					avatars++
@@ -323,16 +407,16 @@ func TestOpenAPIRenderExamplesCarryRenderableAssets(t *testing.T) {
 			}
 		case *model.TooltipData:
 			assertStyledText(t, kind+".title", value.Title)
-			assertStyledText(t, kind+".lines", value.Lines...)
+			assertStyledText(t, kind+".lore", value.Item.Lore...)
 		case *model.ContainerData:
-			assertASCIIText(t, kind+".title", value.Title)
+			assertRenderableText(t, kind+".title", value.Title)
 			for _, slot := range value.Slots {
 				if slot.Item.ID == "minecraft:shulker_box" && kind == model.TypeEnderchest {
 					enderShulker = true
 				}
 			}
 		case *model.AchievementData:
-			assertASCIIText(t, kind+".text", value.Title, value.Description)
+			assertRenderableText(t, kind+".text", value.Title, value.Description)
 		case *model.MapData:
 			if len(value.Pixels) == 0 && value.PixelData == "" {
 				t.Fatalf("example %q renders no pixels", kind)
@@ -389,5 +473,185 @@ func TestRenderAcceptsEveryPrefilledExample(t *testing.T) {
 		if payload.MimeType != "image/png" || payload.Data == "" || payload.Width == 0 || payload.Height == 0 {
 			t.Fatalf("example %q returned an unusable payload: %+v", kind, payload)
 		}
+	}
+}
+
+// The resources endpoint has to name every directory and file a render reads, including the font
+// assets of the prepared versions and the custom content index.
+func TestSourcesReportsEveryResourcePath(t *testing.T) {
+	server := testServer(t)
+	record := httptest.NewRecorder()
+	server.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodGet, "/api/v1/resources/sources", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", record.Code, record.Body.String())
+	}
+	var report struct {
+		DataDir  string `json:"dataDir"`
+		Renderer struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"renderer"`
+		Versions       []map[string]any `json:"versions"`
+		CustomContents struct {
+			Root       string         `json:"root"`
+			ItemsCache string         `json:"itemsCache"`
+			Status     string         `json:"status"`
+			Items      map[string]int `json:"items"`
+		} `json:"customContents"`
+	}
+	if err := json.Unmarshal(record.Body.Bytes(), &report); err != nil {
+		t.Fatalf("sources body: %v", err)
+	}
+	if report.DataDir != server.cfg.DataDir {
+		t.Fatalf("dataDir = %q, want %q", report.DataDir, server.cfg.DataDir)
+	}
+	if report.Renderer.Name == "" || report.Renderer.Status == "" {
+		t.Fatalf("renderer = %+v", report.Renderer)
+	}
+	if report.Versions == nil {
+		t.Fatal("versions is null, it has to be an array")
+	}
+	if report.CustomContents.Root != server.cfg.CustomContentsDir || report.CustomContents.ItemsCache != server.cfg.CustomItemsCache {
+		t.Fatalf("customContents = %+v", report.CustomContents)
+	}
+	if report.CustomContents.Status != custom.StatusReady {
+		t.Fatalf("customContents status = %q, want ready for an empty index", report.CustomContents.Status)
+	}
+	if report.CustomContents.Items["cached"] != 0 {
+		t.Fatalf("customContents items = %v, want an empty index", report.CustomContents.Items)
+	}
+}
+
+// An operator who drops a pack into the contents directory or edits the index calls reload instead of
+// restarting the service, and the report he gets back is the same segment the sources endpoint shows.
+func TestReloadRebuildsTheCustomIndex(t *testing.T) {
+	server := testServer(t)
+	writeCustomPack(t, server.cfg)
+
+	record := httptest.NewRecorder()
+	server.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodPost, "/api/v1/resources/custom/reload", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", record.Code, record.Body.String())
+	}
+	var payload struct {
+		CustomContents custom.Sources `json:"customContents"`
+	}
+	if err := json.Unmarshal(record.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.CustomContents.Items.Cached != 1 || payload.CustomContents.Items.WithDefinition != 1 {
+		t.Fatalf("index = %+v, want the single indexed item", payload.CustomContents.Items)
+	}
+	if len(payload.CustomContents.Packs) != 1 || payload.CustomContents.Packs[0].Name != "fishing_pack" {
+		t.Fatalf("packs = %+v", payload.CustomContents.Packs)
+	}
+
+	sources := httptest.NewRecorder()
+	server.Handler().ServeHTTP(sources, httptest.NewRequest(http.MethodGet, "/api/v1/resources/sources", nil))
+	if !strings.Contains(sources.Body.String(), "fishing_pack") {
+		t.Fatalf("sources does not report the pack: %s", sources.Body.String())
+	}
+}
+
+// A customData value that the index resolves travels to the renderer as a model plus inline textures,
+// from every item position the request can name, and an unknown value leaves the request alone.
+func TestRenderResolvesCustomArtForEveryItemPosition(t *testing.T) {
+	server, adapter := testServerWithAdapter(t)
+	writeCustomPack(t, server.cfg)
+	for _, payload := range []string{
+		`{"version":"1.21.11","type":"item","output":"base64","data":{"id":"minecraft:paper","customData":1134}}`,
+		`{"version":"1.21.11","type":"tooltip","output":"base64","data":{"item":{"id":"minecraft:paper","customData":1134,"name":"Starfish"}}}`,
+		`{"version":"1.21.11","type":"inventory","output":"base64","data":{"title":"Chest","rows":3,"columns":9,"slots":[{"slot":0,"item":{"id":"minecraft:paper","customData":1134}}]}}`,
+		`{"version":"1.21.11","type":"achievement","output":"base64","data":{"title":"Task","icon":{"id":"minecraft:paper","customData":1134}}}`,
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/render", strings.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		record := httptest.NewRecorder()
+		server.Handler().ServeHTTP(record, request)
+		if record.Code != http.StatusOK {
+			t.Fatalf("status = %d for %s: %s", record.Code, payload, record.Body.String())
+		}
+		art, resolved := adapter.last.CustomArt[model.CustomArtKey("minecraft:paper", 1134)]
+		if !resolved {
+			t.Fatalf("the renderer was not handed the custom art for %s", payload)
+		}
+		if art.Model == nil || art.Model["parent"] != "minecraft:item/generated" {
+			t.Fatalf("model = %+v, want the generated parent", art.Model)
+		}
+		if !strings.HasPrefix(art.Textures["fishing_pack:item/starfish"], "data:image/png;base64,") {
+			t.Fatalf("textures = %+v, want an inlined PNG", art.Textures)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/render", strings.NewReader(`{"version":"1.21.11","type":"item","output":"base64","data":{"id":"minecraft:paper","customData":999999}}`))
+	request.Header.Set("Content-Type", "application/json")
+	record := httptest.NewRecorder()
+	server.Handler().ServeHTTP(record, request)
+	if record.Code != http.StatusOK {
+		t.Fatalf("an unknown customData must still render: %d %s", record.Code, record.Body.String())
+	}
+	if len(adapter.last.CustomArt) != 0 {
+		t.Fatalf("an unknown customData was resolved: %+v", adapter.last.CustomArt)
+	}
+}
+
+// The prefilled examples have to keep demonstrating the font and the magnification this service is
+// able to do, so they are asserted to carry Chinese and a scale option.
+func TestPrefilledExamplesShowChineseAndMagnification(t *testing.T) {
+	examples := renderExamplesFromDocument(t)
+	tooltipPayload := string(examples[model.TypeTooltip].Value)
+	if !strings.ContainsAny(tooltipPayload, "中文深海剑字形点阵") {
+		t.Fatalf("the tooltip example does not demonstrate Chinese: %s", tooltipPayload)
+	}
+	if !strings.Contains(tooltipPayload, `"scale"`) {
+		t.Fatalf("the tooltip example does not demonstrate magnification: %s", tooltipPayload)
+	}
+	if !strings.Contains(string(examples[model.TypeItem].Value), `"scale"`) {
+		t.Fatalf("the item example does not demonstrate magnification: %s", examples[model.TypeItem].Value)
+	}
+}
+
+// writeCustomPack installs one fishing pack and its index into the configured contents directory.
+func writeCustomPack(t *testing.T, cfg config.Config) {
+	t.Helper()
+	files := map[string]string{
+		"fishing_pack/configs/fishing.yml": `info:
+  namespace: fishing_pack
+items:
+  starfish:
+    resource:
+      material: PAPER
+      generate: false
+      model_path: item/starfish
+`,
+		"fishing_pack/resourcepack/fishing_pack/models/item/starfish.json": `{"parent":"minecraft:item/generated","textures":{"layer0":"fishing_pack:item/starfish"}}`,
+		"items_ids_cache.yml": "PAPER:\n  fishing_pack:starfish: 1134\n",
+	}
+	for name, content := range files {
+		path := filepath.Join(cfg.CustomContentsDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	texture := filepath.Join(cfg.CustomContentsDir, "fishing_pack/resourcepack/fishing_pack/textures/item/starfish.png")
+	if err := os.MkdirAll(filepath.Dir(texture), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sheet := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			sheet.Set(x, y, color.RGBA{R: 255, A: 255})
+		}
+	}
+	file, err := os.Create(texture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := png.Encode(file, sheet); err != nil {
+		t.Fatal(err)
 	}
 }
