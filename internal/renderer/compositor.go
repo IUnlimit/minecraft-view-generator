@@ -34,61 +34,159 @@ func (c *Compositor) Render(ctx context.Context, request model.Request, data any
 	if c.Adapter == nil {
 		return nil, fmt.Errorf("renderer adapter is not configured")
 	}
-	var (
-		rendered image.Image
-		err      error
-	)
 	switch request.Type {
 	case model.TypeItem:
-		rendered, err = c.renderItem(ctx, request.Options, data.(*model.Item), resource)
+		return c.renderItem(ctx, request.Options, data.(*model.Item), resource)
 	case model.TypeTooltip:
-		rendered, err = c.renderTooltip(ctx, request.Options, data.(*model.TooltipData), resource)
+		return c.renderTooltip(ctx, request.Options, data.(*model.TooltipData), resource)
 	case model.TypeInventory, model.TypeItemContainer, model.TypeEnderchest:
-		rendered, err = c.renderContainer(ctx, request.Type, request.Options, data.(*model.ContainerData), resource)
+		return c.renderContainer(ctx, request.Type, request.Options, data.(*model.ContainerData), resource)
 	case model.TypeSkin:
-		rendered, err = c.renderSkin(ctx, request.Options, data.(*model.SkinData), resource)
+		return c.renderSkin(ctx, request.Options, data.(*model.SkinData), resource)
 	case model.TypePlayerInventory:
-		rendered, err = c.renderPlayerInventory(ctx, request.Options, data.(*model.PlayerInventoryData), resource)
+		return c.renderPlayerInventory(ctx, request.Options, data.(*model.PlayerInventoryData), resource)
 	case model.TypePlayerList:
-		rendered, err = c.renderPlayerList(ctx, request.Options, data.(*model.PlayerListData), resource)
+		return c.renderPlayerList(ctx, request.Options, data.(*model.PlayerListData), resource)
 	case model.TypeMap:
-		rendered, err = c.renderMap(ctx, request.Options, data.(*model.MapData), resource)
+		return c.renderMap(ctx, request.Options, data.(*model.MapData), resource)
 	case model.TypeAchievement:
-		rendered, err = c.renderAchievement(ctx, request.Options, data.(*model.AchievementData), resource)
+		return c.renderAchievement(ctx, request.Options, data.(*model.AchievementData), resource)
 	default:
 		return nil, fmt.Errorf("unsupported render type %q", request.Type)
 	}
-	if err != nil {
-		return nil, err
-	}
-	return c.magnify(rendered, request.Options.Scale)
 }
 
 // itemCanvasSize is the natural icon size: the item pipeline draws a 0..16 model box into a square
 // canvas, so the default icon is square.
 const itemCanvasSize = 128
 
+// targetFor resolves the target of one render type: the layout canvas in vanilla screen units, and
+// the whole magnification a renderer can rasterise at. A zero axis follows the content, which is what
+// the tooltip and the tab list do.
+//
+// Two multipliers feed the magnification. A canvas that is an exact multiple of the natural one is
+// the same layout at a higher resolution, so the vanilla coordinates are kept and only the pixel
+// scale grows; and options.scale is folded in on top of it. Both must be whole numbers: only then
+// does one layout pixel map onto whole device pixels.
+func targetFor(naturalWidth, naturalHeight int, options model.Options) Target {
+	width, height := resolveCanvasSize(naturalWidth, naturalHeight, options)
+	factor := exactMultiple(naturalWidth, naturalHeight, width, height)
+	scale := integerRatio(options.Scale.RatioFor(width, height))
+	if factor > 1 {
+		return Target{Width: naturalWidth, Height: naturalHeight, PixelScale: factor * scale}
+	}
+	return Target{Width: width, Height: height, PixelScale: scale}
+}
+
+// exactMultiple answers the factor by which a requested canvas multiplies the natural one, or one
+// when the two do not share a whole factor. An axis the renderer derives from its content never
+// matches, so only canvases of a fixed layout reach the native path this way.
+func exactMultiple(naturalWidth, naturalHeight, width, height int) int {
+	if naturalWidth <= 0 || naturalHeight <= 0 || width <= 0 || height <= 0 {
+		return 1
+	}
+	if width%naturalWidth != 0 || height%naturalHeight != 0 {
+		return 1
+	}
+	if factor := width / naturalWidth; factor >= 2 && factor == height/naturalHeight {
+		return factor
+	}
+	return 1
+}
+
+// integerRatio answers the whole magnification of a request, or one when it is fractional: a
+// fractional ratio has no whole number of device pixels per layout pixel, so it keeps the raster
+// magnify path, which is the only exact way to reach that size.
+func integerRatio(ratio float64) int {
+	scale := int(math.Round(ratio))
+	if scale < 2 || math.Abs(ratio-float64(scale)) > 1e-9 {
+		return 1
+	}
+	return scale
+}
+
+// target resolves the render target of one type.
+func (c *Compositor) target(naturalWidth, naturalHeight int, options model.Options) Target {
+	return targetFor(naturalWidth, naturalHeight, options)
+}
+
+// rasterises reports whether the adapter draws the magnification into its own raster. Only such a
+// backend can be asked for the device pixels of a hidden magnification.
+func (c *Compositor) rasterises() bool {
+	scaler, ok := c.Adapter.(nativeScaler)
+	return ok && scaler.NativeScale()
+}
+
+// handoff is the target the adapter is asked for: the layout canvas when the backend cannot rasterise
+// the magnification itself, which is every backend of fixed shape sizes.
+func (c *Compositor) handoff(target Target) Target {
+	if !target.Native() || c.rasterises() {
+		return target
+	}
+	return Target{Width: target.Width, Height: target.Height}
+}
+
+// finish applies the magnification the renderer could not rasterise itself. A backend that drew the
+// final resolution already is returned untouched; otherwise the layout picture is magnified to the
+// device pixels the target promised, and a fractional ratio keeps its own magnification because whole
+// device pixels per layout pixel do not exist for it.
+func (c *Compositor) finish(rendered image.Image, options model.Options, target Target) (image.Image, error) {
+	if target.Native() && c.rasterises() {
+		return rendered, nil
+	}
+	bounds := rendered.Bounds()
+	// A target scale below two means the compositor has to reach the size itself, and a ratio below
+	// one shrinks, so only a whole target magnification raises the factor.
+	factor := options.Scale.RatioFor(bounds.Dx(), bounds.Dy())
+	if scale := target.Scale(); scale > 1 {
+		factor = math.Max(factor, float64(scale))
+	}
+	return c.magnify(rendered, model.Scale{Ratio: factor})
+}
+
+// bound rejects a picture that would exceed the configured output limits before it is allocated.
+func (c *Compositor) bound(target Target) error {
+	width, height := target.PixelWidth(), target.PixelHeight()
+	if c.MaxWidth > 0 && width > c.MaxWidth || c.MaxHeight > 0 && height > c.MaxHeight {
+		return fmt.Errorf("%w: %dx%d", ErrImageTooLarge, width, height)
+	}
+	return nil
+}
+
 // renderItem draws one item icon. The icon itself is square, so a canvas that is not square pads it
 // on the given background.
 func (c *Compositor) renderItem(ctx context.Context, options model.Options, item *model.Item, resource resources.Context) (image.Image, error) {
-	width, height := resolveCanvasSize(itemCanvasSize, itemCanvasSize, options)
-	size := max(width, height)
-	icon, err := c.Adapter.RenderItem(ctx, resource, *item, size)
+	target := c.target(itemCanvasSize, itemCanvasSize, options)
+	if err := c.bound(target); err != nil {
+		return nil, err
+	}
+	// The icon is square, so the renderer paints the largest square that fits the canvas it is handed.
+	handed := c.handoff(target)
+	size := max(handed.Width, handed.Height)
+	icon, err := c.Adapter.RenderItem(ctx, resource, *item, Target{Width: size, Height: size, PixelScale: handed.Scale()})
 	if err != nil {
 		return nil, err
 	}
-	if width == size && height == size && options.Background == "" && options.Transparent {
-		return icon, nil
+	width, height := handed.PixelWidth(), handed.PixelHeight()
+	if handed.Width == size && handed.Height == size && options.Background == "" && options.Transparent {
+		return c.finish(icon, options, target)
 	}
 	canvas := newCanvas(width, height, options)
 	drawImage(canvas, icon, 0, 0, width, height)
-	return canvas, nil
+	return c.finish(canvas, options, target)
 }
 
 func (c *Compositor) renderTooltip(ctx context.Context, options model.Options, data *model.TooltipData, resource resources.Context) (image.Image, error) {
 	// A zero height lets the renderer derive the vanilla tooltip box from its content.
-	width, height := resolveCanvasSize(360, 0, options)
-	return c.Adapter.RenderTooltip(ctx, resource, *data, width, height)
+	target := c.target(360, 0, options)
+	if err := c.bound(target); err != nil {
+		return nil, err
+	}
+	rendered, err := c.Adapter.RenderTooltip(ctx, resource, *data, c.handoff(target))
+	if err != nil {
+		return nil, err
+	}
+	return c.finish(rendered, options, target)
 }
 
 func (c *Compositor) renderContainer(ctx context.Context, kind string, options model.Options, data *model.ContainerData, resource resources.Context) (image.Image, error) {
@@ -103,8 +201,15 @@ func (c *Compositor) renderContainer(ctx context.Context, kind string, options m
 		return nil, fmt.Errorf("%s grid exceeds 18x12", kind)
 	}
 	naturalWidth, naturalHeight := containerCanvasSize(kind, data, rows)
-	width, height := resolveCanvasSize(naturalWidth, naturalHeight, options)
-	return c.Adapter.RenderContainer(ctx, resource, kind, *data, width, height)
+	target := c.target(naturalWidth, naturalHeight, options)
+	if err := c.bound(target); err != nil {
+		return nil, err
+	}
+	rendered, err := c.Adapter.RenderContainer(ctx, resource, kind, *data, c.handoff(target))
+	if err != nil {
+		return nil, err
+	}
+	return c.finish(rendered, options, target)
 }
 
 // containerCanvasSize returns the native size of the vanilla screen that owns the container
@@ -132,31 +237,66 @@ func containerCanvasSize(kind string, data *model.ContainerData, rows int) (int,
 }
 
 func (c *Compositor) renderSkin(ctx context.Context, options model.Options, data *model.SkinData, resource resources.Context) (image.Image, error) {
-	width, height := resolveCanvasSize(256, 384, options)
-	return c.Adapter.RenderPlayer(ctx, resource, *data, Equipment{}, width, height)
+	target := c.target(256, 384, options)
+	if err := c.bound(target); err != nil {
+		return nil, err
+	}
+	rendered, err := c.Adapter.RenderPlayer(ctx, resource, *data, Equipment{}, c.handoff(target))
+	if err != nil {
+		return nil, err
+	}
+	return c.finish(rendered, options, target)
 }
 
 func (c *Compositor) renderPlayerInventory(ctx context.Context, options model.Options, data *model.PlayerInventoryData, resource resources.Context) (image.Image, error) {
 	// The vanilla InventoryScreen is 176x166 and is rendered one to one by default.
-	width, height := resolveCanvasSize(176, 166, options)
-	return c.Adapter.RenderPlayerInventory(ctx, resource, *data, width, height)
+	target := c.target(176, 166, options)
+	if err := c.bound(target); err != nil {
+		return nil, err
+	}
+	rendered, err := c.Adapter.RenderPlayerInventory(ctx, resource, *data, c.handoff(target))
+	if err != nil {
+		return nil, err
+	}
+	return c.finish(rendered, options, target)
 }
 
 func (c *Compositor) renderPlayerList(ctx context.Context, options model.Options, data *model.PlayerListData, resource resources.Context) (image.Image, error) {
 	// The height of the tab list follows its rows, so only the width has a natural value.
-	width, height := resolveCanvasSize(max(360, data.Columns*190), 0, options)
-	return c.Adapter.RenderPlayerList(ctx, resource, *data, width, height)
+	target := c.target(max(360, data.Columns*190), 0, options)
+	if err := c.bound(target); err != nil {
+		return nil, err
+	}
+	rendered, err := c.Adapter.RenderPlayerList(ctx, resource, *data, c.handoff(target))
+	if err != nil {
+		return nil, err
+	}
+	return c.finish(rendered, options, target)
 }
 
 func (c *Compositor) renderMap(ctx context.Context, options model.Options, data *model.MapData, resource resources.Context) (image.Image, error) {
 	// 140 keeps the 128 pixel map grid at a one to one scale inside the parchment border.
-	width, height := resolveCanvasSize(140, 140, options)
-	return c.Adapter.RenderMap(ctx, resource, *data, width, height)
+	target := c.target(140, 140, options)
+	if err := c.bound(target); err != nil {
+		return nil, err
+	}
+	rendered, err := c.Adapter.RenderMap(ctx, resource, *data, c.handoff(target))
+	if err != nil {
+		return nil, err
+	}
+	return c.finish(rendered, options, target)
 }
 
 func (c *Compositor) renderAchievement(ctx context.Context, options model.Options, data *model.AchievementData, resource resources.Context) (image.Image, error) {
-	width, height := resolveCanvasSize(480, 96, options)
-	return c.Adapter.RenderAchievement(ctx, resource, *data, width, height)
+	target := c.target(480, 96, options)
+	if err := c.bound(target); err != nil {
+		return nil, err
+	}
+	rendered, err := c.Adapter.RenderAchievement(ctx, resource, *data, c.handoff(target))
+	if err != nil {
+		return nil, err
+	}
+	return c.finish(rendered, options, target)
 }
 
 // resolveCanvasSize turns the natural canvas of a render type into the size of the picture. An

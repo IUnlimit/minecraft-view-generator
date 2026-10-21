@@ -17,7 +17,7 @@ func TestPrimitiveRenderMapScalesEverySourcePixel(t *testing.T) {
 	for index := range pixels {
 		pixels[index] = 1 + index%255
 	}
-	result, err := (PrimitiveAdapter{}).RenderMap(context.Background(), resources.Context{}, model.MapData{Pixels: pixels}, 256, 256)
+	result, err := (PrimitiveAdapter{}).RenderMap(context.Background(), resources.Context{}, model.MapData{Pixels: pixels}, Target{Width: 256, Height: 256})
 	if err != nil {
 		t.Fatal(err)
 	}

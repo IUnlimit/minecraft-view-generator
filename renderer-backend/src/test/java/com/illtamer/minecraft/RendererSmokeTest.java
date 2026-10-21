@@ -1,6 +1,7 @@
 package com.illtamer.minecraft;
 
 import javax.imageio.ImageIO;
+import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,6 +27,7 @@ public final class RendererSmokeTest {
         testPlayerList(renderer, root);
         testContainers(renderer, root);
         testPlayerInventory(renderer, root);
+        testNativePixelScale(renderer, root);
         testAchievement(renderer, root);
         testTooltip(renderer, root);
         testHeldItems(renderer, root);
@@ -38,7 +40,7 @@ public final class RendererSmokeTest {
         testSpecialItemList(renderer, root);
         testCustomArt(renderer, root);
         testMissingResources(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/achievement/tooltip/hand/text/special/custom/resources paths passed");
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/resources paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -369,6 +371,111 @@ public final class RendererSmokeTest {
             require(Math.abs(previewBounds[index] - bounds[index]) <= 1,
                     "held item changed the vanilla preview bounds: " + java.util.Arrays.toString(previewBounds));
         }
+    }
+
+    /**
+     * A whole render scale draws the same layout at the final resolution instead of magnifying the
+     * native picture. The panel sprites keep being one texel per render scale pixels, while the
+     * preview model and the labels are rasterised again at that resolution — which is what stops a
+     * magnified skin from turning into a blocky upscale of the 176x166 render.
+     */
+    private static void testNativePixelScale(Renderer renderer, Path root) throws Exception {
+        Map<String, Object> plain = new LinkedHashMap<>();
+        plain.put("operation", "player_inventory");
+        plain.put("resourceRoot", root.toString());
+        plain.put("playerInventory", Map.of("skin", Map.of("texture", PlayerSkinFixture.png64()), "title", "\u4E2D\u6587"));
+        BufferedImage one = renderer.render(plain);
+        require(one.getWidth() == 176 && one.getHeight() == 166, "native player inventory dimensions");
+
+        Map<String, Object> quadrupled = new LinkedHashMap<>(plain);
+        quadrupled.put("pixelScale", 4);
+        BufferedImage four = renderer.render(quadrupled);
+        require(four.getWidth() == 704 && four.getHeight() == 664,
+                "quadrupled player inventory is " + four.getWidth() + "x" + four.getHeight());
+
+        // A panel window no sprite of the screen decorates: every device pixel must be the texel of
+        // the native render it covers, which is both the block test and the no-seam test.
+        for (int y = 600; y < 664; y++) {
+            for (int x = 560; x < 704; x++) {
+                int want = one.getRGB(x / 4, y / 4);
+                if (four.getRGB(x, y) != want) {
+                    throw new AssertionError("panel texel at " + x + "," + y + " is not the scaled native one");
+                }
+            }
+        }
+
+        // The preview model and the label, on the other hand, must not be the magnified native
+        // pixels: they carry detail the 176x166 render does not have.
+        int detail = previewDifference(one, four, 4);
+        require(detail > 500, "the preview model was not rasterised at the render scale: " + detail + " pixels changed");
+
+        int[] oneBounds = modelBounds(one);
+        int[] fourBounds = modelBounds(four);
+        require(oneBounds != null && fourBounds != null, "the preview model is missing");
+        for (int index = 0; index < 4; index++) {
+            require(Math.abs(fourBounds[index] - oneBounds[index] * 4) <= 4,
+                    "the preview model is not at the render scale: " + java.util.Arrays.toString(fourBounds)
+                            + " against " + java.util.Arrays.toString(oneBounds));
+        }
+
+        // Chinese ink is texel exact at twice the size, so the title of a scaled container carries
+        // whole pixels of the label colour where the native render only had partly covered ones.
+        Map<String, Object> container = new LinkedHashMap<>();
+        container.put("operation", "inventory");
+        container.put("resourceRoot", root.toString());
+        container.put("container", Map.of("title", "\u4E2D\u6587\u6D4B\u8BD5", "rows", 3, "slots", List.of()));
+        // Text is laid out in layout coordinates and only scaled by the canvas transform, so a
+        // magnified label keeps its advance: the ink of the same glyphs must sit exactly twice as far
+        // apart instead of growing inside its own cell and overlapping the next one.
+        Map<String, Object> text = new LinkedHashMap<>();
+        text.put("operation", "tooltip");
+        text.put("resourceRoot", root.toString());
+        text.put("tooltip", Map.of("title", "Scale Test"));
+        BufferedImage textOne = renderer.render(text);
+        int[] textInkOne = exactBounds(textOne, 0xFFFFFF);
+        Map<String, Object> doubledText = new LinkedHashMap<>(text);
+        doubledText.put("pixelScale", 2);
+        BufferedImage textTwo = renderer.render(doubledText);
+        int[] textInkTwo = exactBounds(textTwo, 0xFFFFFF);
+        for (int index = 0; index < 4; index++) {
+            int want = textInkOne[index] * 2;
+            require(Math.abs(textInkTwo[index] - want) <= 2,
+                    "the doubled label ink moved to " + java.util.Arrays.toString(textInkTwo)
+                            + ", want twice " + java.util.Arrays.toString(textInkOne));
+        }
+
+        // Four full width Chinese cells advance 36 px, so the doubled title starts on column 18 and
+        // must stay inside its own 72 px: a glyph drawn twice as large as its cell spills past it.
+        Map<String, Object> doubledTitle = new LinkedHashMap<>(container);
+        doubledTitle.put("pixelScale", 2);
+        int[] doubledLabel = exactBounds(renderer.render(doubledTitle), LABEL_RGB);
+        require(doubledLabel[0] == 18, "the doubled container title left its column: " + doubledLabel[0]);
+        require(doubledLabel[2] <= 18 + 72, "the doubled container title overlaps its own cells: " + doubledLabel[2]);
+        require(doubledLabel[3] - doubledLabel[1] + 1 <= 16,
+                "the doubled container title is taller than its eight pixel font cell: "
+                        + (doubledLabel[3] - doubledLabel[1] + 1));
+        int nativeInk = countExact(renderer.render(container), LABEL_RGB);
+        Map<String, Object> doubledContainer = new LinkedHashMap<>(container);
+        doubledContainer.put("pixelScale", 2);
+        int scaledInk = countExact(renderer.render(doubledContainer), LABEL_RGB);
+        require(scaledInk > 4 * Math.max(1, nativeInk),
+                "the doubled container title is not texel exact: " + scaledInk + " solid pixels against " + nativeInk);
+    }
+
+    /**
+     * Counts the pixels of the preview viewport that differ between a native render and a render at
+     * {@code scale}, which is how foreign detail is told apart from a magnified native picture.
+     */
+    private static int previewDifference(BufferedImage one, BufferedImage scaled, int scale) {
+        int difference = 0;
+        for (int y = PREVIEW_TOP * scale; y < Math.min(scaled.getHeight(), PREVIEW_BOTTOM * scale); y++) {
+            for (int x = PREVIEW_LEFT * scale; x < Math.min(scaled.getWidth(), PREVIEW_RIGHT * scale); x++) {
+                if (scaled.getRGB(x, y) != one.getRGB(x / scale, y / scale)) {
+                    difference++;
+                }
+            }
+        }
+        return difference;
     }
 
     private static void testAchievement(Renderer renderer, Path root) throws Exception {
@@ -935,6 +1042,35 @@ public final class RendererSmokeTest {
                     "coverage of the middle stroke of U+4E2D is not the texel share");
         }
         require(zhong.coverage(0, 0) == 0, "the empty corner of U+4E2D carries ink");
+
+        // Drawn at twice the size one texel lands on one pixel, so the glyph is the sixteen texel
+        // Unifont bitmap itself: no intermediate greys, and exactly one opaque pixel per lit texel.
+        // Magnifying the eight pixel average instead is what made Chinese at twice the size blurred.
+        BufferedImage doubled = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D doubledGraphics = doubled.createGraphics();
+        zhong.draw(doubledGraphics, 0, 0, 2, 2, 0xFFFFFF, false);
+        doubledGraphics.dispose();
+        int opaque = 0;
+        int grey = 0;
+        for (int row = 0; row < 32; row++) {
+            for (int column = 0; column < 32; column++) {
+                int alpha = doubled.getRGB(column, row) >>> 24;
+                if (alpha == 255) {
+                    opaque++;
+                } else if (alpha != 0) {
+                    grey++;
+                }
+            }
+        }
+        require(grey == 0, "the doubled Chinese glyph keeps " + grey + " partly transparent pixels");
+        int quarters = 0;
+        for (int row = 0; row < zhong.height(); row++) {
+            for (int column = 0; column < zhong.width(); column++) {
+                quarters += zhong.coverage(column, row);
+            }
+        }
+        require(opaque == quarters,
+                "the doubled glyph carries " + opaque + " pixels of ink but " + quarters + " texels");
 
         // Latin still comes from ascii.png and an accented glyph keeps the taller accented cell, so
         // the sheet a code point belongs to is decided by the provider chain and not by its range.

@@ -2,6 +2,7 @@ package com.illtamer.minecraft;
 
 import java.awt.Color;
 import java.awt.Graphics2D;
+import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -534,7 +535,15 @@ final class MinecraftFont {
                     }
                 }
             }
-            return new Glyph(texels / 2 + 1, ASCENT, width, CELL, coverage);
+            // The texel grid is kept alongside the averaged cell: a half scale glyph loses half its
+            // resolution when it is flattened to eight pixels, and magnifying that average is what
+            // turned Chinese at twice the size into blocks of grey. The rows below hold the same
+            // window, left aligned, so a device pixel can be covered by exactly one texel.
+            int[] grid = new int[16];
+            for (int row = 0; row < 16; row++) {
+                grid[row] = bitmap[row] << left;
+            }
+            return new Glyph(texels / 2 + 1, ASCENT, width, CELL, coverage, grid, texels, 2);
         }
 
         private int[] overrideOf(int codePoint) {
@@ -564,13 +573,30 @@ final class MinecraftFont {
          * transparent — the soft edge the game has at GUI scale one.
          */
         private final byte[] coverage;
+        /**
+         * The native texel rows of the glyph, or null when the provider paints whole pixels. A
+         * {@code unihex} glyph is two texels per font pixel, so drawing it at twice the size can
+         * reach the sixteen texel bitmap instead of magnifying the eight pixel average.
+         */
+        private final int[] texels;
+        /** How many texels {@link #texels} describes, left aligned at bit 31. */
+        private final int texelColumns;
+        /** Texels per font pixel: 2 for a {@code unihex} bitmap, 0 when there is no texel grid. */
+        private final int texelScale;
 
         Glyph(int advance, int ascent, int width, int height, byte[] coverage) {
+            this(advance, ascent, width, height, coverage, null, 0, 0);
+        }
+
+        Glyph(int advance, int ascent, int width, int height, byte[] coverage, int[] texels, int texelColumns, int texelScale) {
             this.advance = advance;
             this.ascent = ascent;
             this.width = width;
             this.height = height;
             this.coverage = coverage;
+            this.texels = texels;
+            this.texelColumns = texelColumns;
+            this.texelScale = texelScale;
         }
 
         /** The hollow five by seven box the client draws for a code point no provider covers. */
@@ -617,12 +643,33 @@ final class MinecraftFont {
         }
 
         /**
-         * Paints the glyph with its top edge at {@code top} and its left bearing at {@code x}. An
-         * italic glyph is sheared a quarter pixel per pixel of height, the slope the client uses, and
-         * a run of pixels sharing one coverage level becomes one rectangle, so a magnified glyph keeps
-         * its edges while a partly covered pixel is composited with a matching alpha.
+         * Paints the glyph with its top edge at {@code top} and its left bearing at {@code x}, both
+         * in the layout space the caller draws in.
+         *
+         * <p>{@code layoutScale} is how many layout units one font pixel occupies — the text scale of
+         * the surface, one for a tooltip label and two for the tab list. The caller's Graphics2D
+         * already carries the render scale, so nothing here multiplies by it.</p>
+         *
+         * <p>{@code deviceScale} is how many device pixels one font pixel ends up covering, which is
+         * only what a texel grid is resampled at: at twice the size one texel lands on one device
+         * pixel, so a Chinese character is the Unifont bitmap itself instead of the eight pixel
+         * average magnified. Everything else keeps the coverage path, the half scale look the client
+         * has at GUI scale one.</p>
          */
-        void draw(Graphics2D graphics, int x, int top, int scale, int rgb, boolean italic) {
+        void draw(Graphics2D graphics, int x, int top, int layoutScale, int deviceScale, int rgb, boolean italic) {
+            if (texels != null && deviceScale >= texelScale) {
+                drawTexels(graphics, x, top, layoutScale, deviceScale, rgb, italic);
+            } else {
+                drawCoverage(graphics, x, top, layoutScale, rgb, italic);
+            }
+        }
+
+        /**
+         * The half scale look: one averaged pixel per font pixel, run length merged, an italic glyph
+         * sheared a quarter pixel per pixel of height and a partly covered pixel composited with a
+         * matching alpha.
+         */
+        private void drawCoverage(Graphics2D graphics, int x, int top, int scale, int rgb, boolean italic) {
             Color[] palette = new Color[5];
             for (int level = 1; level <= 4; level++) {
                 palette[level] = new Color(rgb & 0xFFFFFF | level * 255 / 4 << 24, true);
@@ -642,6 +689,81 @@ final class MinecraftFont {
                     }
                     graphics.setColor(palette[level]);
                     graphics.fillRect(x + column * scale + shear, top + row * scale, (run - column) * scale, scale);
+                    column = run;
+                }
+            }
+        }
+
+        /**
+         * Resamples the texel grid at the drawn resolution: every device pixel answers the share of
+         * its own area that lit texels cover. At {@code deviceScale == texelScale} each texel lands on
+         * exactly one pixel, so the glyph is the bitmap the font ships; at a scale between two texel
+         * multiples the edge is averaged once, at the resolution it is drawn at, instead of
+         * magnifying the average taken at half scale.
+         *
+         * <p>A device pixel can be smaller than one layout unit, so the rows are painted as
+         * fractional rectangles: their edges land exactly on device pixel boundaries and the caller's
+         * transform turns them back into whole device pixels.</p>
+         */
+        private void drawTexels(Graphics2D graphics, int x, int top, int layoutScale, int deviceScale, int rgb, boolean italic) {
+            int deviceWidth = width * deviceScale;
+            int deviceHeight = height * deviceScale;
+            double span = (double) texelScale / deviceScale;
+            double step = (double) layoutScale / deviceScale;
+            double area = span * span;
+            double[] ink = new double[deviceWidth];
+            int[] alphas = new int[deviceWidth];
+            Color[] palette = new Color[256];
+            for (int row = 0; row < deviceHeight; row++) {
+                double rowLow = row * span;
+                double rowHigh = rowLow + span;
+                java.util.Arrays.fill(ink, 0);
+                int firstRow = Math.max(0, (int) Math.floor(rowLow));
+                int lastRow = Math.min(texels.length, (int) Math.ceil(rowHigh));
+                for (int texelRow = firstRow; texelRow < lastRow; texelRow++) {
+                    double rowWeight = Math.min(rowHigh, texelRow + 1) - Math.max(rowLow, texelRow);
+                    if (rowWeight <= 0) {
+                        continue;
+                    }
+                    int bits = texels[texelRow];
+                    for (int column = 0; column < deviceWidth; column++) {
+                        double columnLow = column * span;
+                        double columnHigh = columnLow + span;
+                        double lit = 0;
+                        int firstColumn = Math.max(0, (int) Math.floor(columnLow));
+                        int lastColumn = Math.min(texelColumns, (int) Math.ceil(columnHigh));
+                        for (int texelColumn = firstColumn; texelColumn < lastColumn; texelColumn++) {
+                            double columnWeight = Math.min(columnHigh, texelColumn + 1) - Math.max(columnLow, texelColumn);
+                            if (columnWeight > 0 && (bits >>> (31 - texelColumn) & 1) != 0) {
+                                lit += columnWeight;
+                            }
+                        }
+                        if (lit > 0) {
+                            ink[column] += lit * rowWeight;
+                        }
+                    }
+                }
+                for (int column = 0; column < deviceWidth; column++) {
+                    alphas[column] = ink[column] <= 0 ? 0 : (int) Math.min(255, Math.round(ink[column] / area * 255));
+                }
+                double shear = italic ? Math.round((ascent * deviceScale - row) * 0.25F) * step : 0;
+                int column = 0;
+                while (column < deviceWidth) {
+                    int alpha = alphas[column];
+                    if (alpha == 0) {
+                        column++;
+                        continue;
+                    }
+                    int run = column + 1;
+                    while (run < deviceWidth && alphas[run] == alpha) {
+                        run++;
+                    }
+                    if (palette[alpha] == null) {
+                        palette[alpha] = new Color(rgb & 0xFFFFFF | alpha << 24, true);
+                    }
+                    graphics.setColor(palette[alpha]);
+                    graphics.fill(new Rectangle2D.Double(x + column * step + shear, top + row * step,
+                            (run - column) * step, step));
                     column = run;
                 }
             }

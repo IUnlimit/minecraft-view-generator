@@ -47,6 +47,16 @@ final class Renderer {
     private final Map<String, Model> inlineModels = new HashMap<>();
     private MinecraftFont font;
     private ResourceStack resources;
+    /**
+     * How many device pixels one layout pixel occupies.
+     *
+     * <p>Every coordinate in this renderer is written in the layout space of the vanilla screen,
+     * where one unit is one pixel at GUI scale one. Only {@link #canvas}, {@link #graphics} and
+     * {@link #device} know about the scale, which is what lets a magnified picture be rasterised at
+     * its final resolution — a bigger glyph, a bigger item icon, a bigger 3D model — instead of
+     * drawing the native picture and blowing it up afterwards.</p>
+     */
+    private int pixelScale = 1;
 
     BufferedImage render(Map<String, Object> request) throws IOException {
         String operation = Json.string(request, "operation", "");
@@ -55,6 +65,10 @@ final class Renderer {
             throw new IOException("resource context is not ready");
         }
         this.resources = ResourceStack.from(request, resourceRoot);
+        this.pixelScale = Json.integer(request, "pixelScale", 1);
+        if (pixelScale < 1 || pixelScale > 16) {
+            throw new IOException("pixelScale must be between 1 and 16");
+        }
         applyCustomArt(request);
         return switch (operation) {
             case "item" -> renderItem(Json.object(request.get("item"), "item"), Json.integer(request, "width", 128));
@@ -72,6 +86,38 @@ final class Renderer {
     }
 
     /**
+     * Allocates a canvas of the layout size at the render scale. Every buffer that is drawn in
+     * vanilla screen coordinates comes from here, so the scale never leaks into the layout.
+     */
+    private BufferedImage canvas(int layoutWidth, int layoutHeight) throws IOException {
+        int width = device(layoutWidth);
+        int height = device(layoutHeight);
+        if (width < 1 || height < 1 || width > 8192 || height > 8192) {
+            throw new IOException("canvas is outside limits after the render scale: " + width + "x" + height);
+        }
+        return new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+    }
+
+    /**
+     * The Graphics2D of a canvas. The render scale lives in this transform, so every draw call below
+     * keeps writing the vanilla screen coordinates it is laid out in while landing on the device
+     * pixels of the final picture.
+     */
+    private Graphics2D graphics(BufferedImage canvas) {
+        Graphics2D graphics = canvas.createGraphics();
+        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        if (pixelScale != 1) {
+            graphics.scale(pixelScale, pixelScale);
+        }
+        return graphics;
+    }
+
+    /** One layout extent — a coordinate, a width, a glyph size — in device pixels. */
+    private int device(int layout) {
+        return layout * pixelScale;
+    }
+
+    /**
      * Renders one item icon. Structural request problems — no id, an impossible size — stay hard
      * errors, while anything that only concerns the resource pack (a missing model, an unsupported
      * special model, a texture that is not there) degrades to the vanilla missing model so that one
@@ -81,13 +127,20 @@ final class Renderer {
         if (size < 16 || size > 4096) {
             throw new IOException("item render size must be between 16 and 4096");
         }
+        // An icon is drawn at the resolution it is delivered at: every drawable of the item pipeline
+        // scales with `size`, so handing it the device size costs nothing but is what keeps a
+        // magnified slot icon sharp.
+        int pixelSize = device(size);
+        if (pixelSize > 4096) {
+            throw new IOException("item render size is outside limits after the render scale");
+        }
         String id = normalizeID(Json.string(item, "id", ""));
         if (id.isBlank()) {
             throw new IOException("item.id is required");
         }
         BufferedImage result;
         try {
-            result = renderItemIcon(item, id, size);
+            result = renderItemIcon(item, id, pixelSize);
             if (Json.integer(item, "damage", 0) > 0 && Json.integer(item, "maxDamage", 0) > 0) {
                 drawDurability(result, Json.integer(item, "damage", 0), Json.integer(item, "maxDamage", 0));
             }
@@ -96,7 +149,7 @@ final class Renderer {
             }
         } catch (IOException | RuntimeException error) {
             System.err.println("item " + id + " fell back to the missing model: " + error);
-            result = renderMissingItemIcon(size);
+            result = renderMissingItemIcon(pixelSize);
         }
         return result;
     }
@@ -1228,7 +1281,7 @@ final class Renderer {
                 + (wrapped.size() == 1 ? -TOOLTIP_TITLE_GAP : 0);
         int canvasWidth = Math.max(left, contentWidth + left) + TOOLTIP_PADDING;
         int canvasHeight = requestedHeight > 0 ? requestedHeight : contentHeight + TOOLTIP_PADDING * 2;
-        BufferedImage canvas = new BufferedImage(canvasWidth, canvasHeight, BufferedImage.TYPE_INT_ARGB);
+        BufferedImage canvas = canvas(canvasWidth, canvasHeight);
         drawNineSlice(canvas, resources.texture(TOOLTIP_BACKGROUND_SPRITE),
                 nineSliceBorder(TOOLTIP_BACKGROUND_SPRITE, 9), 0, 0, canvasWidth, canvasHeight);
         if (advanced) {
@@ -1761,8 +1814,9 @@ final class Renderer {
      */
     private void drawStyledLine(BufferedImage destination, int x, int lineTop, List<TextRun> line, int scale, boolean shadow) throws IOException {
         MinecraftFont font = font();
-        Graphics2D graphics = destination.createGraphics();
+        Graphics2D graphics = graphics(destination);
         int baseline = lineTop + MinecraftFont.ASCENT * scale;
+        int glyphScale = scale * pixelScale;
         for (int pass = shadow ? 0 : 1; pass < 2; pass++) {
             int offset = pass == 0 ? scale : 0;
             int cursor = x;
@@ -1774,9 +1828,9 @@ final class Renderer {
                     MinecraftFont.Glyph glyph = font.glyph(codePoint);
                     int top = baseline - glyph.ascent() * scale;
                     int advance = glyph.advance() * scale;
-                    glyph.draw(graphics, cursor + offset, top + offset, scale, color, run.italic());
+                    glyph.draw(graphics, cursor + offset, top + offset, scale, glyphScale, color, run.italic());
                     if (run.bold()) {
-                        glyph.draw(graphics, cursor + offset + scale, top + offset, scale, color, run.italic());
+                        glyph.draw(graphics, cursor + offset + scale, top + offset, scale, glyphScale, color, run.italic());
                     }
                     if (pass == 1 && run.underline()) {
                         graphics.setColor(new Color(color & 0xFFFFFF));
@@ -1927,8 +1981,9 @@ final class Renderer {
     private void drawText(BufferedImage destination, int x, int y, String text, int color, int scale, boolean shadow) throws IOException {
         MinecraftFont font = font();
         int baseline = y + MinecraftFont.ASCENT * scale;
+        int glyphScale = scale * pixelScale;
         int shadowColor = shadowColor(color);
-        Graphics2D graphics = destination.createGraphics();
+        Graphics2D graphics = graphics(destination);
         int cursor = x;
         for (int position = 0; position < text.length(); ) {
             int codePoint = text.codePointAt(position);
@@ -1941,9 +1996,9 @@ final class Renderer {
             MinecraftFont.Glyph glyph = font.glyph(codePoint);
             int top = baseline - glyph.ascent() * scale;
             if (shadow) {
-                glyph.draw(graphics, cursor + scale, top + scale, scale, shadowColor, false);
+                glyph.draw(graphics, cursor + scale, top + scale, scale, glyphScale, shadowColor, false);
             }
-            glyph.draw(graphics, cursor, top, scale, color, false);
+            glyph.draw(graphics, cursor, top, scale, glyphScale, color, false);
             cursor += glyph.advance() * scale;
         }
         graphics.dispose();
@@ -1982,8 +2037,7 @@ final class Renderer {
         int innerSourceHeight = sourceHeight - top - bottom;
         int innerWidth = Math.max(0, width - left - right);
         int innerHeight = Math.max(0, height - top - bottom);
-        Graphics2D graphics = destination.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        Graphics2D graphics = graphics(destination);
         drawPatch(graphics, source, x, y, left, top, 0, 0, left, top);
         drawPatch(graphics, source, x + width - right, y, right, top, sourceWidth - right, 0, sourceWidth, top);
         drawPatch(graphics, source, x, y + height - bottom, left, bottom, 0, sourceHeight - bottom, left, sourceHeight);
@@ -2015,9 +2069,8 @@ final class Renderer {
         }
         ContainerLayout layout = containerLayout(kind, Json.integer(container, "rows", 3));
         BufferedImage panel = resources.texture(layout.texture());
-        BufferedImage canvas = new BufferedImage(layout.width(), layout.height(), BufferedImage.TYPE_INT_ARGB);
-        Graphics2D graphics = canvas.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        BufferedImage canvas = canvas(layout.width(), layout.height());
+        Graphics2D graphics = graphics(canvas);
         if (layout.rows() > 0) {
             // ContainerScreen#renderBg: the slot band grows with the row count while the 96 px player
             // band below it is always the same slice of generic_54.
@@ -2143,15 +2196,22 @@ final class Renderer {
                 : new int[]{x + (index - 27) * 18, y + PLAYER_INVENTORY_STRIDE};
     }
 
-    /** Returns the native canvas, or the requested size with an exact nearest neighbour scale. */
+    /**
+     * Returns the native canvas, or the requested size with an exact nearest neighbour scale. The
+     * requested size is a layout size, so both buffers end up at the render scale: a caller that asks
+     * for a bigger canvas gets the same layout with more device pixels, not a stretched layout.
+     */
     private BufferedImage resize(BufferedImage canvas, int requestedWidth, int requestedHeight) {
-        int width = requestedWidth > 0 ? requestedWidth : canvas.getWidth();
-        int height = requestedHeight > 0 ? requestedHeight : canvas.getHeight();
+        int width = requestedWidth > 0 ? device(requestedWidth) : canvas.getWidth();
+        int height = requestedHeight > 0 ? device(requestedHeight) : canvas.getHeight();
         if (width == canvas.getWidth() && height == canvas.getHeight()) {
             return canvas;
         }
         BufferedImage output = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        drawScaled(output, canvas, 0, 0, width, height);
+        Graphics2D graphics = output.createGraphics();
+        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        graphics.drawImage(canvas, 0, 0, width, height, null);
+        graphics.dispose();
         return output;
     }
 
@@ -2170,7 +2230,7 @@ final class Renderer {
             throw new IOException("achievement.icon.id is required");
         }
         boolean completed = Json.bool(achievement, "completed", false);
-        BufferedImage nativeCanvas = new BufferedImage(160, 32, BufferedImage.TYPE_INT_ARGB);
+        BufferedImage nativeCanvas = canvas(160, 32);
         BufferedImage background = resources.texture("minecraft:gui/sprites/toast/advancement");
         drawScaled(nativeCanvas, background, 0, 0, 160, 32);
         BufferedImage iconImage = renderItem(icon, 24);
@@ -2190,7 +2250,7 @@ final class Renderer {
         }
         int outputWidth = requestedWidth > 0 ? requestedWidth : 480;
         int outputHeight = requestedHeight > 0 ? requestedHeight : 96;
-        BufferedImage output = new BufferedImage(outputWidth, outputHeight, BufferedImage.TYPE_INT_ARGB);
+        BufferedImage output = canvas(outputWidth, outputHeight);
         drawScaled(output, nativeCanvas, 0, 0, outputWidth, outputHeight);
         return output;
     }
@@ -2203,9 +2263,8 @@ final class Renderer {
         if (width < 16 || height < 16) {
             throw new IOException("map dimensions are outside limits");
         }
-        BufferedImage canvas = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D graphics = canvas.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        BufferedImage canvas = canvas(width, height);
+        Graphics2D graphics = graphics(canvas);
         // The vanilla map image is the parchment background with the 128x128 pixel grid inset by
         // the border width of the background texture (1 / 23.3333 of the image).
         graphics.drawImage(resources.texture("minecraft:map/map_background"), 0, 0, width, height, null);
@@ -2270,8 +2329,7 @@ final class Renderer {
         int size = Math.max(4, (int) Math.round(mapSize * 96.0 / 1120.0));
         double centerX = insetX + (x + 0.5) * contentWidth / 128.0;
         double centerY = insetY + (z + 0.5) * contentHeight / 128.0;
-        Graphics2D graphics = canvas.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        Graphics2D graphics = graphics(canvas);
         AffineTransform original = graphics.getTransform();
         graphics.translate(centerX, centerY);
         graphics.rotate(Math.toRadians(rotation * 22.5));
@@ -2383,10 +2441,10 @@ final class Renderer {
         int widestText = Math.max(widestLine(headerLines, unit), widestLine(footerLines, unit));
         int width = Math.max(Math.max(requestedWidth, panelWidth * columns), widestText + 4 * unit);
         int height = requestedHeight > 0 ? requestedHeight : panelHeight + headerHeight + footerHeight + 2 * unit;
-        BufferedImage canvas = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        BufferedImage canvas = canvas(width, height);
         int panelLeft = (width - panelWidth * columns) / 2;
         int panelTop = headerHeight + Math.max(unit, (height - headerHeight - footerHeight - panelHeight) / 2);
-        Graphics2D graphics = canvas.createGraphics();
+        Graphics2D graphics = graphics(canvas);
         graphics.setColor(new Color(0, 0, 0, 128));
         graphics.fillRect(panelLeft, panelTop, panelWidth * columns, panelHeight);
         graphics.dispose();
@@ -2446,8 +2504,7 @@ final class Renderer {
         Map<String, Object> skin = new LinkedHashMap<>();
         skin.put("texture", texture);
         BufferedImage image = skinTexture(skin);
-        Graphics2D graphics = destination.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        Graphics2D graphics = graphics(destination);
         drawCrop(graphics, image, x, y, size, size, 8, 8, 8, 8);
         drawCrop(graphics, image, x, y, size, size, 40, 8, 8, 8);
         graphics.dispose();
@@ -2479,9 +2536,8 @@ final class Renderer {
         equipment.put("offhand", inventory.get("offhand"));
         playerRequest.put("equipment", equipment);
 
-        BufferedImage canvas = new BufferedImage(INVENTORY_WIDTH, INVENTORY_HEIGHT, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D graphics = canvas.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        BufferedImage canvas = canvas(INVENTORY_WIDTH, INVENTORY_HEIGHT);
+        Graphics2D graphics = graphics(canvas);
         BufferedImage panel = resources.texture("minecraft:gui/container/inventory");
         drawPatch(graphics, panel, 0, 0, INVENTORY_WIDTH, INVENTORY_HEIGHT, 0, 0, INVENTORY_WIDTH, INVENTORY_HEIGHT);
         graphics.dispose();
@@ -2494,7 +2550,9 @@ final class Renderer {
         scene.offsetX = (INVENTORY_PREVIEW_LEFT + INVENTORY_PREVIEW_RIGHT) / 2.0;
         scene.offsetY = (INVENTORY_PREVIEW_TOP + INVENTORY_PREVIEW_BOTTOM) / 2.0
                 + (PLAYER_BOUNDING_BOX_HEIGHT / 2 + INVENTORY_PREVIEW_Y_OFFSET) * INVENTORY_PREVIEW_SCALE;
-        paintScene(canvas, quads, scene);
+        // The viewport is fixed in layout coordinates, so the model is rasterised at the render
+        // scale: a twice as large picture samples the skin at twice the resolution.
+        paintScene(canvas, quads, scene, pixelScale);
 
         String title = Json.string(inventory, "title", "");
         if (!title.isBlank()) {
@@ -2556,7 +2614,7 @@ final class Renderer {
             // renderItem already reports and degrades its own failures; this keeps a slot alive even
             // when the decoration or the canvas blit is what breaks.
             System.err.println("slot item fell back to the missing model: " + error);
-            drawScaled(destination, renderMissingItemIcon(16), x, y, 16, 16);
+            drawScaled(destination, renderMissingItemIcon(device(16)), x, y, 16, 16);
         }
     }
 
@@ -2835,7 +2893,13 @@ final class Renderer {
         return new double[]{from[0] - amount, from[1] - amount, from[2] - amount, to[0] + amount, to[1] + amount, to[2] + amount};
     }
 
-    private void paintScene(BufferedImage canvas, List<Quad> quads, Scene scene) {
+    /**
+     * Paints the quads of a scene. {@code pointScale} turns the projected layout coordinates into
+     * device pixels, which is what rasterises a 3D model at the resolution of the final picture: the
+     * loop below walks device pixels, so a magnified preview samples its skin at that resolution
+     * instead of magnifying the pixels sampled at the native one.
+     */
+    private void paintScene(BufferedImage canvas, List<Quad> quads, Scene scene, double pointScale) {
         // Deterministic software rasteriser: every quad is inverse-mapped to its texture
         // rectangle, so no Java2D clipping or transform rounding can leave seams in the model.
         List<Quad> ordered = new ArrayList<>(quads);
@@ -2859,7 +2923,8 @@ final class Renderer {
             }
             Point[] points = new Point[4];
             for (int index = 0; index < 4; index++) {
-                points[index] = scene.project(quad.corners[index]);
+                Point point = scene.project(quad.corners[index]);
+                points[index] = new Point(point.x * pointScale, point.y * pointScale);
             }
             double ux = (points[1].x - points[0].x) / du;
             double uy = (points[1].y - points[0].y) / du;
@@ -2950,12 +3015,14 @@ final class Renderer {
      * from the camera, which is what makes the icon match the slot render of the client.
      */
     private BufferedImage renderItemIcon(List<Quad> quads, int size) {
+        // `size` is already a device size: the item pipeline is the one place where the layout unit
+        // and the icon size are the same number, so the scene is projected straight into it.
         BufferedImage canvas = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
         Scene scene = new Scene(0, 0);
         scene.scale = size / 16.0;
         scene.offsetX = size / 2.0;
         scene.offsetY = size / 2.0;
-        paintScene(canvas, quads, scene);
+        paintScene(canvas, quads, scene, 1);
         return canvas;
     }
 
@@ -3547,10 +3614,12 @@ final class Renderer {
         if (width < 32 || height < 48 || width > 4096 || height > 4096) {
             throw new IOException("player render dimensions are outside limits");
         }
+        // The model is fitted to the layout canvas and then projected at the render scale, so a
+        // magnified skin is sampled at the resolution it is delivered at.
         Scene scene = new Scene(PLAYER_VIEW_YAW, PLAYER_VIEW_PITCH);
         List<Quad> quads = buildPlayerQuads(request, scene, width, height, true);
-        BufferedImage canvas = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        paintScene(canvas, quads, scene);
+        BufferedImage canvas = canvas(width, height);
+        paintScene(canvas, quads, scene, pixelScale);
         return canvas;
     }
 
@@ -3661,8 +3730,7 @@ final class Renderer {
     }
 
     private void drawScaled(BufferedImage destination, BufferedImage source, int x, int y, int width, int height) {
-        Graphics2D graphics = destination.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        Graphics2D graphics = graphics(destination);
         graphics.drawImage(source, x, y, width, height, null);
         graphics.dispose();
     }

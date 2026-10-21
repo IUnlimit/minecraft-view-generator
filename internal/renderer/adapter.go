@@ -24,15 +24,52 @@ import (
 // process without changing the HTTP contract.
 type ModelAdapter interface {
 	Backend() string
-	RenderItem(context.Context, resources.Context, model.Item, int) (image.Image, error)
-	RenderPlayer(context.Context, resources.Context, model.SkinData, Equipment, int, int) (image.Image, error)
-	RenderTooltip(context.Context, resources.Context, model.TooltipData, int, int) (image.Image, error)
-	RenderContainer(context.Context, resources.Context, string, model.ContainerData, int, int) (image.Image, error)
-	RenderPlayerInventory(context.Context, resources.Context, model.PlayerInventoryData, int, int) (image.Image, error)
-	RenderPlayerList(context.Context, resources.Context, model.PlayerListData, int, int) (image.Image, error)
-	RenderMap(context.Context, resources.Context, model.MapData, int, int) (image.Image, error)
-	RenderAchievement(context.Context, resources.Context, model.AchievementData, int, int) (image.Image, error)
+	RenderItem(context.Context, resources.Context, model.Item, Target) (image.Image, error)
+	RenderPlayer(context.Context, resources.Context, model.SkinData, Equipment, Target) (image.Image, error)
+	RenderTooltip(context.Context, resources.Context, model.TooltipData, Target) (image.Image, error)
+	RenderContainer(context.Context, resources.Context, string, model.ContainerData, Target) (image.Image, error)
+	RenderPlayerInventory(context.Context, resources.Context, model.PlayerInventoryData, Target) (image.Image, error)
+	RenderPlayerList(context.Context, resources.Context, model.PlayerListData, Target) (image.Image, error)
+	RenderMap(context.Context, resources.Context, model.MapData, Target) (image.Image, error)
+	RenderAchievement(context.Context, resources.Context, model.AchievementData, Target) (image.Image, error)
 }
+
+// Target is what the compositor asks a renderer for. Width and Height are the layout canvas — the
+// coordinates of the vanilla screen, where one unit is one pixel at GUI scale one — and PixelScale
+// is how many device pixels the renderer should put into each of them.
+//
+// A PixelScale above one exists because magnifying a finished one to one picture is not what the
+// client does at a larger GUI scale: it draws the same layout with bigger glyphs, bigger item icons
+// and a bigger 3D model. A renderer that rasterises text and models itself can therefore reach the
+// final resolution, which is what keeps a doubled Chinese glyph and a magnified skin crisp.
+type Target struct {
+	Width      int
+	Height     int
+	PixelScale int
+}
+
+// Scale is the integer magnification of the target, never below one.
+func (t Target) Scale() int {
+	if t.PixelScale < 1 {
+		return 1
+	}
+	return t.PixelScale
+}
+
+// Native reports whether the renderer produced the picture at its final resolution.
+func (t Target) Native() bool { return t.Scale() > 1 }
+
+// nativeScaler is implemented by the adapters that can rasterise a picture at a whole magnification
+// themselves. An adapter that cannot is handed the layout canvas instead and the compositor magnifies
+// the result, which is the only behaviour a rasteriser of fixed shapes can offer.
+type nativeScaler interface {
+	NativeScale() bool
+}
+
+// PixelWidth and PixelHeight are the size of the picture the renderer has to return. A zero means
+// the renderer derives that axis from its content, which is what the tooltip and the tab list do.
+func (t Target) PixelWidth() int  { return t.Width * t.Scale() }
+func (t Target) PixelHeight() int { return t.Height * t.Scale() }
 
 type BackendInfo struct {
 	Name       string   `json:"name"`
@@ -72,7 +109,8 @@ func (PrimitiveAdapter) BackendInfo() BackendInfo {
 	return BackendInfo{Name: "primitive-fallback", Version: "1.21.11", Status: "degraded", Real: false, Fallback: true, Operations: []string{"item", "player", "tooltip", "inventory", "item_container", "enderchest", "player_inventory", "playerlist", "map", "achievement"}}
 }
 
-func (PrimitiveAdapter) RenderItem(_ context.Context, _ resources.Context, item model.Item, size int) (image.Image, error) {
+func (PrimitiveAdapter) RenderItem(_ context.Context, _ resources.Context, item model.Item, target Target) (image.Image, error) {
+	size := max(target.PixelWidth(), target.PixelHeight())
 	if size < 16 || size > 1024 {
 		return nil, fmt.Errorf("item render size must be between 16 and 1024")
 	}
@@ -94,8 +132,9 @@ func (PrimitiveAdapter) RenderItem(_ context.Context, _ resources.Context, item 
 	return canvas, nil
 }
 
-func (PrimitiveAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, width, height int) (image.Image, error) {
+func (PrimitiveAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, target Target) (image.Image, error) {
 	textFont := fontFor(resource)
+	width, height := target.PixelWidth(), target.PixelHeight()
 	columns, rows := data.Columns, data.Rows
 	if columns == 0 {
 		columns = 9
@@ -143,7 +182,7 @@ func (PrimitiveAdapter) RenderContainer(ctx context.Context, resource resources.
 		if row >= rows {
 			continue
 		}
-		icon, err := (PrimitiveAdapter{}).RenderItem(ctx, resource, slot.Item, max(16, cell-8))
+		icon, err := (PrimitiveAdapter{}).RenderItem(ctx, resource, slot.Item, Target{Width: max(16, cell-8), Height: max(16, cell-8)})
 		if err != nil {
 			return nil, err
 		}
@@ -155,7 +194,8 @@ func (PrimitiveAdapter) RenderContainer(ctx context.Context, resource resources.
 	return canvas, nil
 }
 
-func (PrimitiveAdapter) RenderPlayerInventory(ctx context.Context, resource resources.Context, data model.PlayerInventoryData, width, height int) (image.Image, error) {
+func (PrimitiveAdapter) RenderPlayerInventory(ctx context.Context, resource resources.Context, data model.PlayerInventoryData, target Target) (image.Image, error) {
+	width, height := target.PixelWidth(), target.PixelHeight()
 	if width == 0 {
 		width = 640
 	}
@@ -166,13 +206,13 @@ func (PrimitiveAdapter) RenderPlayerInventory(ctx context.Context, resource reso
 	if playerWidth < 32 {
 		return nil, fmt.Errorf("player inventory width is too small")
 	}
-	player, err := (PrimitiveAdapter{}).RenderPlayer(ctx, resource, data.Skin, Equipment{Armor: data.Armor, MainHand: data.MainHand, Offhand: data.Offhand}, playerWidth, min(height-60, 360))
+	player, err := (PrimitiveAdapter{}).RenderPlayer(ctx, resource, data.Skin, Equipment{Armor: data.Armor, MainHand: data.MainHand, Offhand: data.Offhand}, Target{Width: playerWidth, Height: min(height-60, 360)})
 	if err != nil {
 		return nil, err
 	}
 	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
 	drawScaledImage(canvas, player, 16, 34, playerWidth, height-60)
-	panel, err := (PrimitiveAdapter{}).RenderContainer(ctx, resource, model.TypeInventory, model.ContainerData{Title: data.Title, Rows: 4, Columns: 9, Slots: data.Slots}, width-playerWidth-36, height-24)
+	panel, err := (PrimitiveAdapter{}).RenderContainer(ctx, resource, model.TypeInventory, model.ContainerData{Title: data.Title, Rows: 4, Columns: 9, Slots: data.Slots}, Target{Width: width - playerWidth - 36, Height: height - 24})
 	if err != nil {
 		return nil, err
 	}
@@ -180,8 +220,9 @@ func (PrimitiveAdapter) RenderPlayerInventory(ctx context.Context, resource reso
 	return canvas, nil
 }
 
-func (PrimitiveAdapter) RenderPlayerList(_ context.Context, resource resources.Context, data model.PlayerListData, width, height int) (image.Image, error) {
+func (PrimitiveAdapter) RenderPlayerList(_ context.Context, resource resources.Context, data model.PlayerListData, target Target) (image.Image, error) {
 	textFont := fontFor(resource)
+	width, height := target.PixelWidth(), target.PixelHeight()
 	if width == 0 {
 		width = max(360, data.Columns*190)
 	}
@@ -228,7 +269,8 @@ func (PrimitiveAdapter) RenderPlayerList(_ context.Context, resource resources.C
 	return canvas, nil
 }
 
-func (PrimitiveAdapter) RenderMap(_ context.Context, _ resources.Context, data model.MapData, width, height int) (image.Image, error) {
+func (PrimitiveAdapter) RenderMap(_ context.Context, _ resources.Context, data model.MapData, target Target) (image.Image, error) {
+	width, height := target.PixelWidth(), target.PixelHeight()
 	if width == 0 {
 		width = 128
 	}
@@ -277,8 +319,9 @@ func (PrimitiveAdapter) RenderMap(_ context.Context, _ resources.Context, data m
 	return canvas, nil
 }
 
-func (PrimitiveAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, width, height int) (image.Image, error) {
+func (PrimitiveAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, target Target) (image.Image, error) {
 	textFont := fontFor(resource)
+	width, height := target.PixelWidth(), target.PixelHeight()
 	if width == 0 {
 		width = 480
 	}
@@ -288,7 +331,7 @@ func (PrimitiveAdapter) RenderAchievement(ctx context.Context, resource resource
 	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
 	fillRect(canvas, 4, 4, width-8, height-8, color.RGBA{30, 30, 30, 245})
 	strokeRect(canvas, 4, 4, width-8, height-8, color.RGBA{220, 170, 45, 255})
-	icon, err := (PrimitiveAdapter{}).RenderItem(ctx, resource, data.Icon, max(16, min(80, width/5)))
+	icon, err := (PrimitiveAdapter{}).RenderItem(ctx, resource, data.Icon, Target{Width: max(16, min(80, width/5)), Height: max(16, min(80, width/5))})
 	if err != nil {
 		return nil, err
 	}
@@ -298,8 +341,9 @@ func (PrimitiveAdapter) RenderAchievement(ctx context.Context, resource resource
 	return canvas, nil
 }
 
-func (PrimitiveAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, width, height int) (image.Image, error) {
+func (PrimitiveAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, target Target) (image.Image, error) {
 	textFont := fontFor(resource)
+	width, height := target.PixelWidth(), target.PixelHeight()
 	if width == 0 {
 		width = 360
 	}
@@ -310,7 +354,7 @@ func (PrimitiveAdapter) RenderTooltip(ctx context.Context, resource resources.Co
 	fillRect(canvas, 3, 3, width-6, height-6, color.RGBA{22, 19, 30, 245})
 	strokeRect(canvas, 3, 3, width-6, height-6, color.RGBA{80, 70, 98, 255})
 	if data.Item.ID != "" {
-		icon, err := (PrimitiveAdapter{}).RenderItem(ctx, resource, data.Item, max(16, min(width/4, 96)))
+		icon, err := (PrimitiveAdapter{}).RenderItem(ctx, resource, data.Item, Target{Width: max(16, min(width/4, 96)), Height: max(16, min(width/4, 96))})
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +377,8 @@ func (PrimitiveAdapter) RenderTooltip(ctx context.Context, resource resources.Co
 	return canvas, nil
 }
 
-func (PrimitiveAdapter) RenderPlayer(_ context.Context, _ resources.Context, skin model.SkinData, equipment Equipment, width, height int) (image.Image, error) {
+func (PrimitiveAdapter) RenderPlayer(_ context.Context, _ resources.Context, skin model.SkinData, equipment Equipment, target Target) (image.Image, error) {
+	width, height := target.PixelWidth(), target.PixelHeight()
 	if width < 32 || height < 48 || width > 1024 || height > 1536 {
 		return nil, fmt.Errorf("player render dimensions are outside limits")
 	}
@@ -393,6 +438,11 @@ type CommandAdapter struct {
 
 func (a CommandAdapter) Backend() string { return "java-minecraft-1.21.11" }
 
+// NativeScale reports the whole magnification this backend can rasterise: the Java renderer keeps its
+// coordinates in vanilla screen units and puts the render scale in the canvas transform, so text,
+// item icons and 3D models are all drawn at the final resolution.
+func (a CommandAdapter) NativeScale() bool { return true }
+
 func (a CommandAdapter) BackendInfo() BackendInfo {
 	version := a.Version
 	if version == "" {
@@ -429,75 +479,99 @@ func (a UnavailableAdapter) BackendInfo() BackendInfo {
 	return BackendInfo{Name: "unavailable", Version: "1.21.11", Status: "degraded", Real: false, Fallback: false, Operations: []string{"item", "player", "tooltip", "inventory", "item_container", "enderchest", "player_inventory", "playerlist", "map", "achievement"}, Error: a.Reason}
 }
 
-func (a UnavailableAdapter) RenderItem(context.Context, resources.Context, model.Item, int) (image.Image, error) {
+func (a UnavailableAdapter) RenderItem(context.Context, resources.Context, model.Item, Target) (image.Image, error) {
 	return nil, fmt.Errorf("real Minecraft 1.21.11 renderer unavailable: %s", a.Reason)
 }
 
-func (a UnavailableAdapter) RenderPlayer(context.Context, resources.Context, model.SkinData, Equipment, int, int) (image.Image, error) {
+func (a UnavailableAdapter) RenderPlayer(context.Context, resources.Context, model.SkinData, Equipment, Target) (image.Image, error) {
 	return nil, fmt.Errorf("real Minecraft 1.21.11 renderer unavailable: %s", a.Reason)
 }
 
-func (a UnavailableAdapter) RenderTooltip(context.Context, resources.Context, model.TooltipData, int, int) (image.Image, error) {
+func (a UnavailableAdapter) RenderTooltip(context.Context, resources.Context, model.TooltipData, Target) (image.Image, error) {
 	return nil, fmt.Errorf("real Minecraft 1.21.11 renderer unavailable: %s", a.Reason)
 }
 
-func (a UnavailableAdapter) RenderContainer(context.Context, resources.Context, string, model.ContainerData, int, int) (image.Image, error) {
+func (a UnavailableAdapter) RenderContainer(context.Context, resources.Context, string, model.ContainerData, Target) (image.Image, error) {
 	return nil, fmt.Errorf("real Minecraft 1.21.11 renderer unavailable: %s", a.Reason)
 }
 
-func (a UnavailableAdapter) RenderPlayerInventory(context.Context, resources.Context, model.PlayerInventoryData, int, int) (image.Image, error) {
+func (a UnavailableAdapter) RenderPlayerInventory(context.Context, resources.Context, model.PlayerInventoryData, Target) (image.Image, error) {
 	return nil, fmt.Errorf("real Minecraft 1.21.11 renderer unavailable: %s", a.Reason)
 }
 
-func (a UnavailableAdapter) RenderPlayerList(context.Context, resources.Context, model.PlayerListData, int, int) (image.Image, error) {
+func (a UnavailableAdapter) RenderPlayerList(context.Context, resources.Context, model.PlayerListData, Target) (image.Image, error) {
 	return nil, fmt.Errorf("real Minecraft 1.21.11 renderer unavailable: %s", a.Reason)
 }
 
-func (a UnavailableAdapter) RenderMap(context.Context, resources.Context, model.MapData, int, int) (image.Image, error) {
+func (a UnavailableAdapter) RenderMap(context.Context, resources.Context, model.MapData, Target) (image.Image, error) {
 	return nil, fmt.Errorf("real Minecraft 1.21.11 renderer unavailable: %s", a.Reason)
 }
 
-func (a UnavailableAdapter) RenderAchievement(context.Context, resources.Context, model.AchievementData, int, int) (image.Image, error) {
+func (a UnavailableAdapter) RenderAchievement(context.Context, resources.Context, model.AchievementData, Target) (image.Image, error) {
 	return nil, fmt.Errorf("real Minecraft 1.21.11 renderer unavailable: %s", a.Reason)
 }
 
-func (a CommandAdapter) RenderItem(ctx context.Context, resource resources.Context, item model.Item, size int) (image.Image, error) {
-	payload := commandPayload{Operation: "item", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Item: item, Width: size, Height: size}
+// payload starts the command of one operation: the resource context, the layout canvas and the
+// magnification the renderer has to rasterise at.
+func (a CommandAdapter) payload(operation string, resource resources.Context, target Target) commandPayload {
+	return commandPayload{
+		Operation:    operation,
+		Version:      resource.Version,
+		ResourceRoot: resource.Root,
+		PackRoots:    resource.PackRoots,
+		CustomArt:    resource.CustomArt,
+		Width:        target.Width,
+		Height:       target.Height,
+		PixelScale:   target.Scale(),
+	}
+}
+
+func (a CommandAdapter) RenderItem(ctx context.Context, resource resources.Context, item model.Item, target Target) (image.Image, error) {
+	payload := a.payload("item", resource, target)
+	payload.Item = item
 	return a.run(ctx, payload)
 }
 
-func (a CommandAdapter) RenderPlayer(ctx context.Context, resource resources.Context, skin model.SkinData, equipment Equipment, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "player", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Skin: skin, Equipment: equipment, Width: width, Height: height}
+func (a CommandAdapter) RenderPlayer(ctx context.Context, resource resources.Context, skin model.SkinData, equipment Equipment, target Target) (image.Image, error) {
+	payload := a.payload("player", resource, target)
+	payload.Skin = skin
+	payload.Equipment = equipment
 	return a.run(ctx, payload)
 }
 
-func (a CommandAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "tooltip", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Tooltip: data, Width: width, Height: height}
+func (a CommandAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, target Target) (image.Image, error) {
+	payload := a.payload("tooltip", resource, target)
+	payload.Tooltip = data
 	return a.run(ctx, payload)
 }
 
-func (a CommandAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: kind, Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Container: data, Width: width, Height: height}
+func (a CommandAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, target Target) (image.Image, error) {
+	payload := a.payload(kind, resource, target)
+	payload.Container = data
 	return a.run(ctx, payload)
 }
 
-func (a CommandAdapter) RenderPlayerInventory(ctx context.Context, resource resources.Context, data model.PlayerInventoryData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "player_inventory", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, PlayerInventory: data, Width: width, Height: height}
+func (a CommandAdapter) RenderPlayerInventory(ctx context.Context, resource resources.Context, data model.PlayerInventoryData, target Target) (image.Image, error) {
+	payload := a.payload("player_inventory", resource, target)
+	payload.PlayerInventory = data
 	return a.run(ctx, payload)
 }
 
-func (a CommandAdapter) RenderPlayerList(ctx context.Context, resource resources.Context, data model.PlayerListData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "playerlist", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, PlayerList: data, Width: width, Height: height}
+func (a CommandAdapter) RenderPlayerList(ctx context.Context, resource resources.Context, data model.PlayerListData, target Target) (image.Image, error) {
+	payload := a.payload("playerlist", resource, target)
+	payload.PlayerList = data
 	return a.run(ctx, payload)
 }
 
-func (a CommandAdapter) RenderMap(ctx context.Context, resource resources.Context, data model.MapData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "map", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Map: data, Width: width, Height: height}
+func (a CommandAdapter) RenderMap(ctx context.Context, resource resources.Context, data model.MapData, target Target) (image.Image, error) {
+	payload := a.payload("map", resource, target)
+	payload.Map = data
 	return a.run(ctx, payload)
 }
 
-func (a CommandAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, width, height int) (image.Image, error) {
-	payload := commandPayload{Operation: "achievement", Version: resource.Version, ResourceRoot: resource.Root, PackRoots: resource.PackRoots, CustomArt: resource.CustomArt, Achievement: data, Width: width, Height: height}
+func (a CommandAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, target Target) (image.Image, error) {
+	payload := a.payload("achievement", resource, target)
+	payload.Achievement = data
 	return a.run(ctx, payload)
 }
 
@@ -518,6 +592,10 @@ type commandPayload struct {
 	Achievement     model.AchievementData      `json:"achievement,omitempty"`
 	Width           int                        `json:"width"`
 	Height          int                        `json:"height"`
+	// PixelScale is how many device pixels the renderer puts into one layout pixel. It is the only
+	// place the magnification of the finished picture is decided, so a renderer that rasterises its
+	// text and models itself never has to be handed a picture to blow up.
+	PixelScale int `json:"pixelScale,omitempty"`
 }
 
 func (a CommandAdapter) run(ctx context.Context, payload commandPayload) (image.Image, error) {

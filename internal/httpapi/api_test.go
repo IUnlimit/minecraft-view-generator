@@ -63,44 +63,44 @@ func (a *recordingAdapter) record(resource resources.Context) {
 
 func (a *recordingAdapter) Backend() string { return a.inner.Backend() }
 
-func (a *recordingAdapter) RenderItem(ctx context.Context, resource resources.Context, item model.Item, size int) (image.Image, error) {
+func (a *recordingAdapter) RenderItem(ctx context.Context, resource resources.Context, item model.Item, target renderer.Target) (image.Image, error) {
 	a.record(resource)
-	return a.inner.RenderItem(ctx, resource, item, size)
+	return a.inner.RenderItem(ctx, resource, item, target)
 }
 
-func (a *recordingAdapter) RenderPlayer(ctx context.Context, resource resources.Context, skin model.SkinData, equipment renderer.Equipment, width, height int) (image.Image, error) {
+func (a *recordingAdapter) RenderPlayer(ctx context.Context, resource resources.Context, skin model.SkinData, equipment renderer.Equipment, target renderer.Target) (image.Image, error) {
 	a.record(resource)
-	return a.inner.RenderPlayer(ctx, resource, skin, equipment, width, height)
+	return a.inner.RenderPlayer(ctx, resource, skin, equipment, target)
 }
 
-func (a *recordingAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, width, height int) (image.Image, error) {
+func (a *recordingAdapter) RenderTooltip(ctx context.Context, resource resources.Context, data model.TooltipData, target renderer.Target) (image.Image, error) {
 	a.record(resource)
-	return a.inner.RenderTooltip(ctx, resource, data, width, height)
+	return a.inner.RenderTooltip(ctx, resource, data, target)
 }
 
-func (a *recordingAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, width, height int) (image.Image, error) {
+func (a *recordingAdapter) RenderContainer(ctx context.Context, resource resources.Context, kind string, data model.ContainerData, target renderer.Target) (image.Image, error) {
 	a.record(resource)
-	return a.inner.RenderContainer(ctx, resource, kind, data, width, height)
+	return a.inner.RenderContainer(ctx, resource, kind, data, target)
 }
 
-func (a *recordingAdapter) RenderPlayerInventory(ctx context.Context, resource resources.Context, data model.PlayerInventoryData, width, height int) (image.Image, error) {
+func (a *recordingAdapter) RenderPlayerInventory(ctx context.Context, resource resources.Context, data model.PlayerInventoryData, target renderer.Target) (image.Image, error) {
 	a.record(resource)
-	return a.inner.RenderPlayerInventory(ctx, resource, data, width, height)
+	return a.inner.RenderPlayerInventory(ctx, resource, data, target)
 }
 
-func (a *recordingAdapter) RenderPlayerList(ctx context.Context, resource resources.Context, data model.PlayerListData, width, height int) (image.Image, error) {
+func (a *recordingAdapter) RenderPlayerList(ctx context.Context, resource resources.Context, data model.PlayerListData, target renderer.Target) (image.Image, error) {
 	a.record(resource)
-	return a.inner.RenderPlayerList(ctx, resource, data, width, height)
+	return a.inner.RenderPlayerList(ctx, resource, data, target)
 }
 
-func (a *recordingAdapter) RenderMap(ctx context.Context, resource resources.Context, data model.MapData, width, height int) (image.Image, error) {
+func (a *recordingAdapter) RenderMap(ctx context.Context, resource resources.Context, data model.MapData, target renderer.Target) (image.Image, error) {
 	a.record(resource)
-	return a.inner.RenderMap(ctx, resource, data, width, height)
+	return a.inner.RenderMap(ctx, resource, data, target)
 }
 
-func (a *recordingAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, width, height int) (image.Image, error) {
+func (a *recordingAdapter) RenderAchievement(ctx context.Context, resource resources.Context, data model.AchievementData, target renderer.Target) (image.Image, error) {
 	a.record(resource)
-	return a.inner.RenderAchievement(ctx, resource, data, width, height)
+	return a.inner.RenderAchievement(ctx, resource, data, target)
 }
 
 func TestHealth(t *testing.T) {
