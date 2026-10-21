@@ -8,7 +8,6 @@ import (
 
 	"github.com/illtamer/minecraft-view-generator2/internal/custom"
 	"github.com/illtamer/minecraft-view-generator2/internal/model"
-	"github.com/illtamer/minecraft-view-generator2/internal/renderer"
 	"github.com/illtamer/minecraft-view-generator2/internal/resources"
 )
 
@@ -66,10 +65,9 @@ type versionSource struct {
 // resourceSources is the body of GET /api/v1/resources/sources: every directory and file the service
 // reads to draw a picture, so an operator can tell a missing pack from a missing index.
 type resourceSources struct {
-	DataDir        string               `json:"dataDir"`
-	Renderer       renderer.BackendInfo `json:"renderer"`
-	Versions       []versionSource      `json:"versions"`
-	CustomContents custom.Sources       `json:"customContents"`
+	DataDir        string          `json:"dataDir"`
+	Versions       []versionSource `json:"versions"`
+	CustomContents custom.Sources  `json:"customContents"`
 }
 
 func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +78,6 @@ func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
 	}
 	report := resourceSources{
 		DataDir:        s.cfg.DataDir,
-		Renderer:       renderer.Info(s.compositor.Adapter),
 		Versions:       make([]versionSource, 0, len(versions)),
 		CustomContents: s.customSources(),
 	}

@@ -103,12 +103,14 @@ func (a *recordingAdapter) RenderAchievement(ctx context.Context, resource resou
 	return a.inner.RenderAchievement(ctx, resource, data, target)
 }
 
-func TestHealth(t *testing.T) {
+// The service has no health route of its own: a probe reads the version list, which reports the
+// same thing without a second contract to keep in sync.
+func TestHealthzIsGone(t *testing.T) {
 	server := testServer(t)
 	record := httptest.NewRecorder()
 	server.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if record.Code != http.StatusOK {
-		t.Fatalf("status = %d", record.Code)
+	if record.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for the removed health route", record.Code)
 	}
 }
 
@@ -188,12 +190,19 @@ func TestRenderRejectsTinyRequestedImage(t *testing.T) {
 func TestAPIKeyProtectsPrivateRoutes(t *testing.T) {
 	server := testServer(t)
 	server.cfg.APIKey = "secret"
+	// The version list is the health probe path, so it answers without a key exactly like the
+	// documentation routes do.
+	probe := httptest.NewRecorder()
+	server.Handler().ServeHTTP(probe, httptest.NewRequest(http.MethodGet, "/api/v1/versions", nil))
+	if probe.Code != http.StatusOK {
+		t.Fatalf("probe status = %d, want the version list to stay reachable", probe.Code)
+	}
 	unauthorized := httptest.NewRecorder()
-	server.Handler().ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/v1/versions", nil))
+	server.Handler().ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/v1/resources/sources", nil))
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status = %d", unauthorized.Code)
 	}
-	authorizedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/versions", nil)
+	authorizedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/resources/sources", nil)
 	authorizedRequest.Header.Set("X-API-Key", "secret")
 	authorized := httptest.NewRecorder()
 	server.Handler().ServeHTTP(authorized, authorizedRequest)
@@ -486,11 +495,7 @@ func TestSourcesReportsEveryResourcePath(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", record.Code, record.Body.String())
 	}
 	var report struct {
-		DataDir  string `json:"dataDir"`
-		Renderer struct {
-			Name   string `json:"name"`
-			Status string `json:"status"`
-		} `json:"renderer"`
+		DataDir        string           `json:"dataDir"`
 		Versions       []map[string]any `json:"versions"`
 		CustomContents struct {
 			Root       string         `json:"root"`
@@ -505,8 +510,8 @@ func TestSourcesReportsEveryResourcePath(t *testing.T) {
 	if report.DataDir != server.cfg.DataDir {
 		t.Fatalf("dataDir = %q, want %q", report.DataDir, server.cfg.DataDir)
 	}
-	if report.Renderer.Name == "" || report.Renderer.Status == "" {
-		t.Fatalf("renderer = %+v", report.Renderer)
+	if strings.Contains(record.Body.String(), `"renderer"`) {
+		t.Fatalf("sources still reports the renderer backend: %s", record.Body.String())
 	}
 	if report.Versions == nil {
 		t.Fatal("versions is null, it has to be an array")

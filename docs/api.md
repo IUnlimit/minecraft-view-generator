@@ -17,7 +17,7 @@ OpenAPI 文档随二进制内嵌生成：调整接口后执行 `make build`（�
 ```sh
 curl -X PUT http://localhost:4666/api/v1/resources/1.21.11
 curl http://localhost:4666/api/v1/resources/1.21.11
-curl http://localhost:4666/healthz
+curl http://localhost:4666/api/v1/versions
 ```
 
 资源层级为 vanilla → addon → 用户 `RESOURCE_PACK_ROOT` 中按名称排序的 pack，后者覆盖前者。
@@ -346,7 +346,6 @@ curl http://localhost:4666/api/v1/resources/sources
 ```json
 {
   "dataDir": "/app/data",
-  "renderer": {"name": "java-minecraft-renderer", "status": "ready", "real": true, "backend": "..."},
   "versions": [{
     "version": "1.21.11",
     "status": "ready",
@@ -402,6 +401,8 @@ DEBUG=true ./dist/minecraft-view-generator2
 
 ## 健康与 fallback
 
-`/healthz` 返回实际 backend 名称、版本、`real`、`fallback` 和支持 operations。真实 Java 命令不可执行时状态为 `degraded`；只有显式设置 `ALLOW_FALLBACK_RENDERER=true` 才允许 PrimitiveAdapter。fallback 仅用于测试/故障诊断，不代表 Minecraft 资源渲染结果。
+服务没有独立的健康检查接口（原 `/healthz` 已删除）。存活探针读 `GET /api/v1/versions`：它不需要 API key，恒返回 `200` 与版本列表，只要 HTTP 栈与资源管理器可用就算存活；`docker-compose.yml` 的 healthcheck 就是这么配的。
+
+渲染后端是否就绪由渲染请求本身报告：真实 Java 命令不可执行且未显式设置 `ALLOW_FALLBACK_RENDERER=true` 时，`POST /api/v1/render` 返回 `503 renderer_unavailable`（`BackendInfo` 的 `status`/`error` 就是原因）。fallback 仅用于测试/故障诊断，不代表 Minecraft 资源渲染结果。
 
 常见错误：`409 resources_not_ready`、`422 render_failed`、`503 renderer_unavailable`、`400 invalid_data` / `invalid_image_options`。

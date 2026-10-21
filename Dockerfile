@@ -14,7 +14,7 @@ COPY internal ./internal
 
 ARG VERSION=dev
 ARG COMMIT=unknown
-# 与 Makefile 使用同一套 -X 注入方式，版本号会出现在启动日志与 /healthz 的响应里。
+# 与 Makefile 使用同一套 -X 注入方式，版本号会出现在启动日志与 /api/v1/versions 的响应里。
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
         -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
         -o /out/minecraft-view-generator2 ./cmd/server

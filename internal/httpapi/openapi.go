@@ -30,8 +30,7 @@ func buildOpenAPIDocument() map[string]any {
 		"openapi": "3.1.0",
 		"info":    map[string]any{"title": "Minecraft View Generator API", "version": model.SupportedVersion, "description": "Minecraft 1.21.11 rendering API backed by a Java 21 resource-aware renderer. The service returns PNG or base64 PNG and fails explicitly when resources are unavailable."},
 		"paths": map[string]any{
-			"/healthz":                        map[string]any{"get": map[string]any{"summary": "Health and renderer capability check", "responses": map[string]any{"200": map[string]any{"description": "Service status and backend capability"}}}},
-			"/api/v1/versions":                map[string]any{"get": map[string]any{"summary": "List local resource contexts", "responses": map[string]any{"200": map[string]any{"description": "Version states"}}}},
+			"/api/v1/versions":                map[string]any{"get": map[string]any{"summary": "List local resource contexts", "description": "存活探针也读这个接口：它不需要 API key，恒返回 200 与版本列表。", "responses": map[string]any{"200": map[string]any{"description": "Version states"}}}},
 			"/api/v1/resources/{version}":     map[string]any{"parameters": []any{map[string]any{"name": "version", "in": "path", "required": true, "schema": map[string]any{"type": "string"}}}, "put": map[string]any{"summary": "Prepare resources", "responses": map[string]any{"202": map[string]any{"description": "Preparation started"}, "200": map[string]any{"description": "Already ready"}}}, "get": map[string]any{"summary": "Read preparation state", "responses": map[string]any{"200": map[string]any{"description": "Resource state"}, "404": map[string]any{"description": "Unknown version"}}}},
 			"/api/v1/resources/sources":       sourcesOperation(),
 			"/api/v1/resources/custom/reload": reloadOperation(),
@@ -49,7 +48,7 @@ func sourcesOperation() map[string]any {
 	return map[string]any{
 		"get": map[string]any{
 			"summary":     "List the resource paths this service reads",
-			"description": "返回当前读取的各类资源路径：DATA_DIR、渲染器后端、每个已准备版本的 resourceRoot / vanillaRoot / addonRoot / packRoots 与字体文件（default.json、unifont.zip、font-overlay.json）是否存在，以及 data/contents 的目录、items_ids_cache.yml、解析到的 pack 与条目计数。目录不存在时状态为 ready、条目为 0，不会报错。",
+			"description": "返回当前读取的各类资源路径：DATA_DIR、每个已准备版本的 resourceRoot / vanillaRoot / addonRoot / packRoots 与字体文件（default.json、unifont.zip、font-overlay.json）是否存在，以及 data/contents 的目录、items_ids_cache.yml、解析到的 pack 与条目计数。目录不存在时状态为 ready、条目为 0，不会报错。",
 			"responses":   map[string]any{"200": map[string]any{"description": "Resource paths and their state"}},
 		},
 	}

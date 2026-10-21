@@ -45,7 +45,6 @@ func NewServer(cfg config.Config, resourceManager *resources.Manager, compositor
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /api/v1/versions", s.versions)
 	mux.HandleFunc("PUT /api/v1/resources/{version}", s.prepare)
 	mux.HandleFunc("GET /api/v1/resources/{version}", s.resourceState)
@@ -167,7 +166,9 @@ func (s *Server) withCommon(next http.Handler) http.Handler {
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.APIKey == "" || r.URL.Path == "/healthz" || r.URL.Path == "/docs" || r.URL.Path == "/scalar" || r.URL.Path == "/api/v1/openapi.json" {
+		// The version list is what the container health probe reads, so it stays reachable without a
+		// key the same way the documentation routes are.
+		if s.cfg.APIKey == "" || r.URL.Path == "/api/v1/versions" || r.URL.Path == "/docs" || r.URL.Path == "/scalar" || r.URL.Path == "/api/v1/openapi.json" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -181,15 +182,6 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	backend := renderer.Info(s.compositor.Adapter)
-	status := "ok"
-	if backend.Status != "ready" {
-		status = "degraded"
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": status, "renderer": backend.Name, "rendererVersion": backend.Version, "backend": backend, "time": time.Now().UTC()})
 }
 
 func (s *Server) versions(w http.ResponseWriter, r *http.Request) {

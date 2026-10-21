@@ -26,7 +26,7 @@ services:
       - LISTEN_ADDR=:4666
       - DATA_DIR=/app/data
       - RENDERER_COMMAND=/app/renderer-backend/run.sh
-      # 需要鉴权时取消注释：除 /healthz、/docs、/scalar、/api/v1/openapi.json 外都要带 X-API-Key
+      # 需要鉴权时取消注释：除 /api/v1/versions、/docs、/scalar、/api/v1/openapi.json 外都要带 X-API-Key
       # - API_KEY=${API_KEY:?set API_KEY in .env}
       # 其他可调项见 README 的配置表
       # - MAX_CONCURRENT_RENDERS=4
@@ -39,8 +39,8 @@ services:
       # 并把 storage/items_ids_cache.yml 复制成 ./data/items_ids_cache.yml
       - ./data:/app/data
     healthcheck:
-      # /healthz 始终返回 200，status 字段才反映渲染后端是否就绪
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4666/healthz | grep -q '\"status\":\"ok\"'"]
+      # 探针读版本列表：该接口无需 API key、恒返回 200，只要 HTTP 栈与资源管理器可用就算健康
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:4666/api/v1/versions >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3

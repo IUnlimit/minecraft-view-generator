@@ -38,7 +38,7 @@ docker-compose.yml        单机部署编排
 ```sh
 docker compose up -d --build
 
-curl http://localhost:4666/healthz
+curl http://localhost:4666/api/v1/versions
 ```
 
 容器内固定监听 `4666`，宿主机端口默认也是 `4666`；端口冲突时在仓库根目录新建 `.env`（已被 `.gitignore` 忽略）覆盖：
@@ -47,7 +47,7 @@ curl http://localhost:4666/healthz
 HOST_PORT=14666
 ```
 
-`/healthz` 始终返回 `200`，`status` 字段反映渲染后端是否就绪（`ok` / `degraded`）；`docker compose ps` 里显示的 `healthy` 即探针检查到 `status":"ok"`。
+服务不再提供 `/healthz`：容器探针直接读 `/api/v1/versions`（无需 API key，恒返回 `200` 与版本列表），只要 HTTP 栈与资源管理器可用即为 `healthy`；渲染后端是否就绪由渲染请求本身报告（不可用且未开 `ALLOW_FALLBACK_RENDERER` 时返回 `503 renderer_unavailable`）。
 
 访问地址：`http://<宿主机IP>:<HOST_PORT>`，文档页 `http://<宿主机IP>:<HOST_PORT>/docs`。
 
@@ -113,7 +113,7 @@ renderer-backend/build.sh      # 编译 Java 渲染后端（产物：renderer-ba
 | `MAX_CUSTOM_ITEMS` | `50000` | 索引条目上限，超出后截断并记 warning |
 | `MAX_CUSTOM_TEXTURE_BYTES` | `8388608` | 单个内联贴图上限 |
 | `MAX_CUSTOM_LAYERS` | `16` | 单个自定义物品最多内联的贴图层数 |
-| `API_KEY` | 空 | 非空时启用鉴权：除 `/healthz`、`/docs`、`/scalar`、`/api/v1/openapi.json` 外都需 `X-API-Key` 或 `Authorization: Bearer` |
+| `API_KEY` | 空 | 非空时启用鉴权：除 `/api/v1/versions`、`/docs`、`/scalar`、`/api/v1/openapi.json` 外都需 `X-API-Key` 或 `Authorization: Bearer` |
 | `DEBUG` | `false` | 打开后日志级别升到 debug，并把每个请求的原始报文打到 `msg=request` 的日志行（单条上限 64 KiB） |
 | `REQUIRE_RESOURCES` | `true` | 未准备资源时拒绝渲染而非返回假图 |
 | `ALLOW_FALLBACK_RENDERER` | `false` | 真实渲染后端不可用时是否退回内置简化绘制 |
