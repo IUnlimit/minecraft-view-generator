@@ -23,7 +23,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
 FROM eclipse-temurin:21-jdk AS renderer-build
 
 WORKDIR /src
-# build.sh 校验两个字体的 SHA-256，再用 javac + jar 产出 minecraft-renderer.jar。
+# build.sh 用 javac + jar 产出 minecraft-renderer.jar；文本不再内嵌字体，字体资产由服务端 prepare 阶段物化到 data/。
 COPY renderer-backend ./renderer-backend
 RUN ./renderer-backend/build.sh
 
@@ -36,7 +36,7 @@ LABEL org.opencontainers.image.title="minecraft-view-generator" \
 
 WORKDIR /app
 
-# 渲染后端：只带 run.sh 与已编译好的 jar。jar 里已打包字体，运行时不需要 fixture 与 fonts 目录。
+# 渲染后端：只带 run.sh 与已编译好的 jar；字体读的是 data/ 里由 asset index 物化出来的 vanilla 资源树，不需要 fixture。
 COPY --from=renderer-build /src/renderer-backend/run.sh /app/renderer-backend/run.sh
 COPY --from=renderer-build /src/renderer-backend/build/minecraft-renderer.jar /app/renderer-backend/build/minecraft-renderer.jar
 COPY --from=server-build /out/minecraft-view-generator2 /app/dist/minecraft-view-generator2

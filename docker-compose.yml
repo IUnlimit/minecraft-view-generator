@@ -31,8 +31,12 @@ services:
       # 其他可调项见 README 的配置表
       # - MAX_CONCURRENT_RENDERS=4
       # - ADDON_ENABLED=true
+      # 把收到的请求报文打到日志（单条上限 64 KiB），排查客户端报文时打开
+      # - DEBUG=true
     volumes:
-      # 原版资源、资源包栈与准备状态都落在这里，整个目录可整体备份/迁移
+      # 原版资源、资源包栈、准备状态与自定义物品包都落在这里，整个目录可整体备份/迁移。
+      # 自定义物品：把 ItemsAdder 的 contents/ 各包目录放进 ./data/contents/，
+      # 并把 storage/items_ids_cache.yml 复制成 ./data/items_ids_cache.yml
       - ./data:/app/data
     healthcheck:
       # /healthz 始终返回 200，status 字段才反映渲染后端是否就绪
