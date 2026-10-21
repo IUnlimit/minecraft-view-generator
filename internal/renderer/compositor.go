@@ -2,18 +2,28 @@ package renderer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
+	"math"
 	"strings"
 
 	"github.com/illtamer/minecraft-view-generator2/internal/model"
 	"github.com/illtamer/minecraft-view-generator2/internal/resources"
 )
 
+// ErrImageTooLarge reports that the finished picture, magnification included, would exceed the
+// configured output limits. The HTTP layer turns it into 422 image_too_large.
+var ErrImageTooLarge = errors.New("rendered image exceeds configured limits")
+
 type Compositor struct {
 	Adapter ModelAdapter
+	// MaxWidth and MaxHeight bound the delivered picture. Zero means unlimited, which is what the
+	// unit tests use; the server always sets both from the configuration.
+	MaxWidth  int
+	MaxHeight int
 }
 
 func NewCompositor(adapter ModelAdapter) *Compositor {
@@ -24,40 +34,45 @@ func (c *Compositor) Render(ctx context.Context, request model.Request, data any
 	if c.Adapter == nil {
 		return nil, fmt.Errorf("renderer adapter is not configured")
 	}
+	var (
+		rendered image.Image
+		err      error
+	)
 	switch request.Type {
 	case model.TypeItem:
-		return c.renderItem(ctx, request.Options, data.(*model.Item), resource)
+		rendered, err = c.renderItem(ctx, request.Options, data.(*model.Item), resource)
 	case model.TypeTooltip:
-		return c.renderTooltip(ctx, request.Options, data.(*model.TooltipData), resource)
+		rendered, err = c.renderTooltip(ctx, request.Options, data.(*model.TooltipData), resource)
 	case model.TypeInventory, model.TypeItemContainer, model.TypeEnderchest:
-		return c.renderContainer(ctx, request.Type, request.Options, data.(*model.ContainerData), resource)
+		rendered, err = c.renderContainer(ctx, request.Type, request.Options, data.(*model.ContainerData), resource)
 	case model.TypeSkin:
-		return c.renderSkin(ctx, request.Options, data.(*model.SkinData), resource)
+		rendered, err = c.renderSkin(ctx, request.Options, data.(*model.SkinData), resource)
 	case model.TypePlayerInventory:
-		return c.renderPlayerInventory(ctx, request.Options, data.(*model.PlayerInventoryData), resource)
+		rendered, err = c.renderPlayerInventory(ctx, request.Options, data.(*model.PlayerInventoryData), resource)
 	case model.TypePlayerList:
-		return c.renderPlayerList(ctx, request.Options, data.(*model.PlayerListData), resource)
+		rendered, err = c.renderPlayerList(ctx, request.Options, data.(*model.PlayerListData), resource)
 	case model.TypeMap:
-		return c.renderMap(ctx, request.Options, data.(*model.MapData), resource)
+		rendered, err = c.renderMap(ctx, request.Options, data.(*model.MapData), resource)
 	case model.TypeAchievement:
-		return c.renderAchievement(ctx, request.Options, data.(*model.AchievementData), resource)
+		rendered, err = c.renderAchievement(ctx, request.Options, data.(*model.AchievementData), resource)
 	default:
 		return nil, fmt.Errorf("unsupported render type %q", request.Type)
 	}
+	if err != nil {
+		return nil, err
+	}
+	return c.magnify(rendered, request.Options.Scale)
 }
 
+// itemCanvasSize is the natural icon size: the item pipeline draws a 0..16 model box into a square
+// canvas, so the default icon is square.
+const itemCanvasSize = 128
+
+// renderItem draws one item icon. The icon itself is square, so a canvas that is not square pads it
+// on the given background.
 func (c *Compositor) renderItem(ctx context.Context, options model.Options, item *model.Item, resource resources.Context) (image.Image, error) {
-	width, height := options.Width, options.Height
-	if width == 0 {
-		width = 128
-	}
-	if height == 0 {
-		height = width
-	}
-	size := width
-	if height > size {
-		size = height
-	}
+	width, height := resolveCanvasSize(itemCanvasSize, itemCanvasSize, options)
+	size := max(width, height)
 	icon, err := c.Adapter.RenderItem(ctx, resource, *item, size)
 	if err != nil {
 		return nil, err
@@ -71,11 +86,8 @@ func (c *Compositor) renderItem(ctx context.Context, options model.Options, item
 }
 
 func (c *Compositor) renderTooltip(ctx context.Context, options model.Options, data *model.TooltipData, resource resources.Context) (image.Image, error) {
-	width, height := options.Width, options.Height
-	if width == 0 {
-		width = 360
-	}
 	// A zero height lets the renderer derive the vanilla tooltip box from its content.
+	width, height := resolveCanvasSize(360, 0, options)
 	return c.Adapter.RenderTooltip(ctx, resource, *data, width, height)
 }
 
@@ -90,14 +102,8 @@ func (c *Compositor) renderContainer(ctx context.Context, kind string, options m
 	if columns > 18 || rows > 12 {
 		return nil, fmt.Errorf("%s grid exceeds 18x12", kind)
 	}
-	width, height := options.Width, options.Height
-	defaultWidth, defaultHeight := containerCanvasSize(kind, data, rows)
-	if width == 0 {
-		width = defaultWidth
-	}
-	if height == 0 {
-		height = defaultHeight
-	}
+	naturalWidth, naturalHeight := containerCanvasSize(kind, data, rows)
+	width, height := resolveCanvasSize(naturalWidth, naturalHeight, options)
 	return c.Adapter.RenderContainer(ctx, resource, kind, *data, width, height)
 }
 
@@ -126,57 +132,86 @@ func containerCanvasSize(kind string, data *model.ContainerData, rows int) (int,
 }
 
 func (c *Compositor) renderSkin(ctx context.Context, options model.Options, data *model.SkinData, resource resources.Context) (image.Image, error) {
-	width, height := options.Width, options.Height
-	if width == 0 {
-		width = 256
-	}
-	if height == 0 {
-		height = 384
-	}
+	width, height := resolveCanvasSize(256, 384, options)
 	return c.Adapter.RenderPlayer(ctx, resource, *data, Equipment{}, width, height)
 }
 
 func (c *Compositor) renderPlayerInventory(ctx context.Context, options model.Options, data *model.PlayerInventoryData, resource resources.Context) (image.Image, error) {
-	width, height := options.Width, options.Height
-	if width == 0 {
-		// The vanilla InventoryScreen is 176x166 and is rendered one to one by default.
-		width = 176
-	}
-	if height == 0 {
-		height = 166
-	}
+	// The vanilla InventoryScreen is 176x166 and is rendered one to one by default.
+	width, height := resolveCanvasSize(176, 166, options)
 	return c.Adapter.RenderPlayerInventory(ctx, resource, *data, width, height)
 }
 
 func (c *Compositor) renderPlayerList(ctx context.Context, options model.Options, data *model.PlayerListData, resource resources.Context) (image.Image, error) {
-	width, height := options.Width, options.Height
-	if width == 0 {
-		width = max(360, data.Columns*190)
-	}
+	// The height of the tab list follows its rows, so only the width has a natural value.
+	width, height := resolveCanvasSize(max(360, data.Columns*190), 0, options)
 	return c.Adapter.RenderPlayerList(ctx, resource, *data, width, height)
 }
 
 func (c *Compositor) renderMap(ctx context.Context, options model.Options, data *model.MapData, resource resources.Context) (image.Image, error) {
-	width, height := options.Width, options.Height
-	if width == 0 {
-		// 140 keeps the 128 pixel map grid at a one to one scale inside the parchment border.
-		width = 140
-	}
-	if height == 0 {
-		height = width
-	}
+	// 140 keeps the 128 pixel map grid at a one to one scale inside the parchment border.
+	width, height := resolveCanvasSize(140, 140, options)
 	return c.Adapter.RenderMap(ctx, resource, *data, width, height)
 }
 
 func (c *Compositor) renderAchievement(ctx context.Context, options model.Options, data *model.AchievementData, resource resources.Context) (image.Image, error) {
-	width, height := options.Width, options.Height
-	if width == 0 {
-		width = 480
-	}
-	if height == 0 {
-		height = 96
-	}
+	width, height := resolveCanvasSize(480, 96, options)
 	return c.Adapter.RenderAchievement(ctx, resource, *data, width, height)
+}
+
+// resolveCanvasSize turns the natural canvas of a render type into the size of the picture. An
+// explicit width and height choose the canvas exactly; a single explicit dimension keeps the aspect
+// ratio of the natural canvas, and a natural dimension of zero means the renderer derives that axis
+// from its content, which is what the tab list and the tooltip do. options.Scale is not part of the
+// canvas: Render magnifies the finished picture by it.
+func resolveCanvasSize(naturalWidth, naturalHeight int, options model.Options) (int, int) {
+	switch {
+	case options.Width > 0 && options.Height > 0:
+		return options.Width, options.Height
+	case options.Width > 0:
+		return options.Width, scaleDimension(naturalHeight, options.Width, naturalWidth)
+	case options.Height > 0:
+		return scaleDimension(naturalWidth, options.Height, naturalHeight), options.Height
+	default:
+		return naturalWidth, naturalHeight
+	}
+}
+
+// scaleDimension converts one axis of a natural canvas to the other axis of a requested canvas. It
+// answers zero — leave the axis to the renderer — when the natural value is not a fixed number.
+func scaleDimension(natural, requested, basis int) int {
+	if natural <= 0 || basis <= 0 {
+		return 0
+	}
+	return max(1, (natural*requested+basis/2)/basis)
+}
+
+// magnify applies the requested magnification to a finished picture with a nearest neighbour
+// filter, which is how a larger vanilla GUI scale magnifies the same frame buffer. The ratio may be
+// fractional (the pixels then alternate between one and two output pixels) and may be below one, and
+// a target size is turned into the largest ratio that still fits the box. The magnified size is
+// checked against the configured limits before the buffer is allocated.
+func (c *Compositor) magnify(value image.Image, scale model.Scale) (image.Image, error) {
+	bounds := value.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	ratio := scale.RatioFor(width, height)
+	if ratio <= 0 || ratio == 1 {
+		return value, nil
+	}
+	grownWidth := max(1, int(math.Round(float64(width)*ratio)))
+	grownHeight := max(1, int(math.Round(float64(height)*ratio)))
+	if c.MaxWidth > 0 && grownWidth > c.MaxWidth || c.MaxHeight > 0 && grownHeight > c.MaxHeight {
+		return nil, fmt.Errorf("%w: %dx%d after the %gx magnification", ErrImageTooLarge, grownWidth, grownHeight, ratio)
+	}
+	grown := image.NewRGBA(image.Rect(0, 0, grownWidth, grownHeight))
+	for y := 0; y < grownHeight; y++ {
+		sourceY := bounds.Min.Y + min(int(float64(y)/ratio), height-1)
+		for x := 0; x < grownWidth; x++ {
+			sourceX := bounds.Min.X + min(int(float64(x)/ratio), width-1)
+			grown.Set(x, y, value.At(sourceX, sourceY))
+		}
+	}
+	return grown, nil
 }
 
 func newCanvas(width, height int, options model.Options) *image.RGBA {

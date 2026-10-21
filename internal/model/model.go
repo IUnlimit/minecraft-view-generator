@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -25,6 +26,10 @@ const (
 	TypeMap             = "map"
 	TypeAchievement     = "achievement"
 )
+
+// MaxScaleRatio bounds a requested magnification. The delivered size is separately bounded by the
+// configured image limits; this cap only rejects an obviously nonsensical ratio before any work.
+const MaxScaleRatio = 16.0
 
 var versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
@@ -55,24 +60,155 @@ type Options struct {
 	Width       int    `json:"width,omitempty"`
 	Height      int    `json:"height,omitempty"`
 	Background  string `json:"background,omitempty"`
-	Scale       int    `json:"scale,omitempty"`
+	Scale       Scale  `json:"scale,omitempty"`
 	Frame       int    `json:"frame,omitempty"`
 	Transparent bool   `json:"transparent,omitempty"`
 }
 
+// Scale is the magnification of the finished canvas. It is either a fixed ratio (the JSON number
+// form or {"ratio": n}) or a target final size ({"width": n, "height": n}) from which the ratio is
+// derived. The zero value leaves the canvas untouched.
+type Scale struct {
+	Ratio  float64
+	Width  int
+	Height int
+}
+
+// UnmarshalJSON accepts the shorthand number and the explicit object form. Unknown keys inside the
+// object are rejected so a misspelled "ratio" cannot silently mean "no magnification".
+func (s *Scale) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*s = Scale{}
+		return nil
+	}
+	if trimmed[0] == '{' {
+		var object struct {
+			Ratio  *float64 `json:"ratio"`
+			Width  *int     `json:"width"`
+			Height *int     `json:"height"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(trimmed))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&object); err != nil {
+			return fmt.Errorf("scale must be a number or an object with ratio, width, or height: %w", err)
+		}
+		if object.Ratio == nil && object.Width == nil && object.Height == nil {
+			return fmt.Errorf("scale object requires ratio, width, or height")
+		}
+		parsed := Scale{}
+		if object.Ratio != nil {
+			parsed.Ratio = *object.Ratio
+		}
+		if object.Width != nil {
+			parsed.Width = *object.Width
+		}
+		if object.Height != nil {
+			parsed.Height = *object.Height
+		}
+		*s = parsed
+		return nil
+	}
+	var ratio float64
+	if err := json.Unmarshal(trimmed, &ratio); err != nil {
+		return fmt.Errorf("scale must be a number or an object")
+	}
+	*s = Scale{Ratio: ratio}
+	return nil
+}
+
+// Validate checks the structural rules of the magnification. The image configuration limits are
+// enforced by the HTTP layer, which knows both the canvas and the configured ceilings.
+func (s Scale) Validate() error {
+	if s.Ratio < 0 || s.Ratio > MaxScaleRatio {
+		return fmt.Errorf("scale ratio must be between 0 and %g", MaxScaleRatio)
+	}
+	if s.Ratio > 0 && (s.Width > 0 || s.Height > 0) {
+		return fmt.Errorf("scale ratio cannot be combined with width or height")
+	}
+	if s.Width < 0 || s.Height < 0 {
+		return fmt.Errorf("scale width and height cannot be negative")
+	}
+	if s.Width > 0 && s.Width < 16 || s.Height > 0 && s.Height < 16 {
+		return fmt.Errorf("scale target dimensions must be at least 16 pixels")
+	}
+	return nil
+}
+
+// FixedRatio reports the requested fixed ratio, if the scale is not a target size.
+func (s Scale) FixedRatio() (float64, bool) {
+	return s.Ratio, s.Ratio > 0
+}
+
+// TargetSize reports the requested final dimensions; a zero axis means that axis is unconstrained.
+func (s Scale) TargetSize() (int, int, bool) {
+	return s.Width, s.Height, s.Width > 0 || s.Height > 0
+}
+
+// RatioFor derives the magnification for a canvas of the given size. A target size keeps the
+// aspect ratio of the canvas by taking the smaller of the requested axes, so the result always fits
+// inside the target box instead of stretching. Without a target it returns 1 (no magnification).
+func (s Scale) RatioFor(canvasWidth, canvasHeight int) float64 {
+	if s.Ratio > 0 {
+		return s.Ratio
+	}
+	ratio := 0.0
+	if s.Width > 0 && canvasWidth > 0 {
+		ratio = float64(s.Width) / float64(canvasWidth)
+	}
+	if s.Height > 0 && canvasHeight > 0 {
+		heightRatio := float64(s.Height) / float64(canvasHeight)
+		if ratio == 0 || heightRatio < ratio {
+			ratio = heightRatio
+		}
+	}
+	if ratio <= 0 {
+		return 1
+	}
+	return ratio
+}
+
 type Item struct {
-	ID              string            `json:"id"`
-	Count           int               `json:"count,omitempty"`
-	Damage          int               `json:"damage,omitempty"`
-	MaxDamage       int               `json:"maxDamage,omitempty"`
-	CustomModelData *int              `json:"customModelData,omitempty"`
-	Components      json.RawMessage   `json:"components,omitempty"`
-	NBT             json.RawMessage   `json:"nbt,omitempty"`
-	Name            string            `json:"name,omitempty"`
-	Lore            []string          `json:"lore,omitempty"`
-	Enchantments    []string          `json:"enchantments,omitempty"`
-	Texture         string            `json:"texture,omitempty"`
-	Properties      map[string]string `json:"properties,omitempty"`
+	ID              string `json:"id"`
+	Count           int    `json:"count,omitempty"`
+	Damage          int    `json:"damage,omitempty"`
+	MaxDamage       int    `json:"maxDamage,omitempty"`
+	CustomModelData *int   `json:"customModelData,omitempty"`
+	// CustomData is the ItemsAdder custom_model_data value of a user supplied item. Together with the
+	// base material of ID it selects one entry of the custom content index; CustomModelData keeps its
+	// vanilla meaning of driving a range_dispatch override.
+	CustomData   *int              `json:"customData,omitempty"`
+	Components   json.RawMessage   `json:"components,omitempty"`
+	NBT          json.RawMessage   `json:"nbt,omitempty"`
+	Name         string            `json:"name,omitempty"`
+	Lore         []string          `json:"lore,omitempty"`
+	Enchantments []string          `json:"enchantments,omitempty"`
+	Texture      string            `json:"texture,omitempty"`
+	Properties   map[string]string `json:"properties,omitempty"`
+}
+
+// CustomArt is the drawing instruction of one custom item: a flat model (its parent chain already
+// merged down to the first vanilla parent) and the inline textures that model references. Texture
+// values are data URIs, so a render never has to reach outside the request for user content.
+type CustomArt struct {
+	Model    map[string]any    `json:"model"`
+	Textures map[string]string `json:"textures,omitempty"`
+}
+
+// CustomArtKey is the lookup key of CustomArt: a base material and the custom_model_data value that
+// identifies it inside that material.
+func CustomArtKey(material string, customData int) string {
+	return MaterialKey(material) + "#" + strconv.Itoa(customData)
+}
+
+// MaterialKey normalises an item id to the material name the custom content index is grouped by:
+// the vanilla item id without its namespace, upper cased ("minecraft:paper" → "PAPER").
+func MaterialKey(id string) string {
+	trimmed := strings.TrimSpace(id)
+	if index := strings.IndexByte(trimmed, ':'); index >= 0 {
+		trimmed = trimmed[index+1:]
+	}
+	return strings.ToUpper(trimmed)
 }
 
 type Slot struct {
@@ -94,12 +230,10 @@ type ContainerData struct {
 }
 
 type TooltipData struct {
-	Item       Item     `json:"item"`
-	Title      string   `json:"title,omitempty"`
-	Lines      []string `json:"lines,omitempty"`
-	Advanced   bool     `json:"advanced,omitempty"`
-	Icon       bool     `json:"icon,omitempty"`
-	Background string   `json:"background,omitempty"`
+	Item     Item   `json:"item"`
+	Title    string `json:"title,omitempty"`
+	Advanced bool   `json:"advanced,omitempty"`
+	Icon     bool   `json:"icon,omitempty"`
 }
 
 type SkinData struct {
@@ -183,11 +317,11 @@ func (r Request) Validate() error {
 	if len(bytes.TrimSpace(r.Data)) == 0 || bytes.Equal(bytes.TrimSpace(r.Data), []byte("null")) {
 		return fmt.Errorf("data is required")
 	}
-	if r.Options.Width < 0 || r.Options.Height < 0 || r.Options.Scale < 0 || r.Options.Frame < 0 {
+	if r.Options.Width < 0 || r.Options.Height < 0 || r.Options.Frame < 0 {
 		return fmt.Errorf("image options cannot be negative")
 	}
-	if r.Options.Scale > 4 {
-		return fmt.Errorf("image scale cannot exceed 4")
+	if err := r.Options.Scale.Validate(); err != nil {
+		return err
 	}
 	if r.Options.Projection != "" && r.Options.Projection != "gui" && r.Options.Projection != "orthographic" {
 		return fmt.Errorf("unsupported projection %q", r.Options.Projection)
@@ -236,18 +370,24 @@ func validateData(kind string, value any) error {
 		if item.Count < 0 {
 			return fmt.Errorf("item.count cannot be negative")
 		}
+		if err := validateItem(item, "item"); err != nil {
+			return err
+		}
 	case TypeTooltip:
 		data := value.(*TooltipData)
-		if data.Item.ID == "" && data.Title == "" && len(data.Lines) == 0 {
-			return fmt.Errorf("tooltip requires item, title, or lines")
+		if strings.TrimSpace(data.Item.ID) == "" && strings.TrimSpace(data.Title) == "" {
+			return fmt.Errorf("tooltip requires item.id or title")
 		}
-		if len(data.Lines) > 128 {
-			return fmt.Errorf("tooltip cannot contain more than 128 lines")
+		if len(data.Item.Lore) > 128 {
+			return fmt.Errorf("tooltip cannot contain more than 128 lore lines")
 		}
-		for _, line := range data.Lines {
+		for _, line := range data.Item.Lore {
 			if len([]rune(line)) > 1024 {
-				return fmt.Errorf("tooltip line exceeds 1024 characters")
+				return fmt.Errorf("tooltip lore line exceeds 1024 characters")
 			}
+		}
+		if err := validateItem(&data.Item, "tooltip.item"); err != nil {
+			return err
 		}
 	case TypeInventory, TypeItemContainer, TypeEnderchest:
 		data := value.(*ContainerData)
@@ -272,6 +412,9 @@ func validateData(kind string, value any) error {
 			}
 			if !slot.Empty && slot.Item.ID == "" {
 				return fmt.Errorf("slot %d has no item id", slot.Slot)
+			}
+			if err := validateItem(&slot.Item, fmt.Sprintf("slot %d item", slot.Slot)); err != nil {
+				return err
 			}
 		}
 	case TypeSkin:
@@ -301,6 +444,11 @@ func validateData(kind string, value any) error {
 		}
 		if err := validateSlots(data.Armor); err != nil {
 			return err
+		}
+		for _, item := range Items(data) {
+			if err := validateItem(item, "playerInventory item"); err != nil {
+				return err
+			}
 		}
 	case TypePlayerList:
 		data := value.(*PlayerListData)
@@ -362,6 +510,9 @@ func validateData(kind string, value any) error {
 		if strings.TrimSpace(data.Icon.ID) == "" {
 			return fmt.Errorf("achievement.icon.id is required")
 		}
+		if err := validateItem(&data.Icon, "achievement.icon"); err != nil {
+			return err
+		}
 		if data.Frame != "" && data.Frame != "task" && data.Frame != "goal" && data.Frame != "challenge" {
 			return fmt.Errorf("achievement.frame must be task, goal, or challenge")
 		}
@@ -370,6 +521,53 @@ func validateData(kind string, value any) error {
 		}
 	}
 	return nil
+}
+
+// validateItem checks the fields every item position shares, whatever surface the item sits on.
+func validateItem(item *Item, where string) error {
+	if item.CustomData != nil && *item.CustomData < 0 {
+		return fmt.Errorf("%s.customData cannot be negative", where)
+	}
+	return nil
+}
+
+// Items returns every item position of a decoded render request. The HTTP layer resolves the custom
+// art of all of them in one pass, which is why a slot item is returned by address.
+func Items(value any) []*Item {
+	switch data := value.(type) {
+	case *Item:
+		return []*Item{data}
+	case *TooltipData:
+		return []*Item{&data.Item}
+	case *ContainerData:
+		items := make([]*Item, 0, len(data.Slots)+len(data.Items))
+		for index := range data.Slots {
+			items = append(items, &data.Slots[index].Item)
+		}
+		for index := range data.Items {
+			items = append(items, &data.Items[index].Item)
+		}
+		return items
+	case *PlayerInventoryData:
+		items := make([]*Item, 0, len(data.Slots)+len(data.Armor)+2)
+		for index := range data.Slots {
+			items = append(items, &data.Slots[index].Item)
+		}
+		for index := range data.Armor {
+			items = append(items, &data.Armor[index].Item)
+		}
+		if data.Offhand != nil {
+			items = append(items, data.Offhand)
+		}
+		if data.MainHand != nil {
+			items = append(items, data.MainHand)
+		}
+		return items
+	case *AchievementData:
+		return []*Item{&data.Icon}
+	default:
+		return nil
+	}
 }
 
 func decodeMapPixelData(value string) ([]byte, error) {
