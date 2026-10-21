@@ -25,6 +25,7 @@ import (
 	"image/draw"
 	_ "image/png"
 	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -54,12 +55,22 @@ const (
 // of the vanilla font only ever answer 0 or 4, while a unihex glyph is sixteen texels tall and is
 // painted at half scale by the client: a pixel that only covers one or two of its four texels is
 // therefore semi transparent, which is the soft edge the game has at GUI scale one.
+//
+// A unihex glyph also keeps its native texel grid. The averaged cell is what the client shows at
+// half scale, but flattening sixteen texels into eight pixels throws away half the resolution, and
+// magnifying that average is what turned Chinese drawn at twice the size into blocks of grey.
+// Drawing from the grid instead puts one texel on one device pixel at scale two.
 type Glyph struct {
 	Advance  int
 	Ascent   int
 	Width    int
 	Height   int
 	coverage []uint8
+	texels   []uint32
+	// texelColumns is how many texels each row of texels describes, left aligned at bit 31.
+	texelColumns int
+	// texelScale is texels per font pixel: 2 for a unihex bitmap, 0 when there is no grid.
+	texelScale int
 }
 
 // Coverage is how much of the pixel at column, row is inked, in quarters from 0 to 4.
@@ -86,16 +97,22 @@ func (g *Glyph) String() string {
 	return fmt.Sprintf("%dx%d advance %d ascent %d", g.Width, g.Height, g.Advance, g.Ascent)
 }
 
-// Draw paints the glyph with its top edge at top and its left bearing at x. A pixel that is only
-// partly covered is composited with a matching alpha, so a magnified unihex glyph keeps the soft
-// edge the client gets from drawing its texels at half scale instead of turning into a hard block.
-// Every write goes through draw.Over, so text stays readable on top of a panel.
+// Draw paints the glyph with its top edge at top and its left bearing at x, one font pixel per
+// scale device pixels. A glyph that carries a texel grid and is drawn at its own texel scale or
+// larger is resampled from that grid, so twice the size is the sixteen texel bitmap itself; every
+// other glyph is composited from its averaged coverage, which is the half scale soft edge the client
+// has at GUI scale one. Every write goes through draw.Over, so text stays readable on top of a
+// panel.
 func (g *Glyph) Draw(dst *image.RGBA, x, top, scale int, foreground color.RGBA) {
 	if dst == nil {
 		return
 	}
 	if scale < 1 {
 		scale = 1
+	}
+	if len(g.texels) > 0 && scale >= g.texelScale {
+		g.drawTexels(dst, x, top, scale, foreground)
+		return
 	}
 	bounds := dst.Bounds()
 	for row := 0; row < g.Height; row++ {
@@ -109,6 +126,53 @@ func (g *Glyph) Draw(dst *image.RGBA, x, top, scale int, foreground color.RGBA) 
 				ink.A = uint8(int(foreground.A) * coverage / 4)
 			}
 			rect := image.Rect(x+column*scale, top+row*scale, x+(column+1)*scale, top+(row+1)*scale).Intersect(bounds)
+			if rect.Empty() {
+				continue
+			}
+			draw.Draw(dst, rect, &image.Uniform{C: ink}, image.Point{}, draw.Over)
+		}
+	}
+}
+
+// drawTexels resamples the native texel grid at the drawn resolution: every device pixel answers the
+// share of its own area that lit texels cover. At scale == texelScale each texel lands on exactly one
+// pixel, so the glyph is the bitmap the font ships; a scale between two texel multiples is averaged
+// once, at the resolution it is painted at, instead of magnifying the average taken at half scale.
+func (g *Glyph) drawTexels(dst *image.RGBA, x, top, scale int, foreground color.RGBA) {
+	span := float64(g.texelScale) / float64(scale)
+	area := span * span
+	bounds := dst.Bounds()
+	width, height := g.Width*scale, g.Height*scale
+	for row := 0; row < height; row++ {
+		rowLow := float64(row) * span
+		rowHigh := rowLow + span
+		for column := 0; column < width; column++ {
+			columnLow := float64(column) * span
+			columnHigh := columnLow + span
+			lit := 0.0
+			for texelRow := max(0, int(math.Floor(rowLow))); texelRow < min(len(g.texels), int(math.Ceil(rowHigh))); texelRow++ {
+				rowWeight := math.Min(rowHigh, float64(texelRow+1)) - math.Max(rowLow, float64(texelRow))
+				if rowWeight <= 0 {
+					continue
+				}
+				bits := g.texels[texelRow]
+				for texelColumn := max(0, int(math.Floor(columnLow))); texelColumn < min(g.texelColumns, int(math.Ceil(columnHigh))); texelColumn++ {
+					columnWeight := math.Min(columnHigh, float64(texelColumn+1)) - math.Max(columnLow, float64(texelColumn))
+					if columnWeight > 0 && bits>>uint(31-texelColumn)&1 != 0 {
+						lit += columnWeight * rowWeight
+					}
+				}
+			}
+			if lit <= 0 {
+				continue
+			}
+			alpha := int(math.Round(lit / area * 255))
+			if alpha > 255 {
+				alpha = 255
+			}
+			ink := foreground
+			ink.A = uint8(int(foreground.A) * alpha / 255)
+			rect := image.Rect(x+column, top+row, x+column+1, top+row+1).Intersect(bounds)
 			if rect.Empty() {
 				continue
 			}
@@ -604,7 +668,14 @@ func (p *unihexProviderData) read(r rune) *Glyph {
 			}
 		}
 	}
-	return &Glyph{Advance: texels/2 + 1, Ascent: Ascent, Width: width, Height: unihexCell, coverage: coverage}
+	// The native grid travels with the glyph: left aligned in the same window as the coverage
+	// columns, so drawing at twice the size can put one texel on one device pixel.
+	grid := make([]uint32, unifhexRows)
+	for row, value := range bitmap {
+		grid[row] = uint32(value) << uint(left)
+	}
+	return &Glyph{Advance: texels/2 + 1, Ascent: Ascent, Width: width, Height: unihexCell, coverage: coverage,
+		texels: grid, texelColumns: texels, texelScale: 2}
 }
 
 func (p *unihexProviderData) overrideOf(r rune) (sizeOverride, bool) {

@@ -223,6 +223,82 @@ func TestUnihexCJKDrawsSoftEdges(t *testing.T) {
 	}
 }
 
+// At twice the size one texel lands on one pixel, so the glyph is the sixteen texel Unifont bitmap
+// itself rather than the eight pixel average magnified: no greys at all, and exactly one opaque pixel
+// per lit texel.
+func TestUnihexCJKIsSharpAtTexelScale(t *testing.T) {
+	font := loadFixture(t)
+	glyph := font.Glyph('中')
+	canvas := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	glyph.Draw(canvas, 0, 0, 2, color.RGBA{255, 255, 255, 255})
+	// The fixture paints the first texel row of U+4E2D as 0xFF00: eight lit texels, then eight blank.
+	for column := 0; column < 16; column++ {
+		want := uint8(0)
+		if column < 8 {
+			want = 255
+		}
+		if alpha := canvas.RGBAAt(column, 0).A; alpha != want {
+			t.Fatalf("alpha at %d,0 = %d, want %d", column, alpha, want)
+		}
+	}
+	// The second texel row is 0x8100: the first and the eighth texel, nothing in between.
+	if alpha := canvas.RGBAAt(0, 1).A; alpha != 255 {
+		t.Fatalf("alpha of the first texel of the second row = %d, want 255", alpha)
+	}
+	if alpha := canvas.RGBAAt(7, 1).A; alpha != 255 {
+		t.Fatalf("alpha of the eighth texel of the second row = %d, want 255", alpha)
+	}
+	for _, column := range []int{1, 6, 8} {
+		if alpha := canvas.RGBAAt(column, 1).A; alpha != 0 {
+			t.Fatalf("alpha at %d,1 = %d, want no ink", column, alpha)
+		}
+	}
+	opaque := 0
+	for row := 0; row < 16; row++ {
+		for column := 0; column < 16; column++ {
+			if canvas.RGBAAt(column, row).A == 255 {
+				opaque++
+			}
+		}
+	}
+	quarters := 0
+	for row := 0; row < glyph.Height; row++ {
+		for column := 0; column < glyph.Width; column++ {
+			quarters += glyph.Coverage(column, row)
+		}
+	}
+	if opaque != quarters {
+		t.Fatalf("%d opaque pixels carry %d texels of ink, want exactly one pixel per texel", opaque, quarters)
+	}
+}
+
+// A scale between two texel multiples is averaged once at the drawn resolution. Eight lit texels at
+// three device pixels per font pixel cover twelve opaque pixels; magnifying the half scale average
+// instead would repeat the same grey in every three by three block and paint no solid run at all.
+func TestUnihexCJKResamplesBetweenTexelScales(t *testing.T) {
+	font := loadFixture(t)
+	canvas := image.NewRGBA(image.Rect(0, 0, 25, 25))
+	font.Glyph('中').Draw(canvas, 0, 0, 3, color.RGBA{255, 255, 255, 255})
+	solid := 0
+	for column := 0; column < 25; column++ {
+		if canvas.RGBAAt(column, 0).A == 255 {
+			solid++
+		}
+	}
+	if solid != 12 {
+		t.Fatalf("the first texel row carries %d opaque pixels at scale three, want the twelve of eight texels", solid)
+	}
+	partial := 0
+	for column := 0; column < 25; column++ {
+		if alpha := canvas.RGBAAt(column, 1).A; alpha > 0 && alpha < 255 {
+			partial++
+		}
+	}
+	if partial == 0 {
+		t.Fatal("the second row has no partly covered pixel, the glyph was magnified instead of resampled")
+	}
+}
+
 // Outside a size override the advance follows the inked texels, four of them forming one pixel.
 func TestUnihexGlyphTrimsToItsInk(t *testing.T) {
 	font := loadFixture(t)

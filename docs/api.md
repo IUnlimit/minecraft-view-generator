@@ -114,7 +114,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 `filter`（`uniform` / `jp`）按原版语义求值：默认字体不启用任何选项，因此 `uniform: false` 的 bitmap 组保留、`jp: true` 的日文 Unifont 变体被跳过。中文保留原始 Unicode 码点，不做拼音化、转写或替换，字形来自 `unifont.zip` 的点阵而非矢量字体。
 
-度量与原版一致：传入坐标就是 `GuiGraphics.drawString` 的行顶坐标（基线 = 行顶 + 7），空格 4、普通字形「墨迹宽 + 1」、CJK 全角 9，tooltip 行高 10。`bitmap` 贴图是绘制好的位图，像素只有「有墨 / 无墨」两态；`unihex` 的 16×16 点阵是 2×2 归并到 8×8，所以每个输出像素按覆盖的 texel 数取 5 档（`0`、`1`、`2`、`3`、`4` 四分之一），1 档与 2 档以半透明绘制——细笔画因此不会被二值化丢掉，放大（`options.scale`）之后仍是柔边而不是硬块。所有文本按最近邻采样放大，无抗锯齿插值，缩放渲染（playerlist 2 倍、achievement 3 倍）的字体同步放大。上述字体资产由 `prepare` 阶段从官方 asset index 物化到 `data/resources/<version>/vanilla/assets/minecraft/font/`，与其它原版资源一同按 SHA-1 缓存，并在资源根目录写一份 `font-overlay.json` 记录本次物化的文件清单。
+度量与原版一致：传入坐标就是 `GuiGraphics.drawString` 的行顶坐标（基线 = 行顶 + 7），空格 4、普通字形「墨迹宽 + 1」、CJK 全角 9，tooltip 行高 10。`bitmap` 贴图是绘制好的位图，像素只有「有墨 / 无墨」两态；`unihex` 的 16×16 点阵同时保留原始网格与 2×2 归并后的 8×8 视图：1 倍时用 8×8 的 5 档覆盖度（`0`–`4` 四分之一）绘制，1 档与 2 档半透明，就是原版 GUI scale 1 的柔边；**2 倍及以上改用原始 16×16 网格重采样**，2 倍时一个 texel 正好落在 1 个设备像素上（笔画是实色，不再是灰块），3 倍等非整数倍按面积覆盖做一次正确的抗锯齿。上述字体资产由 `prepare` 阶段从官方 asset index 物化到 `data/resources/<version>/vanilla/assets/minecraft/font/`，与其它原版资源一同按 SHA-1 缓存，并在资源根目录写一份 `font-overlay.json` 记录本次物化的文件清单。
 
 客户端 jar 自带的 `font/default.json` 和 `include/{default,space}.json` 只是占位，真正的 Unifont 定义与压缩包只存在于 asset index。因此：
 
