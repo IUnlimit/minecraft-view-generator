@@ -4,7 +4,17 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BINARY="$ROOT/dist/minecraft-view-generator2"
 
-if [ "${BUILD:-0}" = "1" ] || [ ! -x "$BINARY" ]; then
+# Rebuild when the binary is missing or older than the sources. Without the age check this script
+# happily served the code from before the last edit, which looks like a rendering bug rather than a
+# stale build.
+needs_build() {
+	if [ ! -x "$BINARY" ]; then
+		return 0
+	fi
+	[ -n "$(find "$ROOT/cmd" "$ROOT/internal" "$ROOT/go.mod" -newer "$BINARY" -print -quit 2>/dev/null)" ]
+}
+
+if [ "${BUILD:-0}" = "1" ] || needs_build; then
 	make -C "$ROOT" build
 fi
 
