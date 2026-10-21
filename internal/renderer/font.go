@@ -4,91 +4,82 @@ import (
 	"image"
 	"image/color"
 	"strings"
+	"sync"
+
+	"github.com/illtamer/minecraft-view-generator2/internal/font"
+	"github.com/illtamer/minecraft-view-generator2/internal/resources"
 )
 
-var glyphs = map[rune][]string{
-	'0': {"01110", "10001", "10011", "10101", "11001", "10001", "01110"},
-	'1': {"00100", "01100", "00100", "00100", "00100", "00100", "01110"},
-	'2': {"01110", "10001", "00001", "00010", "00100", "01000", "11111"},
-	'3': {"11110", "00001", "00001", "01110", "00001", "00001", "11110"},
-	'4': {"00010", "00110", "01010", "10010", "11111", "00010", "00010"},
-	'5': {"11111", "10000", "10000", "11110", "00001", "00001", "11110"},
-	'6': {"01110", "10000", "10000", "11110", "10001", "10001", "01110"},
-	'7': {"11111", "00001", "00010", "00100", "01000", "01000", "01000"},
-	'8': {"01110", "10001", "10001", "01110", "10001", "10001", "01110"},
-	'9': {"01110", "10001", "10001", "01111", "00001", "00001", "01110"},
-	'A': {"01110", "10001", "10001", "11111", "10001", "10001", "10001"},
-	'B': {"11110", "10001", "10001", "11110", "10001", "10001", "11110"},
-	'C': {"01111", "10000", "10000", "10000", "10000", "10000", "01111"},
-	'D': {"11110", "10001", "10001", "10001", "10001", "10001", "11110"},
-	'E': {"11111", "10000", "10000", "11110", "10000", "10000", "11111"},
-	'F': {"11111", "10000", "10000", "11110", "10000", "10000", "10000"},
-	'G': {"01111", "10000", "10000", "10111", "10001", "10001", "01111"},
-	'H': {"10001", "10001", "10001", "11111", "10001", "10001", "10001"},
-	'I': {"11111", "00100", "00100", "00100", "00100", "00100", "11111"},
-	'J': {"00111", "00010", "00010", "00010", "00010", "10010", "01100"},
-	'K': {"10001", "10010", "10100", "11000", "10100", "10010", "10001"},
-	'L': {"10000", "10000", "10000", "10000", "10000", "10000", "11111"},
-	'M': {"10001", "11011", "10101", "10101", "10001", "10001", "10001"},
-	'N': {"10001", "11001", "10101", "10011", "10001", "10001", "10001"},
-	'O': {"01110", "10001", "10001", "10001", "10001", "10001", "01110"},
-	'P': {"11110", "10001", "10001", "11110", "10000", "10000", "10000"},
-	'Q': {"01110", "10001", "10001", "10001", "10101", "10010", "01101"},
-	'R': {"11110", "10001", "10001", "11110", "10100", "10010", "10001"},
-	'S': {"01111", "10000", "10000", "01110", "00001", "00001", "11110"},
-	'T': {"11111", "00100", "00100", "00100", "00100", "00100", "00100"},
-	'U': {"10001", "10001", "10001", "10001", "10001", "10001", "01110"},
-	'V': {"10001", "10001", "10001", "10001", "10001", "01010", "00100"},
-	'W': {"10001", "10001", "10001", "10101", "10101", "11011", "10001"},
-	'X': {"10001", "10001", "01010", "00100", "01010", "10001", "10001"},
-	'Y': {"10001", "10001", "01010", "00100", "00100", "00100", "00100"},
-	'Z': {"11111", "00001", "00010", "00100", "01000", "10000", "11111"},
-	':': {"00000", "00100", "00100", "00000", "00100", "00100", "00000"},
-	'.': {"00000", "00000", "00000", "00000", "00000", "00110", "00110"},
-	'-': {"00000", "00000", "00000", "11111", "00000", "00000", "00000"},
-	'/': {"00001", "00010", "00100", "01000", "10000", "00000", "00000"},
-	'(': {"00010", "00100", "01000", "01000", "01000", "00100", "00010"},
-	')': {"01000", "00100", "00010", "00010", "00010", "00100", "01000"},
-	'[': {"01110", "01000", "01000", "01000", "01000", "01000", "01110"},
-	']': {"01110", "00010", "00010", "00010", "00010", "00010", "01110"},
-	'_': {"00000", "00000", "00000", "00000", "00000", "00000", "11111"},
-	' ': {"00000", "00000", "00000", "00000", "00000", "00000", "00000"},
+// The fallback renderer draws its text with the same font pipeline as the Java backend: the
+// Minecraft provider chain of the resource context (assets/minecraft/font/default.json), so a
+// Chinese label is measured with the Unifont advance of nine pixels and drawn from the same 16x16
+// bitmap the game uses, instead of a hand written glyph table that only knew ASCII.
+
+var (
+	fontMu    sync.Mutex
+	fontCache = map[string]*font.Font{}
+)
+
+// fontFor returns the Minecraft font of a resource context, loaded once per set of pack roots.
+func fontFor(resource resources.Context) *font.Font {
+	roots := fontRoots(resource)
+	key := strings.Join(roots, "\x00")
+	fontMu.Lock()
+	defer fontMu.Unlock()
+	if cached, ok := fontCache[key]; ok {
+		return cached
+	}
+	loaded := font.Load(roots)
+	fontCache[key] = loaded
+	return loaded
 }
 
-func drawText(img *image.RGBA, x, y int, text string, scale int, foreground color.Color, maxWidth int) int {
+// fontRoots mirrors the pack order of the Java resource stack: the context root, the vanilla tree,
+// the addon and finally the custom packs, each overriding the one before it.
+func fontRoots(resource resources.Context) []string {
+	candidates := make([]string, 0, 3+len(resource.PackRoots))
+	candidates = append(candidates, resource.Root, resource.OfficialRoot, resource.AddonRoot)
+	candidates = append(candidates, resource.PackRoots...)
+	roots := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate) != "" {
+			roots = append(roots, candidate)
+		}
+	}
+	return roots
+}
+
+// drawText draws one line of text at the vanilla label geometry: y is the top of the eight pixel
+// text cell and the baseline sits font.Ascent scaled pixels below it, exactly the coordinate
+// GuiGraphics.drawString takes. Text that would cross maxWidth is left out entirely, and the drawn
+// width is returned.
+func drawText(img *image.RGBA, f *font.Font, x, y int, text string, scale int, foreground color.Color, maxWidth int) int {
 	if scale < 1 {
 		scale = 1
 	}
+	ink := color.RGBAModel.Convert(foreground).(color.RGBA)
+	baseline := y + font.Ascent*scale
 	cursor := x
-	for _, raw := range strings.ToUpper(text) {
-		glyph, ok := glyphs[raw]
-		if !ok {
-			glyph = []string{"11111", "10001", "10101", "10001", "10101", "10001", "11111"}
-		}
-		glyphWidth := 5*scale + scale
-		if maxWidth > 0 && cursor+glyphWidth > x+maxWidth {
+	for _, r := range text {
+		glyph := f.Glyph(r)
+		advance := glyph.Advance * scale
+		if maxWidth > 0 && cursor+advance > x+maxWidth {
 			break
 		}
-		for row, line := range glyph {
-			for column, bit := range line {
-				if bit == '1' {
-					fillRect(img, cursor+column*scale, y+row*scale, scale, scale, foreground)
-				}
-			}
-		}
-		cursor += glyphWidth
+		glyph.Draw(img, cursor, baseline-glyph.Ascent*scale, scale, ink)
+		cursor += advance
 	}
 	return cursor - x
 }
 
-func textWidth(text string, scale int) int {
+func textWidth(f *font.Font, text string, scale int) int {
 	if scale < 1 {
 		scale = 1
 	}
-	return len([]rune(text)) * (6 * scale)
+	return f.Width(text) * scale
 }
 
-func drawCenteredText(img *image.RGBA, y int, text string, scale int, foreground color.Color) {
-	width := textWidth(text, scale)
-	drawText(img, (img.Bounds().Dx()-width)/2, y, text, scale, foreground, img.Bounds().Dx())
+func drawCenteredText(img *image.RGBA, f *font.Font, y int, text string, scale int, foreground color.Color) {
+	width := textWidth(f, text, scale)
+	drawText(img, f, (img.Bounds().Dx()-width)/2, y, text, scale, foreground, img.Bounds().Dx())
 }
