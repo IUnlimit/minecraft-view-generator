@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/illtamer/minecraft-view-generator2/internal/config"
+	"github.com/illtamer/minecraft-view-generator2/internal/model"
 )
 
 type Status string
@@ -65,6 +67,10 @@ type Context struct {
 	AddonRoot    string
 	PackRoots    []string
 	Warnings     []string
+	// CustomArt holds the drawing instructions of the custom items one request references, keyed by
+	// model.CustomArtKey. It is request scoped, so the same version can serve different user content
+	// at the same time.
+	CustomArt map[string]model.CustomArt
 }
 
 type Manager struct {
@@ -126,6 +132,20 @@ func (m *Manager) loadStates() error {
 			state.Error = "resource preparation was interrupted"
 			state.FinishedAt = time.Now().UTC()
 		}
+		if state.Status == StatusReady && !fontAssetsPresent(state.ResourceRoot) {
+			// A tree published before the font overlay existed answers 200 with every CJK glyph
+			// drawn as the missing box, so it is restored here instead of being trusted. When even
+			// the object cache is gone the version is no longer ready and prepare has to run again.
+			if repairErr := m.restoreFontAssets(state.ResourceRoot); repairErr != nil {
+				state.Status = StatusFailed
+				state.Error = "font assets are missing from the resource tree: " + repairErr.Error() + "; prepare this version again"
+				state.FinishedAt = time.Now().UTC()
+				slog.Error("resource tree is missing its font assets", "version", state.Version, "root", state.ResourceRoot, "error", repairErr)
+				m.persistState(&state)
+			} else {
+				slog.Warn("restored missing font assets", "version", state.Version, "root", state.ResourceRoot)
+			}
+		}
 		m.states[state.Version] = cloneState(&state)
 	}
 	return nil
@@ -163,7 +183,9 @@ func (m *Manager) Prepare(version string) (VersionState, bool, error) {
 	}
 	m.mu.Lock()
 	if state, ok := m.states[version]; ok {
-		if state.Status == StatusReady {
+		// A tree prepared before the font overlay existed has every texture but no Unifont, which
+		// silently degrades every label. Re-run instead of trusting the ready flag.
+		if state.Status == StatusReady && fontAssetsPresent(state.ResourceRoot) {
 			result := *cloneState(state)
 			m.mu.Unlock()
 			return result, false, nil
@@ -279,6 +301,15 @@ func (m *Manager) prepare(version string) {
 			return
 		}
 		officialHash = metadata.Downloads.Client.SHA1
+	}
+	// The client keeps the Unifont definitions and its 1.5 MB bitmap archive in the asset index
+	// rather than in the jar, where only an empty placeholder ships. Overlay them so the resource
+	// tree carries the font every label is drawn with.
+	state("font-assets", 0.68)
+	if err = materializeFontAssets(staging, assetIndex, m.cfg.DataDir); err != nil {
+		m.fail(version, fmt.Errorf("materialize font assets: %w", err))
+		_ = os.RemoveAll(staging)
+		return
 	}
 	if m.cfg.AddonEnabled {
 		state("addon-metadata", 0.72)
@@ -618,6 +649,11 @@ func (m *Manager) Context(version string) (Context, bool) {
 	if !ok || state.Status != StatusReady || state.ResourceRoot == "" {
 		return Context{}, false
 	}
+	// A ready flag on a tree that lost its font overlay would render every label as missing boxes;
+	// refusing the context keeps that from being answered with a picture.
+	if !fontAssetsPresent(state.ResourceRoot) {
+		return Context{}, false
+	}
 	return Context{Version: version, Root: state.ResourceRoot, OfficialRoot: filepath.Join(state.ResourceRoot, "vanilla"), AddonRoot: filepath.Join(state.ResourceRoot, "addon"), PackRoots: append([]string(nil), state.ResourcePacks...), Warnings: append([]string(nil), state.Warnings...)}, true
 }
 
@@ -666,6 +702,116 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+// fontAssetPrefix is the slice of the asset index the client loads as resources: the Unifont
+// definition, its bitmap archive and the private use area variants. They live in the index because
+// the jar only carries an empty placeholder for them.
+const fontAssetPrefix = "minecraft/font/"
+
+// fontOverlayManifest lists the font files the overlay wrote, relative to the vanilla tree. The
+// client jar ships font/default.json and include/{default,space}.json but an empty placeholder for
+// the Unifont ones, so without this record a tree published before the overlay existed looks like a
+// valid font tree and every CJK glyph silently becomes the missing box.
+const fontOverlayManifest = "font-overlay.json"
+
+// materializeFontAssets copies the font entries of the asset index from the object cache into the
+// resource tree, then records them in the overlay manifest. The index wins over the jar, so the
+// empty placeholder the client jar ships is replaced by the real Unifont definition and the archive
+// it names.
+func materializeFontAssets(root string, index AssetIndex, dataDir string) error {
+	names := make([]string, 0, len(index.Objects))
+	for name := range index.Objects {
+		if strings.HasPrefix(name, fontAssetPrefix) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	target := filepath.Join(root, "vanilla")
+	written := make([]string, 0, len(names))
+	for _, name := range names {
+		if !strings.HasSuffix(name, ".json") && !strings.HasSuffix(name, ".zip") {
+			continue
+		}
+		object := index.Objects[name]
+		source := filepath.Join(dataDir, "objects", strings.ToLower(object.Hash))
+		data, err := os.ReadFile(source)
+		if err != nil {
+			return fmt.Errorf("read asset object %s: %w", name, err)
+		}
+		relative := filepath.ToSlash(filepath.Join("assets", filepath.FromSlash(name)))
+		destination := filepath.Join(target, filepath.FromSlash(relative))
+		if !pathWithin(target, destination) {
+			return fmt.Errorf("unsafe font asset path %q", name)
+		}
+		if err = writeAtomic(destination, data, 0o640); err != nil {
+			return fmt.Errorf("publish font asset %s: %w", name, err)
+		}
+		written = append(written, relative)
+	}
+	if len(written) == 0 {
+		return errors.New("the asset index carries no font assets")
+	}
+	manifest, err := json.MarshalIndent(struct {
+		Files []string `json:"files"`
+	}{Files: written}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(root, fontOverlayManifest), append(manifest, '\n'), 0o640)
+}
+
+// fontAssetsPresent reports whether a prepared resource tree carries every font file the overlay
+// wrote. It answers false for a tree published before the overlay existed (no manifest) and for one
+// whose files were removed afterwards, which is how Prepare and loadStates notice they have to run
+// the overlay again.
+func fontAssetsPresent(root string) bool {
+	if strings.TrimSpace(root) == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(root, fontOverlayManifest))
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		Files []string `json:"files"`
+	}
+	if err = json.Unmarshal(data, &manifest); err != nil || len(manifest.Files) == 0 {
+		return false
+	}
+	for _, name := range manifest.Files {
+		relative := filepath.FromSlash(name)
+		if filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return false
+		}
+		info, statErr := os.Stat(filepath.Join(root, "vanilla", relative))
+		if statErr != nil || !info.Mode().IsRegular() {
+			return false
+		}
+	}
+	return true
+}
+
+// restoreFontAssets puts the overlay back into a ready tree that was published without it — by an
+// older binary, or before the overlay existed at all. The tree keeps the asset index it was
+// prepared from, so this is a local copy out of the object cache and needs no network. It is the
+// startup repair that turns a silently degraded tree back into a renderable one.
+func (m *Manager) restoreFontAssets(root string) error {
+	if fontAssetsPresent(root) {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(root, "official-assets-index.json"))
+	if err != nil {
+		return fmt.Errorf("read the asset index of this tree: %w", err)
+	}
+	var index AssetIndex
+	if err = json.Unmarshal(data, &index); err != nil {
+		return fmt.Errorf("decode the asset index of this tree: %w", err)
+	}
+	if err = materializeFontAssets(root, index, m.cfg.DataDir); err != nil {
+		return err
+	}
+	return nil
 }
 
 func publishDirectory(staging, destination string) error {
