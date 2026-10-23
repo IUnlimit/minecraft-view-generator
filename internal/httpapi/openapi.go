@@ -115,7 +115,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeTooltip,
 			summary:     "tooltip · 悬浮提示",
-			description: "按原版 1.21.11 TooltipRenderUtil 渲染：文本块四周各外扩 12px，用 gui/sprites/tooltip/background 九宫格铺底（advanced 时叠加 tooltip/frame），行高 10px、标题后额外 2px，文本始终带阴影。文本支持 § 与 & 两种颜色/修饰符前缀（0-9a-f、l/o/n/m/k/r；§k 为确定性渲染，不做随机化），只有后跟合法码字符时才算格式码。未显式给出 title 时按原版顺序生成行：悬停名、advanced 物品 id、lore、附魔、属性修饰符、单值组件、advanced 组件与 NBT 计数；lore 只来自 item.lore（或 components[\"minecraft:lore\"]），位置固定在悬停名之后，默认 §5 紫色斜体，显式格式码优先。icon 默认关闭，设为 true 时在左侧绘制物品图标。",
+			description: "按原版 1.21.11 TooltipRenderUtil 渲染：文本块四周各外扩 12px，用 gui/sprites/tooltip/background 九宫格铺底（advanced 时叠加 tooltip/frame），行高 10px、标题后额外 2px，文本始终带阴影。文本支持 § 与 & 两种颜色/修饰符前缀（0-9a-f、l/o/n/m/k/r；§k 为确定性渲染，不做随机化），另支持任意 RGB 的 §x§R§R§G§G§B§B 写法（六组前缀+十六进制数字，缺一组则整段按字面保留），只有后跟合法码字符时才算格式码。未显式给出 title 时按原版顺序生成行：悬停名、advanced 物品 id、lore、附魔、属性修饰符、单值组件、advanced 组件与 NBT 计数；lore 只来自 item.lore（或 components[\"minecraft:lore\"]），位置固定在悬停名之后，默认 §5 紫色斜体，显式格式码优先。icon 默认关闭，设为 true 时在左侧绘制物品图标。",
 			payload: `{
   "version": "1.21.11",
   "type": "tooltip",

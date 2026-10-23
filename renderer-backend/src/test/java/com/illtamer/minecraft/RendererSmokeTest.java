@@ -32,6 +32,7 @@ public final class RendererSmokeTest {
         testTooltip(renderer, root);
         testHeldItems(renderer, root);
         testTextColours(renderer, root);
+        testHexColours(renderer, root);
         testChineseFont(renderer, root);
         testMissingFontDefinition(root);
         testSpecialItems(renderer, root);
@@ -786,6 +787,85 @@ public final class RendererSmokeTest {
         BufferedImage mapImage = renderer.render(map);
         require(countExact(mapImage, 0x55FF55) > 4, "map dimension label ignores the ampersand colour code");
         require(countExact(mapImage, 0xFFFF55) > 4, "map marker name ignores the ampersand colour code");
+    }
+
+    /**
+     * The arbitrary colour form of the legacy format, {@code §x§R§R§G§G§B§B}: the six prefix plus
+     * hexadecimal digit pairs are one colour code, both prefixes and either digit case are accepted,
+     * the code does not count towards the measured width and the style switches of the run it sits in
+     * survive it. An incomplete sequence is not consumed at all.
+     */
+    private static void testHexColours(Renderer renderer, Path root) throws Exception {
+        BufferedImage upper = titleTooltip(renderer, root, hexColour(0xA7, "6699FF", "Hex"));
+        require(countExact(upper, 0x6699FF) > 4, "tooltip ignores the section hex colour code");
+
+        // The compatibility prefix, lower case digits and a sequence whose six prefixes differ all
+        // address the same colour.
+        BufferedImage ampersand = titleTooltip(renderer, root, "&x&6&6&9&9&f&fHex");
+        require(countExact(ampersand, 0x6699FF) > 4, "the ampersand hex form draws no pixels of its colour");
+        BufferedImage mixed = titleTooltip(renderer, root,
+                "&x" + section('6') + "&6" + section('9') + "&9" + section('F') + "&fHex");
+        require(countExact(mixed, 0x6699FF) > 4, "mixing the two prefixes inside one hex code is rejected");
+
+        // The code is not part of the measured width, so the box and the ink stay where the plain
+        // title puts them.
+        BufferedImage plain = titleTooltip(renderer, root, "Hex");
+        require(upper.getWidth() == plain.getWidth(),
+                "the hex code counts towards the tooltip width: " + upper.getWidth() + " != " + plain.getWidth());
+        require(exactBounds(upper, 0x6699FF)[0] == exactBounds(plain, 0xFFFFFF)[0], "the hex code shifts the title");
+
+        // A hex code only changes the colour: a §l in front of it still reaches the run it introduces,
+        // so the title advances one extra pixel per glyph and its ink is thicker.
+        String hexTitle = hexColour(0xA7, "FF33AA", "Bold");
+        BufferedImage plainHex = renderContainer(renderer, root, "inventory", Map.of("title", hexTitle, "rows", 3));
+        BufferedImage boldHex = renderContainer(renderer, root, "inventory",
+                Map.of("title", section('l') + hexTitle, "rows", 3));
+        int[] plainInk = exactBounds(plainHex, 0xFF33AA);
+        int[] boldInk = exactBounds(boldHex, 0xFF33AA);
+        require(boldInk[0] == plainInk[0], "the hex code shifts the bold title");
+        require(boldInk[2] > plainInk[2], "a hex colour drops the bold advance of its run");
+        require(countExact(boldHex, 0xFF33AA) > countExact(plainHex, 0xFF33AA), "a hex colour drops the bold ink");
+
+        // A sequence that stops half way is left in the text: it is never read as 0x6699FF, and the
+        // codes inside it keep applying one at a time.
+        BufferedImage incomplete = titleTooltip(renderer, root, section('x') + section('6') + "Hex");
+        require(countExact(incomplete, 0x6699FF) == 0, "an incomplete hex sequence was read as a colour");
+        require(countExact(incomplete, 0xFFAA00) > 4, "the complete code inside an incomplete sequence was dropped");
+        require(hasPixels(incomplete), "an incomplete hex sequence broke the tooltip");
+    }
+
+    /**
+     * One {@code §} code. Both the prefix and the code character are spelled from their code points:
+     * a Java unicode escape for the section sign cannot survive every editor and diff tool.
+     */
+    private static String section(char code) {
+        return (char) 0xA7 + String.valueOf(code);
+    }
+
+    /** The arbitrary colour form of the legacy format, {@code §x§R§R§G§G§B§B}, followed by {@code text}. */
+    private static String hexColour(int prefix, String hex, String text) {
+        StringBuilder builder = new StringBuilder().append((char) prefix).append('x');
+        for (int index = 0; index < hex.length(); index++) {
+            builder.append((char) prefix).append(hex.charAt(index));
+        }
+        return builder.append(text).toString();
+    }
+
+    /** Renders a tooltip whose only line is the given title. */
+    private static BufferedImage titleTooltip(Renderer renderer, Path root, String title) throws Exception {
+        return sizedTooltip(renderer, root, title, 0);
+    }
+
+    /** Renders a title only tooltip at a requested canvas width, which is what limits the wrap. */
+    private static BufferedImage sizedTooltip(Renderer renderer, Path root, String title, int width) throws Exception {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", "tooltip");
+        request.put("resourceRoot", root.toString());
+        request.put("tooltip", Map.of("title", title));
+        if (width > 0) {
+            request.put("width", width);
+        }
+        return renderer.render(request);
     }
 
     private static BufferedImage renderPlayerList(Renderer renderer, Path root, String header, String footer, List<Map<String, Object>> players) throws Exception {

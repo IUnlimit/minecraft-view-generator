@@ -1874,6 +1874,12 @@ final class Renderer {
      * counts as a code when a valid code character follows it, so a literal ampersand survives, and a
      * run without a code of its own keeps {@code defaultColor} — which is exactly how vanilla applies
      * the colour argument of {@code GuiGraphics#drawString} to unstyled text.</p>
+     *
+     * <p>A complete {@code §x§R§R§G§G§B§B} sequence is the arbitrary colour form of the same legacy
+     * syntax: it only changes the colour and leaves the style switches alone, like a palette code. It
+     * is checked before the single character codes because its marker {@code x} is not one of them,
+     * and an incomplete sequence is left in the text unchanged instead of being consumed half way —
+     * the codes inside it then apply one by one, exactly as they would without the marker.</p>
      */
     private List<TextRun> parseStyledText(String text, int defaultColor) {
         List<TextRun> runs = new ArrayList<>();
@@ -1888,6 +1894,17 @@ final class Renderer {
         int index = 0;
         while (index < text.length()) {
             int codePoint = text.codePointAt(index);
+            int hexEnd = hexColorEnd(text, index);
+            if (hexEnd >= 0) {
+                color = hexRgb(text, index);
+                if (current.length() > 0) {
+                    runs.add(style.toRun(current.toString()));
+                    current.setLength(0);
+                }
+                style = new Style(color, bold, italic, underline, strikethrough, obfuscated);
+                index = hexEnd;
+                continue;
+            }
             if ((codePoint == 0xA7 || codePoint == '&') && index + 1 < text.length()
                     && isFormatCode(text.charAt(index + 1))) {
                 char code = Character.toLowerCase(text.charAt(index + 1));
@@ -1935,6 +1952,48 @@ final class Renderer {
     private static boolean isFormatCode(char code) {
         char lower = Character.toLowerCase(code);
         return lower >= '0' && lower <= '9' || lower >= 'a' && lower <= 'f' || "lonmkr".indexOf(lower) >= 0;
+    }
+
+    /** Whether {@code value} is a prefix character of the legacy format, {@code §} or its {@code &} alias. */
+    private static boolean isPrefix(char value) {
+        return value == 0xA7 || value == '&';
+    }
+
+    /** One of the digits a hexadecimal colour nibble is written with, which is ASCII only. */
+    private static boolean isHexNibble(char value) {
+        return value >= '0' && value <= '9' || value >= 'a' && value <= 'f' || value >= 'A' && value <= 'F';
+    }
+
+    /**
+     * The index just past the {@code §x§R§R§G§G§B§B} sequence starting at {@code index}, or -1 when
+     * there is no complete one there. A sequence is a prefix, the marker {@code x} and six prefix plus
+     * hexadecimal digit pairs; the prefixes may differ from each other, and the digits may be written
+     * in either case.
+     */
+    private static int hexColorEnd(String text, int index) {
+        if (index + 1 >= text.length() || !isPrefix(text.charAt(index)) || Character.toLowerCase(text.charAt(index + 1)) != 'x') {
+            return -1;
+        }
+        int cursor = index + 2;
+        for (int pair = 0; pair < 6; pair++) {
+            if (cursor + 1 >= text.length() || !isPrefix(text.charAt(cursor)) || !isHexNibble(text.charAt(cursor + 1))) {
+                return -1;
+            }
+            cursor += 2;
+        }
+        return cursor;
+    }
+
+    /** The {@code 0xRRGGBB} colour of the sequence {@link #hexColorEnd} has just validated. */
+    private static int hexRgb(String text, int index) {
+        int rgb = 0;
+        for (int channel = 0; channel < 3; channel++) {
+            int cursor = index + 2 + channel * 4;
+            int high = Character.digit(text.charAt(cursor + 1), 16);
+            int low = Character.digit(text.charAt(cursor + 3), 16);
+            rgb = rgb << 8 | (high << 4 | low);
+        }
+        return rgb;
     }
 
     private record TextRun(String text, int color, boolean bold, boolean italic, boolean underline, boolean strikethrough, boolean obfuscated) {
