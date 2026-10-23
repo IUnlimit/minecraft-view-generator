@@ -656,11 +656,11 @@ final class MinecraftFont {
          * average magnified. Everything else keeps the coverage path, the half scale look the client
          * has at GUI scale one.</p>
          */
-        void draw(Graphics2D graphics, int x, int top, int layoutScale, int deviceScale, int rgb, boolean italic) {
+        void draw(Graphics2D graphics, int x, int top, int layoutScale, int deviceScale, int rgb, boolean italic, boolean bold) {
             if (texels != null && deviceScale >= texelScale) {
-                drawTexels(graphics, x, top, layoutScale, deviceScale, rgb, italic);
+                drawTexels(graphics, x, top, layoutScale, deviceScale, rgb, italic, bold);
             } else {
-                drawCoverage(graphics, x, top, layoutScale, rgb, italic);
+                drawCoverage(graphics, x, top, layoutScale, rgb, italic, bold);
             }
         }
 
@@ -669,29 +669,44 @@ final class MinecraftFont {
          * sheared a quarter pixel per pixel of height and a partly covered pixel composited with a
          * matching alpha.
          */
-        private void drawCoverage(Graphics2D graphics, int x, int top, int scale, int rgb, boolean italic) {
+        private void drawCoverage(Graphics2D graphics, int x, int top, int scale, int rgb, boolean italic, boolean bold) {
             Color[] palette = new Color[5];
             for (int level = 1; level <= 4; level++) {
                 palette[level] = new Color(rgb & 0xFFFFFF | level * 255 / 4 << 24, true);
             }
+            // A bold glyph paints one column past its own box: that is exactly the pixel the second,
+            // one pixel offset pass used to add, and it would be lost at the last column of the cell.
+            int columns = width + (bold ? 1 : 0);
             for (int row = 0; row < height; row++) {
                 int shear = italic ? Math.round((ascent - row) * 0.25F * scale) : 0;
                 int column = 0;
-                while (column < width) {
-                    int level = coverage(column, row);
-                    if (level == 0) {
+                while (column < columns) {
+                    int coverage = level(column, row, bold);
+                    if (coverage == 0) {
                         column++;
                         continue;
                     }
                     int run = column;
-                    while (run < width && coverage(run, row) == level) {
+                    while (run < columns && level(run, row, bold) == coverage) {
                         run++;
                     }
-                    graphics.setColor(palette[level]);
+                    graphics.setColor(palette[coverage]);
                     graphics.fillRect(x + column * scale + shear, top + row * scale, (run - column) * scale, scale);
                     column = run;
                 }
             }
+        }
+
+        /**
+         * How inked one font pixel is when the glyph is drawn, in quarters. A bold glyph is the same
+         * ink grown by one pixel to the right — the maximum of this pixel and its left neighbour, so
+         * a stroke widens without ever becoming darker than a plain one. Drawing the glyph twice
+         * instead would composite the same coverage twice and add brightness steps that a plain
+         * glyph never has, which is exactly the double outline bold used to show.
+         */
+        private int level(int column, int row, boolean bold) {
+            int level = coverage(column, row);
+            return bold ? Math.max(level, coverage(column - 1, row)) : level;
         }
 
         /**
@@ -705,8 +720,8 @@ final class MinecraftFont {
          * fractional rectangles: their edges land exactly on device pixel boundaries and the caller's
          * transform turns them back into whole device pixels.</p>
          */
-        private void drawTexels(Graphics2D graphics, int x, int top, int layoutScale, int deviceScale, int rgb, boolean italic) {
-            int deviceWidth = width * deviceScale;
+        private void drawTexels(Graphics2D graphics, int x, int top, int layoutScale, int deviceScale, int rgb, boolean italic, boolean bold) {
+            int deviceWidth = (width + (bold ? 1 : 0)) * deviceScale;
             int deviceHeight = height * deviceScale;
             double span = (double) texelScale / deviceScale;
             double step = (double) layoutScale / deviceScale;
@@ -745,6 +760,14 @@ final class MinecraftFont {
                 }
                 for (int column = 0; column < deviceWidth; column++) {
                     alphas[column] = ink[column] <= 0 ? 0 : (int) Math.min(255, Math.round(ink[column] / area * 255));
+                }
+                if (bold) {
+                    // Grow the ink one font pixel to the right on the device grid, exactly like the
+                    // coverage path: the maximum of a pixel and its left neighbour, never a second
+                    // pass of the same alpha.
+                    for (int column = deviceWidth - 1; column > 0; column--) {
+                        alphas[column] = Math.max(alphas[column], alphas[column - 1]);
+                    }
                 }
                 double shear = italic ? Math.round((ascent * deviceScale - row) * 0.25F) * step : 0;
                 int column = 0;

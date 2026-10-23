@@ -1853,10 +1853,7 @@ final class Renderer {
                     MinecraftFont.Glyph glyph = font.glyph(codePoint);
                     int top = baseline - glyph.ascent() * scale;
                     int advance = glyph.advance() * scale;
-                    glyph.draw(graphics, cursor + offset, top + offset, scale, glyphScale, color, run.italic());
-                    if (run.bold()) {
-                        glyph.draw(graphics, cursor + offset + scale, top + offset, scale, glyphScale, color, run.italic());
-                    }
+                    glyph.draw(graphics, cursor + offset, top + offset, scale, glyphScale, color, run.italic(), run.bold());
                     if (pass == 1 && run.underline()) {
                         graphics.setColor(new Color(color & 0xFFFFFF));
                         graphics.fillRect(cursor, baseline + 2 * scale, advance, scale);
@@ -2080,9 +2077,9 @@ final class Renderer {
             MinecraftFont.Glyph glyph = font.glyph(codePoint);
             int top = baseline - glyph.ascent() * scale;
             if (shadow) {
-                glyph.draw(graphics, cursor + scale, top + scale, scale, glyphScale, shadowColor, false);
+                glyph.draw(graphics, cursor + scale, top + scale, scale, glyphScale, shadowColor, false, false);
             }
-            glyph.draw(graphics, cursor, top, scale, glyphScale, color, false);
+            glyph.draw(graphics, cursor, top, scale, glyphScale, color, false, false);
             cursor += glyph.advance() * scale;
         }
         graphics.dispose();

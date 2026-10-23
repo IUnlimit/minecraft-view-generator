@@ -34,6 +34,7 @@ public final class RendererSmokeTest {
         testTextColours(renderer, root);
         testHexColours(renderer, root);
         testWrappedSpaces(renderer, root);
+        testBoldGlyphs(renderer, root);
         testChineseFont(renderer, root);
         testMissingFontDefinition(root);
         testSpecialItems(renderer, root);
@@ -877,6 +878,56 @@ public final class RendererSmokeTest {
     }
 
     /**
+     * Bold is the plain ink grown one pixel to the right, not the same glyph painted twice: every
+     * glyph gains that one pixel, and the ink never shows a brightness step the plain glyph does not
+     * have — which is exactly what compositing the same coverage twice used to add.
+     */
+    private static void testBoldGlyphs(Renderer renderer, Path root) throws Exception {
+        // ASCII comes from the bitmap sheet: one ink colour, and the second glyph starts one pixel
+        // later because the bold advance of the first one.
+        BufferedImage asciiPlain = renderContainer(renderer, root, "inventory", Map.of("title", "AB", "rows", 3));
+        BufferedImage asciiBold = renderContainer(renderer, root, "inventory",
+                Map.of("title", section('l') + "AB", "rows", 3));
+        int[] plainInk = exactBounds(asciiPlain, LABEL_RGB);
+        int[] boldInk = exactBounds(asciiBold, LABEL_RGB);
+        require(boldInk[0] == plainInk[0], "a bold glyph starts left of the plain one: " + boldInk[0]);
+        require(boldInk[2] == plainInk[2] + 2, "the bold ink is not one pixel wider per glyph: "
+                + boldInk[2] + " against " + plainInk[2]);
+        require(coloursIn(asciiBold, 0, 20).equals(coloursIn(asciiPlain, 0, 20)),
+                "bold adds a colour the plain bitmap glyph does not have");
+
+        // Chinese has a five step coverage, so this is where a second pass would show: compositing the
+        // same half covered pixel twice lands between two steps that cannot otherwise be reached.
+        BufferedImage empty = renderContainer(renderer, root, "inventory", Map.of("rows", 3));
+        BufferedImage cjkPlain = renderContainer(renderer, root, "inventory",
+                Map.of("title", section('f') + "中", "rows", 3));
+        BufferedImage cjkBold = renderContainer(renderer, root, "inventory",
+                Map.of("title", section('f') + section('l') + "中", "rows", 3));
+        java.util.Set<Integer> plainColours = coloursIn(cjkPlain, 0, 20);
+        java.util.Set<Integer> boldColours = coloursIn(cjkBold, 0, 20);
+        boldColours.removeAll(plainColours);
+        require(boldColours.isEmpty(), "bold introduced " + boldColours.size()
+                + " brightness steps the plain glyph never has");
+        int plainCount = diffCountIn(empty, cjkPlain, 0, 0, 176, 20);
+        int boldCount = diffCountIn(empty, cjkBold, 0, 0, 176, 20);
+        require(boldCount > plainCount, "bold did not thicken the Chinese glyph: " + boldCount + " against " + plainCount);
+        int[] plainBox = diffBounds(empty, cjkPlain);
+        int[] boldBox = diffBounds(empty, cjkBold);
+        require(boldBox[0] == plainBox[0], "the bold Chinese glyph starts left of the plain one: " + boldBox[0]);
+        require(boldBox[2] == plainBox[2] + 1, "the bold Chinese glyph is not one pixel wider: "
+                + boldBox[2] + " against " + plainBox[2]);
+
+        // At twice the size the glyph is its texel grid, and the grown pixel must stay a whole one
+        // instead of introducing a half covered column.
+        BufferedImage scalePlain = renderContainerAt(renderer, root, section('f') + "中", 2);
+        BufferedImage scaleBold = renderContainerAt(renderer, root, section('f') + section('l') + "中", 2);
+        java.util.Set<Integer> scaleColours = coloursIn(scaleBold, 0, 40);
+        scaleColours.removeAll(coloursIn(scalePlain, 0, 40));
+        require(scaleColours.isEmpty(), "bold at twice the size introduced " + scaleColours.size()
+                + " colours the plain glyph never has");
+    }
+
+    /**
      * One {@code §} code. Both the prefix and the code character are spelled from their code points:
      * a Java unicode escape for the section sign cannot survive every editor and diff tool.
      */
@@ -1170,7 +1221,7 @@ public final class RendererSmokeTest {
         // Magnifying the eight pixel average instead is what made Chinese at twice the size blurred.
         BufferedImage doubled = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
         Graphics2D doubledGraphics = doubled.createGraphics();
-        zhong.draw(doubledGraphics, 0, 0, 2, 2, 0xFFFFFF, false);
+        zhong.draw(doubledGraphics, 0, 0, 2, 2, 0xFFFFFF, false, false);
         doubledGraphics.dispose();
         int opaque = 0;
         int grey = 0;
@@ -1582,6 +1633,27 @@ public final class RendererSmokeTest {
             }
         }
         return gap;
+    }
+
+    /** Renders one container title at a render scale, which is the device pixel scale of the text. */
+    private static BufferedImage renderContainerAt(Renderer renderer, Path root, String title, int scale) throws Exception {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", "inventory");
+        request.put("resourceRoot", root.toString());
+        request.put("pixelScale", scale);
+        request.put("container", Map.of("title", title, "rows", 3));
+        return renderer.render(request);
+    }
+
+    /** The ARGB values that appear inside a row band of an image. */
+    private static java.util.Set<Integer> coloursIn(BufferedImage image, int y0, int y1) {
+        java.util.Set<Integer> colours = new java.util.HashSet<>();
+        for (int y = y0; y <= y1; y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                colours.add(image.getRGB(x, y));
+            }
+        }
+        return colours;
     }
 
     /**
