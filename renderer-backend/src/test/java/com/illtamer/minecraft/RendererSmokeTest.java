@@ -33,6 +33,7 @@ public final class RendererSmokeTest {
         testHeldItems(renderer, root);
         testTextColours(renderer, root);
         testHexColours(renderer, root);
+        testWrappedSpaces(renderer, root);
         testChineseFont(renderer, root);
         testMissingFontDefinition(root);
         testSpecialItems(renderer, root);
@@ -835,6 +836,47 @@ public final class RendererSmokeTest {
     }
 
     /**
+     * A tooltip line keeps the spaces between its words: a space is a glyph that advances four
+     * pixels, not just a break opportunity, and only the space a line was actually broken at is
+     * dropped.
+     */
+    private static void testWrappedSpaces(Renderer renderer, Path root) throws Exception {
+        // The space advances the glyphs behind it, so the ink ends four pixels further right and the
+        // box grows with it.
+        BufferedImage spaced = titleTooltip(renderer, root, section('7') + "Label: 1");
+        BufferedImage tight = titleTooltip(renderer, root, section('7') + "Label:1");
+        int[] spacedInk = exactBounds(spaced, 0xAAAAAA);
+        int[] tightInk = exactBounds(tight, 0xAAAAAA);
+        require(spacedInk[0] == tightInk[0], "a space moves the start of the line");
+        require(spacedInk[2] - tightInk[2] == 4,
+                "the space of a tooltip line is dropped: " + spacedInk[2] + " is not four pixels past " + tightInk[2]);
+        require(spaced.getWidth() - tight.getWidth() == 4, "the tooltip box does not count the space of its line");
+
+        // Consecutive spaces are all kept.
+        BufferedImage doubleSpaced = titleTooltip(renderer, root, "A  B");
+        BufferedImage joined = titleTooltip(renderer, root, "AB");
+        require(exactBounds(doubleSpaced, 0xFFFFFF)[2] - exactBounds(joined, 0xFFFFFF)[2] == 8,
+                "consecutive spaces of a tooltip line are collapsed into one");
+
+        // Wrapping is greedy over the cells including the spaces: the four two letter words fill two
+        // lines at a 48 px wrap width while the same eight letters without spaces fit one.
+        BufferedImage words = sizedTooltip(renderer, root, "AA BB CC DD", 72);
+        BufferedImage glued = sizedTooltip(renderer, root, "AABBCCDD", 72);
+        require(words.getHeight() == 2 * 10 + 24, "the spaces do not take part in the wrap: " + words.getHeight());
+        require(glued.getHeight() == 1 * 10 + 24 - 2, "the space free title does not fit on one line");
+
+        // The first line starts on the text column and keeps the gaps between its words, and the
+        // continuation line does not start with the space the first one was broken at.
+        int[] firstLine = inkBoundsIn(words, 0xFFFFFF, 12, 19);
+        require(firstLine[0] == 12, "a wrapped line does not start on the text column: " + firstLine[0]);
+        require(firstLine[2] >= 12 + 36, "the first line does not hold the words the wrap allows: " + firstLine[2]);
+        require(widestInkGap(words, 0xFFFFFF, 12, 19) >= 3, "the word gaps of a wrapped line are lost");
+        int[] secondLine = inkBoundsIn(words, 0xFFFFFF, 22, 29);
+        require(secondLine[0] == 12, "a continuation line keeps the space the previous one broke at: " + secondLine[0]);
+        require(countExact(words, 0xFFFFFF) > 4, "the wrapped lines drew no ink");
+    }
+
+    /**
      * One {@code §} code. Both the prefix and the code character are spelled from their code points:
      * a Java unicode escape for the section sign cannot survive every editor and diff tool.
      */
@@ -1499,6 +1541,47 @@ public final class RendererSmokeTest {
         }
         require(bounds != null, "no pixels for colour " + Integer.toHexString(rgb));
         return bounds;
+    }
+
+    /** The ink bounds of one exact colour inside a row band, for asserting a single tooltip line. */
+    private static int[] inkBoundsIn(BufferedImage image, int rgb, int y0, int y1) {
+        int[] bounds = null;
+        for (int y = y0; y <= y1; y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int pixel = image.getRGB(x, y);
+                if ((pixel >>> 24) == 255 && (pixel & 0xFFFFFF) == rgb) {
+                    bounds = extend(bounds, x, y);
+                }
+            }
+        }
+        require(bounds != null, "no pixels for colour " + Integer.toHexString(rgb) + " in rows " + y0 + ".." + y1);
+        return bounds;
+    }
+
+    /** The widest run of ink free columns that sits between two inked columns of a row band. */
+    private static int widestInkGap(BufferedImage image, int rgb, int y0, int y1) {
+        boolean[] inked = new boolean[image.getWidth()];
+        for (int y = y0; y <= y1; y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int pixel = image.getRGB(x, y);
+                inked[x] |= (pixel >>> 24) == 255 && (pixel & 0xFFFFFF) == rgb;
+            }
+        }
+        int gap = 0;
+        int empty = 0;
+        boolean seen = false;
+        for (boolean column : inked) {
+            if (column) {
+                if (seen) {
+                    gap = Math.max(gap, empty);
+                }
+                seen = true;
+                empty = 0;
+            } else if (seen) {
+                empty++;
+            }
+        }
+        return gap;
     }
 
     /**

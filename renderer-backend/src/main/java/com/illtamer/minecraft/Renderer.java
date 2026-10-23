@@ -1709,66 +1709,91 @@ final class Renderer {
     }
 
     /**
-     * Vanilla {@code Font#split}: break at spaces when possible and hard split any word that is
-     * wider than the line limit on its own.
+     * Vanilla {@code Font#split}: a greedy line break that cuts at a space whenever the line has one
+     * and inside a word only when it does not.
+     *
+     * <p>The line is laid out from tokens — one code point each, keeping the style of the run it came
+     * from — rather than from words, which is what keeps the spaces in the picture: two words are
+     * separated by real space glyphs, and only the one space a line was broken at is dropped. Spaces
+     * inside a line are kept as they are, the leading spaces of the first line are kept, and a
+     * continuation line never starts with the spaces the previous one ended at.</p>
      */
     private List<List<TextRun>> wrapStyledLine(List<TextRun> runs, int maxWidth) throws IOException {
         List<List<TextRun>> lines = new ArrayList<>();
         List<TextRun> current = new ArrayList<>();
-        // The word gap of the vanilla splitter is the advance of a space in the loaded font.
-        int spaceWidth = font().advance(' ');
         int width = 0;
-        for (TextRun run : runs) {
-            for (String word : run.text().replace('\n', ' ').split(" ", -1)) {
-                if (word.isEmpty()) {
-                    continue;
+        // Index of the last space token of the current line, which is where it breaks.
+        int lastSpace = -1;
+        for (TextRun token : tokens(runs)) {
+            boolean space = isSpace(token);
+            int advance = tokenWidth(token);
+            while (!current.isEmpty() && width + advance > maxWidth) {
+                if (lastSpace > 0) {
+                    lines.add(withoutTrailingSpaces(current.subList(0, lastSpace)));
+                    ArrayList<TextRun> rest = new ArrayList<>(current.subList(lastSpace + 1, current.size()));
+                    current.clear();
+                    current.addAll(rest);
+                } else {
+                    lines.add(withoutTrailingSpaces(current));
+                    current.clear();
                 }
-                TextRun stretched = run.withText(word);
-                int wordWidth = styledWidth(List.of(stretched));
-                if (!current.isEmpty() && width + spaceWidth + wordWidth > maxWidth) {
-                    lines.add(current);
-                    current = new ArrayList<>();
-                    width = 0;
-                }
-                if (wordWidth > maxWidth) {
-                    StringBuilder piece = new StringBuilder();
-                    int pieceWidth = 0;
-                    for (int index = 0; index < word.length(); ) {
-                        int codePoint = word.codePointAt(index);
-                        String glyph = new String(Character.toChars(codePoint));
-                        int advance = glyphAdvance(glyph) + (run.bold() ? 1 : 0);
-                        if (pieceWidth + advance > maxWidth && piece.length() > 0) {
-                            current.add(stretched.withText(piece.toString()));
-                            lines.add(current);
-                            current = new ArrayList<>();
-                            piece.setLength(0);
-                            pieceWidth = 0;
-                            width = 0;
-                        }
-                        piece.append(glyph);
-                        pieceWidth += advance;
-                        index += Character.charCount(codePoint);
+                width = 0;
+                lastSpace = -1;
+                for (int index = 0; index < current.size(); index++) {
+                    width += tokenWidth(current.get(index));
+                    if (isSpace(current.get(index))) {
+                        lastSpace = index;
                     }
-                    if (piece.length() > 0) {
-                        current.add(stretched.withText(piece.toString()));
-                        width += pieceWidth;
-                    }
-                    continue;
                 }
-                if (!current.isEmpty()) {
-                    width += spaceWidth;
-                }
-                current.add(stretched);
-                width += wordWidth;
+            }
+            if (space && current.isEmpty() && !lines.isEmpty()) {
+                continue;
+            }
+            current.add(token);
+            width += advance;
+            if (space) {
+                lastSpace = current.size() - 1;
             }
         }
         if (!current.isEmpty()) {
-            lines.add(current);
+            lines.add(withoutTrailingSpaces(current));
         }
         if (lines.isEmpty()) {
             lines.add(new ArrayList<>());
         }
         return lines;
+    }
+
+    /** Flattens styled runs into one token per code point, each keeping the style of its run. */
+    private static List<TextRun> tokens(List<TextRun> runs) {
+        List<TextRun> tokens = new ArrayList<>();
+        for (TextRun run : runs) {
+            String text = run.text().replace('\n', ' ');
+            for (int index = 0; index < text.length(); ) {
+                int codePoint = text.codePointAt(index);
+                index += Character.charCount(codePoint);
+                tokens.add(run.withText(new String(Character.toChars(codePoint))));
+            }
+        }
+        return tokens;
+    }
+
+    private static boolean isSpace(TextRun token) {
+        return " ".equals(token.text());
+    }
+
+    /** One token in font pixels, with the vanilla one pixel bold offset per glyph. */
+    private int tokenWidth(TextRun token) throws IOException {
+        return textWidth(token.text(), 1) + (token.bold() ? 1 : 0);
+    }
+
+    /** Drops the spaces a line ends at: they carry no ink and only widen the box. */
+    private static List<TextRun> withoutTrailingSpaces(List<TextRun> line) {
+        int end = line.size();
+        while (end > 0 && isSpace(line.get(end - 1))) {
+            end--;
+        }
+        return new ArrayList<>(line.subList(0, end));
     }
 
     /** Width of a parsed line in font pixels, with the vanilla one pixel bold offset per glyph. */
