@@ -11,7 +11,6 @@ import java.awt.FontFormatException;
 import java.awt.font.FontRenderContext;
 import java.awt.font.GlyphVector;
 import java.awt.geom.AffineTransform;
-import java.awt.geom.Path2D;
 import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferInt;
 import java.io.ByteArrayInputStream;
@@ -172,7 +171,18 @@ final class Renderer {
             return generatedSprite(layers, size);
         }
         if (!model.elements.isEmpty()) {
-            return renderModel(model, size);
+            // An element model is a 3D model like any other: same gui display transform, same
+            // orthographic icon camera, same face shading table as a special model or the block the
+            // client puts in a slot. Projecting it by hand instead lost both the depth order of the
+            // faces and their texture mapping.
+            List<Quad> quads = new ArrayList<>();
+            addElementGeometry(quads, model);
+            transformQuads(quads, displayMatrix(model.displayTransform("gui"), false));
+            BufferedImage icon = renderItemIcon(quads, size);
+            if (isTransparent(icon)) {
+                throw new IOException("item model rendered no visible pixels");
+            }
+            return icon;
         }
         return renderMissingItemIcon(size);
     }
@@ -1124,52 +1134,6 @@ final class Renderer {
         return "assets/" + namespace + "/models/" + path + ".json";
     }
 
-    private BufferedImage renderModel(Model model, int size) throws IOException {
-        BufferedImage canvas = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D graphics = canvas.createGraphics();
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
-        java.awt.geom.AffineTransform originalTransform = graphics.getTransform();
-        applyTransform(graphics, model.displayTransform("gui"), size);
-        List<Face> faces = new ArrayList<>();
-        double scale = size / 22.0;
-        double centerX = size / 2.0;
-        double centerY = size * 0.72;
-        for (Element element : model.elements) {
-            for (Map.Entry<String, FaceDefinition> entry : element.faces.entrySet()) {
-                FaceDefinition definition = entry.getValue();
-                String textureID = model.texture(definition.texture, definition.texture);
-                BufferedImage texture = resources.texture(textureID);
-                List<Vec3> vertices = faceVertices(element, entry.getKey());
-                if (vertices.size() < 3) {
-                    continue;
-                }
-                Path2D polygon = new Path2D.Double();
-                for (int i = 0; i < vertices.size(); i++) {
-                    Point point = project(vertices.get(i), scale, centerX, centerY);
-                    if (i == 0) {
-                        polygon.moveTo(point.x, point.y);
-                    } else {
-                        polygon.lineTo(point.x, point.y);
-                    }
-                }
-                polygon.closePath();
-                double depth = vertices.stream().mapToDouble(value -> value.x + value.z - value.y * 0.2).average().orElse(0);
-                int[] uv = definition.uv == null ? defaultUV(element, entry.getKey()) : definition.uv;
-                faces.add(new Face(polygon, texture, depth, shade(entry.getKey()), definition.tintIndex >= 0, uv, definition.rotation));
-            }
-        }
-        faces.sort(Comparator.comparingDouble(value -> value.depth));
-        for (Face face : faces) {
-            paintFace(graphics, canvas, face);
-        }
-        graphics.setTransform(originalTransform);
-        graphics.dispose();
-        if (isTransparent(canvas)) {
-            throw new IOException("item model rendered no visible pixels");
-        }
-        return canvas;
-    }
-
     private int[] defaultUV(Element element, String direction) {
         double[] from = element.from;
         double[] to = element.to;
@@ -1178,40 +1142,6 @@ final class Renderer {
             case "north", "south" -> new int[]{(int) from[0], (int) (16 - to[1]), (int) to[0], (int) (16 - from[1])};
             default -> new int[]{(int) from[2], (int) (16 - to[1]), (int) to[2], (int) (16 - from[1])};
         };
-    }
-
-    private void applyTransform(Graphics2D graphics, DisplayTransform transform, int size) {
-        if (transform == null) {
-            return;
-        }
-        double scale = size / 16.0;
-        graphics.translate(size / 2.0 + transform.translation[0] * scale, size / 2.0 + transform.translation[1] * scale);
-        graphics.rotate(Math.toRadians(transform.rotation[2]));
-        graphics.scale(transform.scale[0], transform.scale[1]);
-        graphics.translate(-size / 2.0, -size / 2.0);
-    }
-
-    private void paintFace(Graphics2D graphics, BufferedImage canvas, Face face) {
-        Shape oldClip = graphics.getClip();
-        graphics.clip(face.polygon);
-        java.awt.Rectangle bounds = face.polygon.getBounds();
-        if (bounds.width > 0 && bounds.height > 0) {
-            int[] uv = face.uv;
-            int x0 = Math.max(0, Math.min(face.texture.getWidth() - 1, Math.round(uv[0] * face.texture.getWidth() / 16f)));
-            int y0 = Math.max(0, Math.min(face.texture.getHeight() - 1, Math.round(uv[1] * face.texture.getHeight() / 16f)));
-            int x1 = Math.max(x0 + 1, Math.min(face.texture.getWidth(), Math.round(uv[2] * face.texture.getWidth() / 16f)));
-            int y1 = Math.max(y0 + 1, Math.min(face.texture.getHeight(), Math.round(uv[3] * face.texture.getHeight() / 16f)));
-            graphics.drawImage(face.texture, bounds.x, bounds.y, bounds.x + bounds.width, bounds.y + bounds.height, x0, y0, x1, y1, null);
-            if (face.tint) {
-                graphics.setColor(new Color(255, 255, 255, 42));
-                graphics.fill(face.polygon);
-            }
-            if (face.shade > 0) {
-                graphics.setColor(new Color(0, 0, 0, face.shade));
-                graphics.fill(face.polygon);
-            }
-        }
-        graphics.setClip(oldClip);
     }
 
     private List<Vec3> faceVertices(Element element, String direction) {
@@ -1226,12 +1156,6 @@ final class Renderer {
             case "down" -> List.of(new Vec3(x0, y0, z1), new Vec3(x0, y0, z0), new Vec3(x1, y0, z0), new Vec3(x1, y0, z1));
             default -> List.of();
         };
-    }
-
-    private Point project(Vec3 value, double scale, double centerX, double centerY) {
-        double x = centerX + (value.x - value.z) * scale * 0.78;
-        double y = centerY - (value.y - 8) * scale * 0.92 + (value.x + value.z - 16) * scale * 0.40;
-        return new Point(x, y);
     }
 
     /**
@@ -2826,6 +2750,13 @@ final class Renderer {
     private static final double PLAYER_BODY_MAX_Z = 2;
     private static final double PLAYER_LEG_HALF = 1.9;
 
+    /**
+     * The flat white overlay the client puts on a face that declares a {@code tintindex} without an
+     * item colour table: {@code new Color(255, 255, 255, 42)} over the face. A real tint table for
+     * grass and leaves is a separate piece of work.
+     */
+    private static final int FLAT_TINT = 42 << 24 | 0xFFFFFF;
+
     /** One textured quad: corners are stored in texture rectangle order (top-left, top-right, bottom-left, bottom-right). */
     private static final class Quad {
         final Vec3[] corners = new Vec3[4];
@@ -2834,6 +2765,16 @@ final class Renderer {
         final double[] uv = new double[4];
         /** Vanilla {@code gui_light: front} models (every generated item model) are drawn unshaded. */
         boolean fullBright;
+        /**
+         * The vanilla block face shade of this quad, or 0 when the quad is not a model face and has
+         * to be lit from the scene lights instead: {@code 1.0} up, {@code 0.5} down, {@code 0.8}
+         * north and south, {@code 0.6} east and west, read off the face direction of the model. The
+         * client shades a block per face, not per transformed normal, which is what keeps the two
+         * sides of a cube one step apart.
+         */
+        double shade;
+        /** A {@code tintindex} face: drawn with the flat white tint the client applies to those. */
+        boolean tint;
 
         Quad(Vec3 normal, BufferedImage texture) {
             this.normal = normal;
@@ -3031,7 +2972,7 @@ final class Renderer {
                 top = Math.min(top, point.y);
                 bottom = Math.max(bottom, point.y);
             }
-            double light = quad.fullBright ? 1.0 : faceBrightness(quad.normal, scene);
+            double light = quad.fullBright ? 1.0 : quad.shade > 0 ? quad.shade : faceBrightness(quad.normal, scene);
             BufferedImage texture = quad.texture;
             int textureWidth = texture.getWidth();
             int textureHeight = texture.getHeight();
@@ -3067,6 +3008,10 @@ final class Renderer {
                         int green = (int) Math.round(((source >> 8) & 0xFF) * light);
                         int blue = (int) Math.round((source & 0xFF) * light);
                         source = (alpha << 24) | (red << 16) | (green << 8) | blue;
+                    }
+                    if (quad.tint) {
+                        source = composite(FLAT_TINT, source);
+                        alpha = source >>> 24;
                     }
                     int index = y * canvasWidth + x;
                     target[index] = alpha == 255 ? source : composite(source, target[index]);
@@ -3572,6 +3517,9 @@ final class Renderer {
                 BufferedImage texture = resources.texture(model.texture(definition.texture, definition.texture));
                 int[] uv = definition.uv == null ? defaultUV(element, entry.getKey()) : definition.uv;
                 Quad quad = new Quad(faceNormal(entry.getKey()), texture);
+                quad.shade = blockFaceShade(entry.getKey());
+                quad.tint = definition.tintIndex >= 0;
+                quad.fullBright = "front".equals(model.guiLight);
                 // faceVertices returns the vanilla cube order, the quad pipeline wants the corners in
                 // texture rectangle order: (u0,v0) (u1,v0) (u0,v1) (u1,v1).
                 int[] order = switch (entry.getKey()) {
@@ -3588,6 +3536,21 @@ final class Renderer {
                 quads.add(quad);
             }
         }
+    }
+
+    /**
+     * Vanilla {@code ModelBlockRenderer#getShade}: the light a model face gets from its own direction
+     * — {@code 1.0} up, {@code 0.5} down, {@code 0.8} north and south, {@code 0.6} east and west.
+     * The client shades a block per face of the model, so the two sides of a cube keep different
+     * brightness whatever pose the display transform then rotates it into.
+     */
+    private static double blockFaceShade(String direction) {
+        return switch (direction) {
+            case "up" -> 1.0;
+            case "down" -> 0.5;
+            case "north", "south" -> 0.8;
+            default -> 0.6;
+        };
     }
 
     private static Vec3 faceNormal(String direction) {
@@ -3861,14 +3824,6 @@ final class Renderer {
         return true;
     }
 
-    private int shade(String direction) {
-        return switch (direction) {
-            case "down" -> 70;
-            case "north", "west" -> 18;
-            default -> 0;
-        };
-    }
-
     private static Map<String, Object> castMap(Map<?, ?> map) {
         @SuppressWarnings("unchecked")
         Map<String, Object> value = (Map<String, Object>) map;
@@ -3924,9 +3879,6 @@ final class Renderer {
     }
 
     private record Point(double x, double y) {
-    }
-
-    private record Face(Path2D polygon, BufferedImage texture, double depth, int shade, boolean tint, int[] uv, int rotation) {
     }
 
     static final class ResourceStack {

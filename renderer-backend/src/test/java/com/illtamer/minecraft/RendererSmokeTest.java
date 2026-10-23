@@ -35,6 +35,7 @@ public final class RendererSmokeTest {
         testHexColours(renderer, root);
         testWrappedSpaces(renderer, root);
         testBoldGlyphs(renderer, root);
+        testBlockIcon(renderer, root);
         testChineseFont(renderer, root);
         testMissingFontDefinition(root);
         testSpecialItems(renderer, root);
@@ -631,14 +632,18 @@ public final class RendererSmokeTest {
         require(countExact(custom, starfish & 0xFFFFFF) != countExact(renderer.render(vanillaIcon(root)), starfish & 0xFFFFFF),
                 "the custom icon is indistinguishable from the vanilla one");
 
-        // A model with elements is drawn as geometry, so its silhouette leaves the canvas corners empty
-        // instead of filling the whole sprite.
+        // A model with elements is drawn as geometry in the vanilla block pose, so its silhouette
+        // leaves the canvas corners empty instead of filling the whole sprite and its three visible
+        // faces carry the block face shading.
         Map<String, Object> faces = new LinkedHashMap<>();
         for (String side : List.of("north", "south", "east", "west", "up", "down")) {
             faces.put(side, Map.of("texture", "#0", "uv", List.of(0, 0, 16, 16)));
         }
         Map<String, Object> crateModel = Map.of(
                 "textures", Map.of("0", "test:bxtp/crate"),
+                "display", Map.of("gui", Map.of(
+                        "rotation", List.of(30, 225, 0),
+                        "scale", List.of(0.625, 0.625, 0.625))),
                 "elements", List.of(Map.of(
                         "from", List.of(0, 0, 0),
                         "to", List.of(16, 16, 16),
@@ -650,7 +655,9 @@ public final class RendererSmokeTest {
         geometry.put("item", Map.of("id", "minecraft:diamond", "customData", 10115));
         geometry.put("customArt", Map.of("DIAMOND#10115", crateArt));
         BufferedImage crateImage = renderer.render(geometry);
-        require(countExact(crateImage, crate & 0xFFFFFF) > 400, "the custom geometry was not drawn");
+        require(countExact(crateImage, crate & 0xFFFFFF) > 200, "the lit top of the custom geometry was not drawn");
+        require(countExact(crateImage, shaded(crate, 0.8)) > 100, "the custom geometry has no north face shade");
+        require(countExact(crateImage, shaded(crate, 0.6)) > 100, "the custom geometry has no east face shade");
         require((crateImage.getRGB(0, 0) >>> 24) == 0, "the geometry fills the whole canvas, it is not a model");
 
         // The hand slots resolve the same item, which is the whole point of shipping model geometry.
@@ -683,6 +690,43 @@ public final class RendererSmokeTest {
         require(countExact(renderer.render(unresolved), starfish & 0xFFFFFF) == 0,
                 "an unresolved customData still drew the custom texture");
         require(hasPixels(renderer.render(unresolved)), "an unresolved customData left the icon empty");
+    }
+
+    /** Renders one item icon at the given square size. */
+    private static BufferedImage itemIcon(Renderer renderer, Path root, String id, int size) throws Exception {
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", "item");
+        request.put("resourceRoot", root.toString());
+        request.put("item", Map.of("id", id));
+        request.put("width", size);
+        return renderer.render(request);
+    }
+
+    /** The centre of gravity of one exact colour, in pixels. */
+    private static double[] centre(BufferedImage image, int rgb) {
+        double sumX = 0;
+        double sumY = 0;
+        int count = 0;
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int pixel = image.getRGB(x, y);
+                if ((pixel >>> 24) == 255 && (pixel & 0xFFFFFF) == rgb) {
+                    sumX += x;
+                    sumY += y;
+                    count++;
+                }
+            }
+        }
+        require(count > 0, "no pixels for colour " + Integer.toHexString(rgb));
+        return new double[]{sumX / count, sumY / count};
+    }
+
+    /** One channel of a face colour after the vanilla block shade of that face. */
+    private static int shaded(int rgb, double light) {
+        int red = (int) Math.round((rgb >> 16 & 0xFF) * light);
+        int green = (int) Math.round((rgb >> 8 & 0xFF) * light);
+        int blue = (int) Math.round((rgb & 0xFF) * light);
+        return red << 16 | green << 8 | blue;
     }
 
     private static Map<String, Object> vanillaIcon(Path root) {
@@ -925,6 +969,47 @@ public final class RendererSmokeTest {
         scaleColours.removeAll(coloursIn(scalePlain, 0, 40));
         require(scaleColours.isEmpty(), "bold at twice the size introduced " + scaleColours.size()
                 + " colours the plain glyph never has");
+    }
+
+    /**
+     * A block icon is the 3D model seen through the vanilla gui pose and the orthographic icon camera:
+     * the top face, two sides, each face mapped from its own texture quadrant and lit with the vanilla
+     * block face shade of its own direction. That is what separates the three faces of a cube — the
+     * entity lights this renderer used before made the top darker than the sides.
+     */
+    private static void testBlockIcon(Renderer renderer, Path root) throws Exception {
+        // The fixture cube maps up, north and east to the red, green and blue quadrants of its sheet,
+        // so each face colour is exactly the shade of its own direction.
+        int up = 0xE03030;
+        int north = shaded(0x30E030, 0.8);
+        int east = shaded(0x3030E0, 0.6);
+        BufferedImage icon = itemIcon(renderer, root, "minecraft:fixture_cube", 64);
+        require(icon.getWidth() == 64 && icon.getHeight() == 64, "block icon dimensions: " + icon.getWidth());
+        require(countExact(icon, up) > 200, "the up face is missing or not drawn at full brightness");
+        require(countExact(icon, north) > 100, "the north face is missing or not shaded at 0.8");
+        require(countExact(icon, east) > 100, "the east face is missing or not shaded at 0.6");
+        require((icon.getRGB(0, 0) >>> 24) == 0, "the block icon fills its canvas, its corners must stay empty");
+
+        // The three faces are where the isometric view puts them: the top above both sides, and the
+        // east face left of the north one.
+        double[] upCentre = centre(icon, up);
+        double[] northCentre = centre(icon, north);
+        double[] eastCentre = centre(icon, east);
+        require(upCentre[1] < northCentre[1] && upCentre[1] < eastCentre[1],
+                "the up face is not above the two sides: " + upCentre[1] + " " + northCentre[1] + " " + eastCentre[1]);
+        require(eastCentre[0] < northCentre[0], "the two sides are not on opposite hands: "
+                + eastCentre[0] + " " + northCentre[0]);
+
+        // The icon is rasterised at its final size, so doubling it doubles the silhouette instead of
+        // magnifying a 64 px picture.
+        BufferedImage large = itemIcon(renderer, root, "minecraft:fixture_cube", 128);
+        int[] smallBounds = exactBounds(icon, up);
+        int[] largeBounds = exactBounds(large, up);
+        for (int index = 0; index < 4; index++) {
+            require(Math.abs(largeBounds[index] - smallBounds[index] * 2) <= 2,
+                    "the 128 px icon is a magnified 64 px one: " + java.util.Arrays.toString(largeBounds)
+                            + " against " + java.util.Arrays.toString(smallBounds));
+        }
     }
 
     /**

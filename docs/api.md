@@ -94,7 +94,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 | type | 真实 Java 后端能力 |
 | --- | --- |
-| `item` | 1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、select/condition/range dispatch、九类 `minecraft:special` 几何（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟）与箱子族平面贴图、图案与染色组件、damage/glint、资源缺失时画原版缺失模型 |
+| `item` | 1.21.11 item definition、model parent、generated/handheld、3D elements（走 quad 管线并按原版方块面明暗着色，方块图标是标准等轴立方体）、纹理层、select/condition/range dispatch、九类 `minecraft:special` 几何（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟）与箱子族平面贴图、图案与染色组件、damage/glint、资源缺失时画原版缺失模型 |
 | `tooltip` | 原版九宫格背景（`gui/sprites/tooltip/background`，border 从 `.mcmeta` 读取）与 advanced 边框（`tooltip/frame`）、`§` 与 `&` 颜色/修饰符前缀、原版行生成顺序（悬停名 → advanced id → lore → 附魔 → 属性修饰符 → 单值组件 → 组件/NBT 计数，lore 只来自 `item.lore`）、按真实文本宽度折行、`icon` 开关 |
 | `inventory` | 官方 `generic_54` chest GUI，1–6 行九列、标题、主容器槽、玩家区槽位、堆叠数量 |
 | `item_container` | hopper（176×133）、furnace/blast_furnace/smoker、crafting_table、anvil、brewing_stand（176×166）；槽位取自各自原版菜单；未知容器返回 `unsupported_container` |
@@ -294,7 +294,11 @@ PY
 | `shulker_box` | 关闭状态的潜影盒：盒盖 `lid`（`texOffs(0, 0)`，16×12×16）与盒身 `base`（`texOffs(0, 28)`，16×8×16）两个盒子叠出 1×1×1 方块，`texture` 字段直接给出染色后的贴图（`entity/shulker/shulker` 为未染色，`entity/shulker/shulker_red` 等为 16 色），`display.gui` 的 30°/45° 与 0.625 让它在图标里呈等轴 3D 方块；盒盖底边 4 单位透明、盒身顶边透出的 8 像素凸起就是原版贴图的卡扣 |
 | `chest` / `ender_chest` | 仍是原版平面实体贴图（`entity/chest/normal`、`entity/chest/ender`），与之前版本逐像素一致 |
 
-图标与手持共用同一份几何：图标走「`display.gui` 的 `T·R(rotationXYZ)·S·T(-0.5,-0.5,-0.5)` + 正交直视相机（1 单位 = 1 像素、物品中心落在图标中心）」，手持走 `thirdperson_righthand` / `thirdperson_lefthand` 与 `ItemInHandLayer` 链条，深度排序与遮挡和玩家模型共用。
+**所有** item 图标共用一条 3D 管线：普通模型 JSON 里的 `elements`（方块、家具）、上表的 `minecraft:special` 几何、以及原版缺失模型，都按「`display.gui` 的 `T·R(rotationXYZ)·S·T(-0.5,-0.5,-0.5)` 摆姿势 + 正交直视相机（1 单位 = 1 像素、物品中心落在图标中心）」在最终分辨率上逐像素光栅化，面按深度排序、逐面按 `uv` 采样，因此方块不会被按外接框拉伸、棱边是直线。
+
+`elements` 模型的面明暗取自原版 `ModelBlockRenderer` 的面方向表——上 `1.0`、下 `0.5`、南北 `0.8`、东西 `0.6`（按模型面自己的方向，不是按变换后的法线），`gui_light: front` 的模型不参与——所以标准 `display.gui` 姿态下的整方块是「上表面最亮、两侧一深一浅」的等轴立方体，这也是原版槽位图标的观感。声明了 `tintindex` 的面仍叠一层 42/255 的白色（原版染色表另行排期）。
+
+手持走 `thirdperson_righthand` / `thirdperson_lefthand` 与 `ItemInHandLayer` 链条，深度排序与遮挡和玩家模型共用。
 
 ## 自定义物品（`customData`）
 

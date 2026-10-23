@@ -98,7 +98,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeItem,
 			summary:     "item · 物品图标",
-			description: "1.21.11 item definition：模型继承、generated/handheld、纹理层与 glint 都由真实资源决定。minecraft:special 模型按客户端代码直译的几何渲染（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟），组件驱动图案、染色、陶片与内联皮肤；潜影盒按 ShulkerBoxModel 的 lid + base 两个盒子渲染成 3D 方块，贴图取模型定义里已染色的 entity/shulker/shulker（16 色）而不再是平面贴图；箱子族仍为平面贴图。模型不可用时画原版紫黑缺失模型，不返回 422。物品可带 customData（ItemsAdder 的 custom_model_data 数值），与 id 的基础材料组合命中 data/contents 里的自定义物品；命中后按其贴图与模型几何绘制，未命中回退原版并记一条警告。options.scale 在这里演示固定倍率放大。",
+			description: "1.21.11 item definition：模型继承、generated/handheld、纹理层与 glint 都由真实资源决定；带 elements 的模型与 special 模型走同一条 3D quad 管线（gui display 变换 + 正交相机 + 原版方块面明暗：上 1.0、南北 0.8、东西 0.6、下 0.5），方块图标是逐面贴图的标准等轴立方体。minecraft:special 模型按客户端代码直译的几何渲染（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟），组件驱动图案、染色、陶片与内联皮肤；潜影盒按 ShulkerBoxModel 的 lid + base 两个盒子渲染成 3D 方块，贴图取模型定义里已染色的 entity/shulker/shulker（16 色）而不再是平面贴图；箱子族仍为平面贴图。模型不可用时画原版紫黑缺失模型，不返回 422。物品可带 customData（ItemsAdder 的 custom_model_data 数值），与 id 的基础材料组合命中 data/contents 里的自定义物品；命中后按其贴图与模型几何绘制，未命中回退原版并记一条警告。options.scale 在这里演示固定倍率放大。",
 			payload: `{
   "version": "1.21.11",
   "type": "item",
