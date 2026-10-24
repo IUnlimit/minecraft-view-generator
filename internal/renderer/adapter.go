@@ -383,7 +383,7 @@ func (PrimitiveAdapter) RenderPlayer(_ context.Context, _ resources.Context, ski
 		return nil, fmt.Errorf("player render dimensions are outside limits")
 	}
 	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
-	base := itemColor(skin.Texture + skin.Username)
+	base := itemColor(skin.Texture)
 	if skin.Slim || skin.Model == "slim" {
 		base = color.RGBA{R: min8(int(base.R) + 12), G: min8(int(base.G) + 8), B: min8(int(base.B) + 5), A: 255}
 	}

@@ -56,12 +56,10 @@ type Request struct {
 }
 
 type Options struct {
-	Projection  string `json:"projection,omitempty"`
 	Width       int    `json:"width,omitempty"`
 	Height      int    `json:"height,omitempty"`
 	Background  string `json:"background,omitempty"`
 	Scale       Scale  `json:"scale,omitempty"`
-	Frame       int    `json:"frame,omitempty"`
 	Transparent bool   `json:"transparent,omitempty"`
 }
 
@@ -177,14 +175,16 @@ type Item struct {
 	// CustomData is the ItemsAdder custom_model_data value of a user supplied item. Together with the
 	// base material of ID it selects one entry of the custom content index; CustomModelData keeps its
 	// vanilla meaning of driving a range_dispatch override.
-	CustomData   *int              `json:"customData,omitempty"`
-	Components   json.RawMessage   `json:"components,omitempty"`
-	NBT          json.RawMessage   `json:"nbt,omitempty"`
-	Name         string            `json:"name,omitempty"`
-	Lore         []string          `json:"lore,omitempty"`
-	Enchantments []string          `json:"enchantments,omitempty"`
-	Texture      string            `json:"texture,omitempty"`
-	Properties   map[string]string `json:"properties,omitempty"`
+	CustomData   *int            `json:"customData,omitempty"`
+	Components   json.RawMessage `json:"components,omitempty"`
+	NBT          json.RawMessage `json:"nbt,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Lore         []string        `json:"lore,omitempty"`
+	Enchantments []string        `json:"enchantments,omitempty"`
+	// Texture overrides the skin of a minecraft:player_head icon. It accepts an inline
+	// data:image/png;base64 URI (64x64, or legacy 64x32 which vanilla mirrors into the left limbs) or a
+	// texture path of the prepared resource tree, never a network URL. Other items ignore it.
+	Texture string `json:"texture,omitempty"`
 }
 
 // CustomArt is the drawing instruction of one custom item: a flat model (its parent chain already
@@ -223,15 +223,12 @@ type Slot struct {
 }
 
 type ContainerData struct {
-	Title      string `json:"title,omitempty"`
-	Container  string `json:"container,omitempty"`
-	Rows       int    `json:"rows,omitempty"`
-	Columns    int    `json:"columns,omitempty"`
-	Slots      []Slot `json:"slots,omitempty"`
-	Items      []Slot `json:"items,omitempty"`
-	Selected   int    `json:"selected,omitempty"`
-	Hotbar     bool   `json:"hotbar,omitempty"`
-	Background string `json:"background,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Container string `json:"container,omitempty"`
+	Rows      int    `json:"rows,omitempty"`
+	Columns   int    `json:"columns,omitempty"`
+	Slots     []Slot `json:"slots,omitempty"`
+	Items     []Slot `json:"items,omitempty"`
 }
 
 type TooltipData struct {
@@ -241,42 +238,38 @@ type TooltipData struct {
 	Icon     bool   `json:"icon,omitempty"`
 }
 
+// SkinData is the skin of the player model. Texture and Cape only accept an inline PNG data URI or a
+// texture path of the prepared resource tree; TextureURL exists to reject the network form explicitly.
 type SkinData struct {
-	Texture    string   `json:"texture,omitempty"`
-	TextureURL string   `json:"textureUrl,omitempty"`
-	Username   string   `json:"username,omitempty"`
-	Model      string   `json:"model,omitempty"`
-	Slim       bool     `json:"slim,omitempty"`
-	Cape       string   `json:"cape,omitempty"`
-	OuterLayer bool     `json:"outerLayer"`
-	Properties []string `json:"properties,omitempty"`
+	Texture    string `json:"texture,omitempty"`
+	TextureURL string `json:"textureUrl,omitempty"`
+	Model      string `json:"model,omitempty"`
+	Slim       bool   `json:"slim,omitempty"`
+	Cape       string `json:"cape,omitempty"`
+	OuterLayer bool   `json:"outerLayer"`
 }
 
 type PlayerInventoryData struct {
-	Title     string   `json:"title,omitempty"`
-	Skin      SkinData `json:"skin"`
-	Slots     []Slot   `json:"slots,omitempty"`
-	Armor     []Slot   `json:"armor,omitempty"`
-	Offhand   *Item    `json:"offhand,omitempty"`
-	MainHand  *Item    `json:"mainHand,omitempty"`
-	Container string   `json:"container,omitempty"`
+	Title    string   `json:"title,omitempty"`
+	Skin     SkinData `json:"skin"`
+	Slots    []Slot   `json:"slots,omitempty"`
+	Armor    []Slot   `json:"armor,omitempty"`
+	Offhand  *Item    `json:"offhand,omitempty"`
+	MainHand *Item    `json:"mainHand,omitempty"`
 }
 
 type PlayerListEntry struct {
-	Name     string `json:"name"`
-	Display  string `json:"display,omitempty"`
-	UUID     string `json:"uuid,omitempty"`
-	Texture  string `json:"texture,omitempty"`
-	Ping     int    `json:"ping,omitempty"`
-	GameMode string `json:"gameMode,omitempty"`
+	Name    string `json:"name"`
+	Display string `json:"display,omitempty"`
+	Texture string `json:"texture,omitempty"`
+	Ping    int    `json:"ping,omitempty"`
 }
 
 type PlayerListData struct {
-	Header   string            `json:"header,omitempty"`
-	Footer   string            `json:"footer,omitempty"`
-	Players  []PlayerListEntry `json:"players,omitempty"`
-	Columns  int               `json:"columns,omitempty"`
-	MaxWidth int               `json:"maxWidth,omitempty"`
+	Header  string            `json:"header,omitempty"`
+	Footer  string            `json:"footer,omitempty"`
+	Players []PlayerListEntry `json:"players,omitempty"`
+	Columns int               `json:"columns,omitempty"`
 }
 
 type MapMarker struct {
@@ -291,7 +284,6 @@ type MapData struct {
 	Pixels    []int       `json:"pixels,omitempty"`
 	PixelData string      `json:"pixelData,omitempty"`
 	Markers   []MapMarker `json:"markers,omitempty"`
-	Scale     int         `json:"scale,omitempty"`
 	Locked    bool        `json:"locked,omitempty"`
 	Dimension string      `json:"dimension,omitempty"`
 }
@@ -302,7 +294,6 @@ type AchievementData struct {
 	Icon        Item   `json:"icon"`
 	Completed   bool   `json:"completed,omitempty"`
 	Frame       string `json:"frame,omitempty"`
-	Parent      string `json:"parent,omitempty"`
 }
 
 func (r Request) Validate() error {
@@ -322,14 +313,11 @@ func (r Request) Validate() error {
 	if len(bytes.TrimSpace(r.Data)) == 0 || bytes.Equal(bytes.TrimSpace(r.Data), []byte("null")) {
 		return fmt.Errorf("data is required")
 	}
-	if r.Options.Width < 0 || r.Options.Height < 0 || r.Options.Frame < 0 {
+	if r.Options.Width < 0 || r.Options.Height < 0 {
 		return fmt.Errorf("image options cannot be negative")
 	}
 	if err := r.Options.Scale.Validate(); err != nil {
 		return err
-	}
-	if r.Options.Projection != "" && r.Options.Projection != "gui" && r.Options.Projection != "orthographic" {
-		return fmt.Errorf("unsupported projection %q", r.Options.Projection)
 	}
 	return nil
 }
@@ -427,10 +415,10 @@ func validateData(kind string, value any) error {
 		if strings.TrimSpace(data.Texture) == "" {
 			return fmt.Errorf("skin.texture is required")
 		}
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.Texture)), "http://") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.Texture)), "https://") {
+		if isNetworkURL(data.Texture) {
 			return fmt.Errorf("skin.texture must not be a network URL")
 		}
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.Cape)), "http://") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.Cape)), "https://") {
+		if isNetworkURL(data.Cape) {
 			return fmt.Errorf("skin.cape must not be a network URL")
 		}
 		if strings.TrimSpace(data.TextureURL) != "" {
@@ -463,9 +451,6 @@ func validateData(kind string, value any) error {
 		if data.Columns < 0 || data.Columns > 16 {
 			return fmt.Errorf("playerlist columns must be between 0 and 16")
 		}
-		if data.MaxWidth < 0 || data.MaxWidth > 4096 {
-			return fmt.Errorf("playerlist maxWidth must be between 0 and 4096")
-		}
 		for index, player := range data.Players {
 			if strings.TrimSpace(player.Name) == "" && strings.TrimSpace(player.Display) == "" {
 				return fmt.Errorf("playerlist player %d has no name", index)
@@ -473,7 +458,7 @@ func validateData(kind string, value any) error {
 			if strings.TrimSpace(player.Texture) == "" {
 				return fmt.Errorf("playerlist player %d (%s) has no avatar texture", index, player.Name)
 			}
-			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(player.Texture)), "http://") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(player.Texture)), "https://") {
+			if isNetworkURL(player.Texture) {
 				return fmt.Errorf("playerlist avatar textures must not be network URLs")
 			}
 		}
@@ -490,9 +475,6 @@ func validateData(kind string, value any) error {
 			if len(decoded) > 16_384 {
 				return fmt.Errorf("map pixelData cannot exceed 16384 bytes")
 			}
-		}
-		if data.Scale < 0 || data.Scale > 4 {
-			return fmt.Errorf("map.scale must be between 0 and 4")
 		}
 		for _, pixel := range data.Pixels {
 			if pixel < 0 || pixel > 255 {
@@ -533,7 +515,17 @@ func validateItem(item *Item, where string) error {
 	if item.CustomData != nil && *item.CustomData < 0 {
 		return fmt.Errorf("%s.customData cannot be negative", where)
 	}
+	if isNetworkURL(item.Texture) {
+		return fmt.Errorf("%s.texture must not be a network URL", where)
+	}
 	return nil
+}
+
+// isNetworkURL reports whether a texture field names a remote resource. A render never reaches outside
+// the request for user content, so the HTTP forms are rejected instead of being fetched.
+func isNetworkURL(value string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://")
 }
 
 // Items returns every item position of a decoded render request. The HTTP layer resolves the custom

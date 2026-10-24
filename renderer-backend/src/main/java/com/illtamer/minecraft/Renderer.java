@@ -683,7 +683,8 @@ final class Renderer {
 
     /**
      * Vanilla {@code ike} (the {@code player_head} special renderer): the same skull renderer with the
-     * humanoid head layer and the skin of the profile of the item, or the default skin of the client.
+     * humanoid head layer and the skin the item names, or the default skin of the client. The skin
+     * resolution order is documented on {@link #specialSkin}.
      */
     private void addPlayerHeadGeometry(List<Quad> quads, Map<String, Object> item) throws IOException {
         List<Quad> parts = new ArrayList<>();
@@ -855,11 +856,27 @@ final class Renderer {
     }
 
     /**
-     * The 64x64 skin of a player head: the inline texture of the {@code minecraft:profile} component,
-     * or the default skin of the client when the item carries none. Only an embedded
-     * {@code data:image/png;base64} skin URL is read; a remote texture hash is left to the caller.
+     * The 64x64 skin of a player head. The sources are tried in this order:
+     * <ol>
+     *   <li>the top level {@code texture} field of the item — an inline {@code data:image/png;base64}
+     *       PNG or a texture path of the prepared resource tree, 64x64 or legacy 64x32;</li>
+     *   <li>the inline skin of the {@code minecraft:profile} component (a {@code textures} property
+     *       whose {@code value} is the base64 profile document, itself holding a data URI SKIN);</li>
+     *   <li>the default skin of the client, {@code entity/player/wide/steve}.</li>
+     * </ol>
+     * An unusable {@code texture} never fails the render: it is reported on stderr and the profile of
+     * the item takes over. A profile that only names a remote texture hash is not resolved over the
+     * network, it falls through to the default skin.
      */
     private BufferedImage specialSkin(Map<String, Object> item) throws IOException {
+        String texture = Json.string(item, "texture", "");
+        if (!texture.isBlank()) {
+            try {
+                return skinTexture(Map.of("texture", texture));
+            } catch (IOException error) {
+                System.err.println("player head texture fell back to its profile: " + error.getMessage());
+            }
+        }
         Object profile = itemComponent(item, "profile");
         if (profile instanceof Map<?, ?> raw && castMap(raw).get("properties") instanceof List<?> list) {
             for (Object entry : list) {

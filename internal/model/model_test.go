@@ -319,6 +319,52 @@ func TestItemsReachEveryItemPosition(t *testing.T) {
 	}
 }
 
+// A player head names its skin with the flat texture field. Only an inline PNG data URI or a texture
+// path of the prepared resources is accepted: a render never reaches out to the network for content.
+func TestItemTextureRejectsNetworkURLsAndAcceptsInlineSkins(t *testing.T) {
+	cases := []struct {
+		name    string
+		texture string
+		valid   bool
+	}{
+		{name: "inline png", texture: "data:image/png;base64,AAAA", valid: true},
+		{name: "resource path", texture: "entity/player/wide/alex", valid: true},
+		{name: "https", texture: "https://example.com/skin.png"},
+		{name: "http upper case", texture: "HTTPS://example.com/skin.png"},
+		{name: "http inside a slot", texture: " http://example.com/skin.png "},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			request := Request{Version: SupportedVersion, Type: TypeItem, Output: OutputPNG,
+				Data: mustJSON(t, Item{ID: "minecraft:player_head", Texture: test.texture})}
+			_, err := request.DecodeData()
+			if test.valid && err != nil {
+				t.Fatalf("texture %q rejected: %v", test.texture, err)
+			}
+			if !test.valid && err == nil {
+				t.Fatalf("texture %q was accepted", test.texture)
+			}
+		})
+	}
+}
+
+// The same rule holds wherever an item can sit, because validateItem is the shared gate.
+func TestItemTextureIsValidatedOnEveryItemPosition(t *testing.T) {
+	requests := map[string]Request{
+		"tooltip": {Version: SupportedVersion, Type: TypeTooltip, Output: OutputPNG, Data: mustJSON(t, TooltipData{
+			Item: Item{ID: "minecraft:player_head", Texture: "https://example.com/skin.png"}})},
+		"inventory": {Version: SupportedVersion, Type: TypeInventory, Output: OutputPNG, Data: mustJSON(t, ContainerData{
+			Slots: []Slot{{Slot: 0, Item: Item{ID: "minecraft:player_head", Texture: "https://example.com/skin.png"}}}})},
+		"achievement": {Version: SupportedVersion, Type: TypeAchievement, Output: OutputPNG, Data: mustJSON(t, AchievementData{
+			Title: "Test", Icon: Item{ID: "minecraft:player_head", Texture: "https://example.com/skin.png"}})},
+	}
+	for name, request := range requests {
+		if _, err := request.DecodeData(); err == nil {
+			t.Fatalf("%s accepted a network texture URL", name)
+		}
+	}
+}
+
 func intPointer(value int) *int {
 	return &value
 }

@@ -40,6 +40,7 @@ public final class RendererSmokeTest {
         testMissingFontDefinition(root);
         testSpecialItems(renderer, root);
         testSpecialComponents(renderer, root);
+        testPlayerHeadTexture(renderer, root);
         testSpecialHeldItems(renderer, root);
         testSpecialItemList(renderer, root);
         testCustomArt(renderer, root);
@@ -1415,19 +1416,71 @@ public final class RendererSmokeTest {
 
         // A player head reads the inline skin of its profile property; its hat overlay then carries the
         // colour of that skin instead of the one of the default skin.
-        String document = "{\"textures\":{\"SKIN\":{\"url\":\"" + inlineSkin() + "\"}}}";
-        String property = java.util.Base64.getEncoder().encodeToString(document.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         BufferedImage profile = renderItem(renderer, root, "minecraft:player_head", Map.of("profile", Map.of(
-                "properties", List.of(Map.of("name", "textures", "value", property)))));
+                "properties", List.of(Map.of("name", "textures", "value", profileDocument(inlineSkin()))))));
         require(countColor(profile, ColorKind.PROFILE_HAT) > 100, "the inline profile skin is not used");
         require(countColor(profile, ColorKind.HAT) == 0, "the default skin survived the inline profile");
         // A profile that names a remote skin returns to the default skin of the client.
         BufferedImage remote = renderItem(renderer, root, "minecraft:player_head", Map.of("profile", Map.of(
                 "properties", List.of(Map.of("name", "textures",
-                        "value", java.util.Base64.getEncoder().encodeToString(
-                                "{\"textures\":{\"SKIN\":{\"url\":\"http://example.invalid/skin\"}}}"
-                                        .getBytes(java.nio.charset.StandardCharsets.UTF_8)))))));
+                        "value", profileDocument("http://example.invalid/skin"))))));
         require(countColor(remote, ColorKind.HAT) > 100, "a remote profile does not fall back to the default skin");
+    }
+
+    /**
+     * The skin of a player head: the flat {@code texture} field of the item comes first, an unusable
+     * texture degrades to the profile instead of failing, and a legacy 64x32 skin still renders.
+     */
+    private static void testPlayerHeadTexture(Renderer renderer, Path root) throws Exception {
+        // The top level texture field decides the skin, without any profile component.
+        BufferedImage inline = renderItemFields(renderer, root, "minecraft:player_head", Map.of("texture", inlineSkin()));
+        require(countColor(inline, ColorKind.PROFILE_HAT) > 100, "the inline item texture is not used");
+        require(countColor(inline, ColorKind.HAT) == 0, "the default skin survived an inline item texture");
+
+        // The texture wins over the profile of the item, which here could only resolve to the default.
+        Map<String, Object> preferredFields = new LinkedHashMap<>();
+        preferredFields.put("texture", inlineSkin());
+        preferredFields.put("components", Map.of("profile", Map.of("properties", List.of(Map.of(
+                "name", "textures", "value", profileDocument("http://example.invalid/skin"))))));
+        BufferedImage preferred = renderItemFields(renderer, root, "minecraft:player_head", preferredFields);
+        require(countColor(preferred, ColorKind.PROFILE_HAT) > 100, "the profile overrode the item texture");
+        require(countColor(preferred, ColorKind.HAT) == 0, "the item texture did not decide the skin");
+
+        // A texture the reader rejects falls back to the profile; the icon still renders.
+        Map<String, Object> fallbackFields = new LinkedHashMap<>();
+        fallbackFields.put("texture", brokenSkin());
+        fallbackFields.put("components", Map.of("profile", Map.of("properties", List.of(Map.of(
+                "name", "textures", "value", profileDocument(inlineSkin()))))));
+        BufferedImage degraded = renderItemFields(renderer, root, "minecraft:player_head", fallbackFields);
+        require(countColor(degraded, ColorKind.PROFILE_HAT) > 100, "a broken texture did not fall back to the profile");
+        require(countColor(degraded, ColorKind.HAT) == 0, "the profile was skipped after a broken texture");
+
+        // A legacy 64x32 skin keeps the head and hat rectangles of the modern layout, so the head cube
+        // renders even though the mirrored limbs are the only thing the conversion has to add.
+        BufferedImage legacy = renderItemFields(renderer, root, "minecraft:player_head", Map.of("texture", legacySkin()));
+        require(countColor(legacy, ColorKind.PROFILE_HAT) > 100, "a legacy 64x32 item texture is not rendered");
+    }
+
+    /** The base64 profile document a {@code minecraft:profile} property carries, for one SKIN url. */
+    private static String profileDocument(String skinURL) {
+        String document = "{\"textures\":{\"SKIN\":{\"url\":\"" + skinURL + "\"}}}";
+        return java.util.Base64.getEncoder().encodeToString(document.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /** A PNG the skin reader has to reject: 32x32 instead of 64x64 or the legacy 64x32 layout. */
+    private static String brokenSkin() throws Exception {
+        return dataURI(new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB));
+    }
+
+    /** A legacy 64x32 skin: the head and hat rectangles of {@link #inlineSkin()}, no left limb area. */
+    private static String legacySkin() throws Exception {
+        BufferedImage image = new BufferedImage(64, 32, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 64; x++) {
+                image.setRGB(x, y, 0xFF000000 | (x < 32 ? 0x3030B0 : 0xFF9F40));
+            }
+        }
+        return dataURI(image);
     }
 
     /**
@@ -1442,9 +1495,7 @@ public final class RendererSmokeTest {
                 image.setRGB(x, y, 0xFF000000 | (x < 32 ? 0x3030B0 : 0xFF9F40));
             }
         }
-        java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream();
-        ImageIO.write(image, "png", output);
-        return "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(output.toByteArray());
+        return dataURI(image);
     }
 
     /** A held special item is a 3D model of its own, so it must sit in front of the torso like a sword. */
@@ -1724,15 +1775,21 @@ public final class RendererSmokeTest {
     }
 
     private static BufferedImage renderItem(Renderer renderer, Path root, String id, Map<String, Object> components) throws Exception {
+        return renderItemFields(renderer, root, id, components.isEmpty() ? Map.of() : Map.of("components", components));
+    }
+
+    /**
+     * Renders one item icon whose request carries arbitrary fields on the item itself, which is how a
+     * player head names its skin next to the components of the stack.
+     */
+    private static BufferedImage renderItemFields(Renderer renderer, Path root, String id, Map<String, Object> fields) throws Exception {
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("operation", "item");
         request.put("resourceRoot", root.toString());
         request.put("width", 64);
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("id", id);
-        if (!components.isEmpty()) {
-            item.put("components", components);
-        }
+        item.putAll(fields);
         request.put("item", item);
         return renderer.render(request);
     }
