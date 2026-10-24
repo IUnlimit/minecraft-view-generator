@@ -1136,13 +1136,19 @@ final class Renderer {
         return "assets/" + namespace + "/models/" + path + ".json";
     }
 
-    private int[] defaultUV(Element element, String direction) {
+    /**
+     * Vanilla default uv of a face without an explicit rectangle: the element box projected onto the
+     * face plane, still in the 0..16 space of the model. The values stay fractional because a custom
+     * model places its boxes on fractions of a unit, and rounding them would shift the sampled
+     * texture by up to a whole texel of a high resolution sheet.
+     */
+    private double[] defaultUV(Element element, String direction) {
         double[] from = element.from;
         double[] to = element.to;
         return switch (direction) {
-            case "up", "down" -> new int[]{(int) from[0], (int) from[2], (int) to[0], (int) to[2]};
-            case "north", "south" -> new int[]{(int) from[0], (int) (16 - to[1]), (int) to[0], (int) (16 - from[1])};
-            default -> new int[]{(int) from[2], (int) (16 - to[1]), (int) to[2], (int) (16 - from[1])};
+            case "up", "down" -> new double[]{from[0], from[2], to[0], to[2]};
+            case "north", "south" -> new double[]{from[0], 16 - to[1], to[0], 16 - from[1]};
+            default -> new double[]{from[2], 16 - to[1], to[2], 16 - from[1]};
         };
     }
 
@@ -3541,7 +3547,7 @@ final class Renderer {
                 }
                 FaceDefinition definition = entry.getValue();
                 BufferedImage texture = resources.sprite(model.texture(definition.texture, definition.texture));
-                int[] uv = definition.uv == null ? defaultUV(element, entry.getKey()) : definition.uv;
+                double[] uv = definition.uv == null ? defaultUV(element, entry.getKey()) : definition.uv;
                 double scaleU = texture.getWidth() / 16.0;
                 double scaleV = texture.getHeight() / 16.0;
                 Quad quad = new Quad(faceNormal(entry.getKey()), texture);
@@ -3554,11 +3560,17 @@ final class Renderer {
                     case "up", "down" -> new int[]{0, 3, 1, 2};
                     default -> new int[]{0, 1, 3, 2};
                 };
+                // Vanilla BlockFaceUV numbers the four texture corners of a face around the face
+                // itself, 0 top left / 1 bottom left / 2 bottom right / 3 top right, and a face
+                // rotation shifts that numbering: the sampled image turns while the geometry stays.
+                int[] cornerOfSlot = {0, 3, 1, 2};
+                int[] slotOfCorner = {0, 2, 3, 1};
+                int steps = Math.floorMod(definition.rotation / 90, 4);
                 Mat4 rotation = element.rotation == null ? null : element.rotation.matrix();
-                for (int index = 0; index < 4; index++) {
-                    quad.corners[index] = rotation == null
-                            ? vertices.get(order[index])
-                            : move(rotation, vertices.get(order[index]));
+                for (int slot = 0; slot < 4; slot++) {
+                    Vec3 vertex = vertices.get(order[slot]);
+                    int target = slotOfCorner[(cornerOfSlot[slot] + steps) % 4];
+                    quad.corners[target] = rotation == null ? vertex : move(rotation, vertex);
                 }
                 if (rotation != null) {
                     double[] normal = rotation.normal(quad.normal.x(), quad.normal.y(), quad.normal.z());
@@ -4505,10 +4517,12 @@ final class Renderer {
     private static final class FaceDefinition {
         final String texture;
         final int tintIndex;
-        final int[] uv;
+        /** The sampled rectangle of the sprite, {@code u0, v0, u1, v1}, in the 0..16 model space. */
+        final double[] uv;
+        /** Vanilla face rotation in degrees, one of 0/90/180/270: it turns the texture in place. */
         final int rotation;
 
-        FaceDefinition(String texture, int tintIndex, int[] uv, int rotation) {
+        FaceDefinition(String texture, int tintIndex, double[] uv, int rotation) {
             this.texture = texture;
             this.tintIndex = tintIndex;
             this.uv = uv;
@@ -4516,20 +4530,25 @@ final class Renderer {
         }
 
         static FaceDefinition from(Map<String, Object> raw) {
+            int rotation = Json.integer(raw, "rotation", 0);
             return new FaceDefinition(
                     Json.string(raw, "texture", ""),
                     Json.integer(raw, "tintindex", -1),
                     vector(raw.get("uv")),
-                    Json.integer(raw, "rotation", 0));
+                    // The client rejects anything else, so a broken value must not turn the face.
+                    switch (rotation) {
+                        case 90, 180, 270 -> rotation;
+                        default -> 0;
+                    });
         }
 
-        private static int[] vector(Object value) {
+        private static double[] vector(Object value) {
             if (!(value instanceof List<?> list) || list.size() < 4) {
                 return null;
             }
-            int[] result = new int[4];
+            double[] result = new double[4];
             for (int index = 0; index < result.length; index++) {
-                result[index] = list.get(index) instanceof Number number ? number.intValue() : 0;
+                result[index] = list.get(index) instanceof Number number ? number.doubleValue() : 0;
             }
             return result;
         }

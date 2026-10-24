@@ -45,6 +45,8 @@ public final class RendererSmokeTest {
         testCustomArt(renderer, root);
         testHdTextures(renderer, root);
         testAnimatedSprite(renderer, root);
+        testFaceRotation(renderer, root);
+        testFractionalUv(renderer, root);
         testElementRotation(renderer, root);
         testMissingResources(renderer, root);
         System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/resources paths passed");
@@ -757,6 +759,64 @@ public final class RendererSmokeTest {
     }
 
     /**
+     * A face rotation turns the sampled texture in place. Vanilla numbers the four corners of a face
+     * around the face itself — top left, bottom left, bottom right, top right — and shifts that
+     * numbering by the rotation, so the image rotates without the geometry moving.
+     */
+    private static void testFaceRotation(Renderer renderer, Path root) throws Exception {
+        int topLeft = 0xFFE03030;
+        int topRight = 0xFF30E030;
+        int bottomLeft = 0xFF3030E0;
+        int bottomRight = 0xFFE0E030;
+        String sheet = quadrantPNG(16, topLeft, topRight, bottomLeft, bottomRight);
+        int red = shaded(topLeft & 0xFFFFFF, 0.8);
+
+        for (int[] expected : new int[][]{{0, 0}, {90, 3}, {180, 2}}) {
+            Map<String, Object> face = new LinkedHashMap<>();
+            face.put("texture", "#0");
+            face.put("uv", List.of(0, 0, 16, 16));
+            if (expected[0] != 0) {
+                face.put("rotation", expected[0]);
+            }
+            BufferedImage icon = plateIcon(renderer, root, 3200 + expected[0], Map.of("south", face), "test:plate", sheet, Map.of());
+            double[] centre = centre(icon, red);
+            // The red quadrant starts at the top left and moves one corner around per 90 degrees. The
+            // corners are numbered 0 top left, 1 bottom left, 2 bottom right, 3 top right.
+            int corner = expected[1];
+            boolean right = corner == 2 || corner == 3;
+            boolean below = corner == 1 || corner == 2;
+            require((centre[0] > 32) == right, "rotation " + expected[0] + " put the red quadrant at x " + centre[0]);
+            require((centre[1] > 32) == below, "rotation " + expected[0] + " put the red quadrant at y " + centre[1]);
+        }
+    }
+
+    /**
+     * A uv is fractional in every custom pack — Blockbench places boxes on fractions of a unit — and
+     * rounding it to whole units shifts the sampled texels of a high resolution sheet. The texture
+     * here is sixteen 4 px stripes and the face asks for the half unit wide band around the fifth, so
+     * the fifth stripe can only appear if the fraction survives.
+     */
+    private static void testFractionalUv(Renderer renderer, Path root) throws Exception {
+        int fourth = 0xFF30E030;
+        int fifth = 0xFFE03030;
+        int sixth = 0xFF3030E0;
+        int other = 0xFF101010;
+        int[] stripes = new int[16];
+        java.util.Arrays.fill(stripes, other);
+        stripes[3] = fourth;
+        stripes[4] = fifth;
+        stripes[5] = sixth;
+        Map<String, Object> face = Map.of("texture", "#0", "uv", List.of(3.5, 0, 4.5, 16));
+        BufferedImage icon = plateIcon(renderer, root, 3301, Map.of("south", face), "test:plate",
+                stripesPNG(64, stripes), Map.of());
+        // u runs over the half unit on both sides of four, which is texel 14 to 17 of the 64 px sheet.
+        require(countExact(icon, shaded(fourth & 0xFFFFFF, 0.8)) > 100, "the fourth stripe is missing");
+        require(countExact(icon, shaded(fifth & 0xFFFFFF, 0.8)) > 100, "the fraction of the uv was rounded away");
+        require(countExact(icon, shaded(sixth & 0xFFFFFF, 0.8)) == 0, "the face sampled past its uv rectangle");
+        require(countExact(icon, shaded(other & 0xFFFFFF, 0.8)) == 0, "the face sampled outside the four stripes");
+    }
+
+    /**
      * An element rotation turns its box about the axis before the display pose, which is how a custom
      * weapon gets its diagonal parts. Ignoring it left every rotated element in its unrotated place:
      * the ninety rotated elements of an ItemsAdder hammer collapsed onto each other and most of the
@@ -858,6 +918,18 @@ public final class RendererSmokeTest {
                 for (int x = 0; x < width; x++) {
                     image.setRGB(x, frame * width + y, frameColours[frame]);
                 }
+            }
+        }
+        return dataURI(image);
+    }
+
+    /** Vertical stripes of equal width, one colour per stripe, as the data URI of a custom texture. */
+    private static String stripesPNG(int size, int[] colours) throws Exception {
+        BufferedImage image = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        int width = size / colours.length;
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                image.setRGB(x, y, colours[Math.min(colours.length - 1, x / width)]);
             }
         }
         return dataURI(image);
