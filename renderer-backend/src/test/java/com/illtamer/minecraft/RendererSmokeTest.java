@@ -45,6 +45,7 @@ public final class RendererSmokeTest {
         testCustomArt(renderer, root);
         testHdTextures(renderer, root);
         testAnimatedSprite(renderer, root);
+        testElementRotation(renderer, root);
         testMissingResources(renderer, root);
         System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/resources paths passed");
     }
@@ -756,18 +757,67 @@ public final class RendererSmokeTest {
     }
 
     /**
+     * An element rotation turns its box about the axis before the display pose, which is how a custom
+     * weapon gets its diagonal parts. Ignoring it left every rotated element in its unrotated place:
+     * the ninety rotated elements of an ItemsAdder hammer collapsed onto each other and most of the
+     * model disappeared behind the wrong geometry.
+     */
+    private static void testElementRotation(Renderer renderer, Path root) throws Exception {
+        int colour = 0x3060E0;
+        int face = shaded(colour, 0.8);
+        Map<String, Object> faces = Map.of("south", Map.of("texture", "#0", "uv", List.of(0, 0, 16, 16)));
+        String sheet = solidPNG(0xFF000000 | colour);
+
+        Map<String, Object> element = new LinkedHashMap<>();
+        element.put("from", List.of(2, 2, 7));
+        element.put("to", List.of(14, 14, 9));
+        element.put("faces", faces);
+        int[] flat = exactBounds(customModelIcon(renderer, root, 3101, List.of(element), "test:plate", sheet, Map.of()), face);
+        require(flat[3] - flat[1] >= 44, "the unrotated plate is not its full square silhouette: " + java.util.Arrays.toString(flat));
+
+        // A 45 degree turn about x keeps the width and shortens the height to cos + sin of the box.
+        Map<String, Object> turned = new LinkedHashMap<>(element);
+        turned.put("rotation", Map.of("angle", 45, "axis", "x", "origin", List.of(8, 8, 8)));
+        int[] diagonal = exactBounds(customModelIcon(renderer, root, 3102, List.of(turned), "test:plate", sheet, Map.of()), face);
+        require(diagonal[2] - diagonal[0] == flat[2] - flat[0], "the x rotation changed the width of the plate");
+        double ratio = (double) (diagonal[3] - diagonal[1]) / (flat[3] - flat[1]);
+        require(ratio > 0.6 && ratio < 0.8, "the 45 degree plate is not foreshortened: " + ratio);
+
+        // A turn about y shortens the width instead, which proves the axis is honoured.
+        Map<String, Object> sideways = new LinkedHashMap<>(element);
+        sideways.put("rotation", Map.of("angle", 45, "axis", "y", "origin", List.of(8, 8, 8)));
+        int[] narrowed = exactBounds(customModelIcon(renderer, root, 3103, List.of(sideways), "test:plate", sheet, Map.of()), face);
+        require(narrowed[3] - narrowed[1] == flat[3] - flat[1], "the y rotation changed the height of the plate");
+        require(narrowed[2] - narrowed[0] < flat[2] - flat[0] * 0.8, "the y rotation did not narrow the plate");
+
+        // rescale stretches the two axes that are not the rotation axis, so the box keeps its size.
+        Map<String, Object> rescaled = new LinkedHashMap<>(turned);
+        rescaled.put("rotation", Map.of("angle", 45, "axis", "x", "origin", List.of(8, 8, 8), "rescale", true));
+        int[] stretched = exactBounds(customModelIcon(renderer, root, 3104, List.of(rescaled), "test:plate", sheet, Map.of()), face);
+        require(stretched[3] - stretched[1] > (diagonal[3] - diagonal[1]) * 1.3,
+                "rescale did not restore the size of the rotated plate");
+    }
+
+    /**
      * Renders a custom item drawn from one 16x16 plate: the geometry a flat custom asset reduces to,
      * which keeps an assertion about texture sampling independent of the model that samples it. A
      * {@code texture} of null reads the id from the resource tree instead of the request.
      */
     private static BufferedImage plateIcon(Renderer renderer, Path root, int customData, Map<String, Object> faces,
             String textureID, String texture, Map<String, String> metadata) throws Exception {
+        Map<String, Object> element = Map.of(
+                "from", List.of(0, 0, 7),
+                "to", List.of(16, 16, 9),
+                "faces", faces);
+        return customModelIcon(renderer, root, customData, List.of(element), textureID, texture, metadata);
+    }
+
+    /** Renders a custom item from one inline model built out of the given elements. */
+    private static BufferedImage customModelIcon(Renderer renderer, Path root, int customData,
+            List<Map<String, Object>> elements, String textureID, String texture, Map<String, String> metadata) throws Exception {
         Map<String, Object> model = Map.of(
                 "textures", Map.of("0", textureID),
-                "elements", List.of(Map.of(
-                        "from", List.of(0, 0, 7),
-                        "to", List.of(16, 16, 9),
-                        "faces", faces)));
+                "elements", elements);
         Map<String, Object> art = new LinkedHashMap<>();
         art.put("model", model);
         if (texture != null) {

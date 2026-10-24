@@ -298,6 +298,8 @@ PY
 
 `uv` 是**模型空间 0..16 的纹理坐标**，不是贴图像素下标：0..16 映射到整张贴图，所以 32×32、96×96、112×112 的高清贴图会整张参与采样（Blockbench 写进模型的 `texture_size` 只是编辑器元数据，原版不读，这里也不参与换算）。带动画元数据的贴图（`.png.mcmeta` 的 `animation`）取**第一帧**作为静态图标，不会把整条竖表拉到一个面上。
 
+元素的 `rotation`（`angle` / `axis` / `origin` / `rescale`）按原版 `FaceBakery#rotatePart` 在 `display` 姿态之前应用——自定义武器包几乎每个元素都带旋转，忽略它会把盒子叠在原位、把模型主体挡掉；`rescale` 用原版的两个系数（22.5° 与其余角度）。元素的 `shade: false` 与 `gui_light: front` 一样不参与面明暗。
+
 `elements` 模型的面明暗取自原版 `ModelBlockRenderer` 的面方向表——上 `1.0`、下 `0.5`、南北 `0.8`、东西 `0.6`（按模型面自己的方向，不是按变换后的法线），`gui_light: front` 的模型不参与——所以标准 `display.gui` 姿态下的整方块是「上表面最亮、两侧一深一浅」的等轴立方体，这也是原版槽位图标的观感。声明了 `tintindex` 的面仍叠一层 42/255 的白色（原版染色表另行排期）。
 
 手持走 `thirdperson_righthand` / `thirdperson_lefthand` 与 `ItemInHandLayer` 链条，深度排序与遮挡和玩家模型共用。

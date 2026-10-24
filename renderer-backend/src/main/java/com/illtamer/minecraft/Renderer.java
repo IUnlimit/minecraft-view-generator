@@ -444,7 +444,7 @@ final class Renderer {
         for (String direction : new String[]{"down", "up", "north", "south", "west", "east"}) {
             faces.put(direction, new FaceDefinition(MISSING_TEXTURE, -1, null, 0));
         }
-        model.elements.add(new Element(new double[]{0, 0, 0}, new double[]{16, 16, 16}, faces));
+        model.elements.add(new Element(new double[]{0, 0, 0}, new double[]{16, 16, 16}, faces, null, true));
         return model;
     }
 
@@ -3068,12 +3068,17 @@ final class Renderer {
     private static void transformQuads(List<Quad> quads, Mat4 transform) {
         for (Quad quad : quads) {
             for (int index = 0; index < 4; index++) {
-                double[] point = transform.point(quad.corners[index].x(), quad.corners[index].y(), quad.corners[index].z());
-                quad.corners[index] = new Vec3(point[0], point[1], point[2]);
+                quad.corners[index] = move(transform, quad.corners[index]);
             }
             double[] normal = transform.normal(quad.normal.x(), quad.normal.y(), quad.normal.z());
             quad.normal = new Vec3(normal[0], normal[1], normal[2]);
         }
+    }
+
+    /** One point through a matrix, for the geometry that is built outside the quad transforms. */
+    private static Vec3 move(Mat4 matrix, Vec3 point) {
+        double[] value = matrix.point(point.x(), point.y(), point.z());
+        return new Vec3(value[0], value[1], value[2]);
     }
 
     /**
@@ -3540,7 +3545,7 @@ final class Renderer {
                 double scaleU = texture.getWidth() / 16.0;
                 double scaleV = texture.getHeight() / 16.0;
                 Quad quad = new Quad(faceNormal(entry.getKey()), texture);
-                quad.shade = blockFaceShade(entry.getKey());
+                quad.shade = element.shade ? blockFaceShade(entry.getKey()) : 1.0;
                 quad.tint = definition.tintIndex >= 0;
                 quad.fullBright = "front".equals(model.guiLight);
                 // faceVertices returns the vanilla cube order, the quad pipeline wants the corners in
@@ -3549,8 +3554,15 @@ final class Renderer {
                     case "up", "down" -> new int[]{0, 3, 1, 2};
                     default -> new int[]{0, 1, 3, 2};
                 };
+                Mat4 rotation = element.rotation == null ? null : element.rotation.matrix();
                 for (int index = 0; index < 4; index++) {
-                    quad.corners[index] = vertices.get(order[index]);
+                    quad.corners[index] = rotation == null
+                            ? vertices.get(order[index])
+                            : move(rotation, vertices.get(order[index]));
+                }
+                if (rotation != null) {
+                    double[] normal = rotation.normal(quad.normal.x(), quad.normal.y(), quad.normal.z());
+                    quad.normal = new Vec3(normal[0], normal[1], normal[2]);
                 }
                 quad.uv[0] = uv[0] * scaleU;
                 quad.uv[1] = uv[1] * scaleV;
@@ -4375,22 +4387,95 @@ final class Renderer {
         }
     }
 
+    /**
+     * One {@code elements[].rotation}: a turn of {@code angle} degrees about {@code axis} through
+     * {@code origin}, all in the 0..16 model space. Custom weapon packs rotate nearly every element
+     * — all ninety elements of an ItemsAdder hammer carry one — so ignoring it stacks the boxes in
+     * their unrotated places and hides much of the model behind the wrong geometry.
+     */
+    private record ElementRotation(double angle, String axis, double[] origin, boolean rescale) {
+        static ElementRotation from(Map<String, Object> raw, double[] from, double[] to) {
+            Object value = raw.get("rotation");
+            if (!(value instanceof Map<?, ?> map)) {
+                return null;
+            }
+            Map<String, Object> rotation = castMap(map);
+            String axis = Json.string(rotation, "axis", "y").toLowerCase(Locale.ROOT);
+            return new ElementRotation(
+                    Json.number(rotation, "angle", 0),
+                    switch (axis) {
+                        case "x", "z" -> axis;
+                        default -> "y";
+                    },
+                    vector(rotation.get("origin"), new double[]{
+                            (from[0] + to[0]) / 2, (from[1] + to[1]) / 2, (from[2] + to[2]) / 2}),
+                    Json.bool(rotation, "rescale", false));
+        }
+
+        /**
+         * Vanilla {@code FaceBakery#rotatePart}: the rotation runs about {@code origin}, and
+         * {@code rescale} stretches the two axes that are not the rotation axis so the box keeps its
+         * apparent size. The client only knows two factors — {@code 1/cos(22.5°)} for a 22.5 degree
+         * turn and {@code 1/cos(45°)} for every other angle — and this is the only place the factor
+         * has ever mattered, so the same pair is used here.
+         */
+        Mat4 matrix() {
+            Mat4 rotation = switch (axis) {
+                case "x" -> Mat4.rotationX(angle);
+                case "z" -> Mat4.rotationZ(angle);
+                default -> Mat4.rotationY(angle);
+            };
+            double stretch = rescale
+                    ? 1.0 / Math.cos(Math.toRadians(Math.abs(angle) == 22.5 ? 22.5 : 45))
+                    : 1.0;
+            double[] scale = switch (axis) {
+                case "x" -> new double[]{1, stretch, stretch};
+                case "z" -> new double[]{stretch, stretch, 1};
+                default -> new double[]{stretch, 1, stretch};
+            };
+            return Mat4.translation(origin[0], origin[1], origin[2])
+                    .multiply(Mat4.scaling(scale[0], scale[1], scale[2]))
+                    .multiply(rotation)
+                    .multiply(Mat4.translation(-origin[0], -origin[1], -origin[2]));
+        }
+
+        private static double[] vector(Object value, double[] fallback) {
+            if (value instanceof List<?> list && list.size() >= 3) {
+                return new double[]{number(list.get(0)), number(list.get(1)), number(list.get(2))};
+            }
+            return fallback;
+        }
+
+        private static double number(Object value) {
+            return value instanceof Number number ? number.doubleValue() : 0;
+        }
+    }
+
     private static final class Element {
         final double[] from;
         final double[] to;
         final Map<String, FaceDefinition> faces;
+        final ElementRotation rotation;
+        /** Vanilla {@code shade}: a false element is drawn unshaded, whatever its face direction is. */
+        final boolean shade;
 
-        Element(double[] from, double[] to, Map<String, FaceDefinition> faces) {
+        Element(double[] from, double[] to, Map<String, FaceDefinition> faces, ElementRotation rotation, boolean shade) {
             this.from = from;
             this.to = to;
             this.faces = faces;
+            this.rotation = rotation;
+            this.shade = shade;
         }
 
         static Element from(Map<String, Object> raw) {
+            double[] from = vector(raw.get("from"), new double[]{0, 0, 0});
+            double[] to = vector(raw.get("to"), new double[]{16, 16, 16});
             return new Element(
-                    vector(raw.get("from"), new double[]{0, 0, 0}),
-                    vector(raw.get("to"), new double[]{16, 16, 16}),
-                    faces(raw.get("faces")));
+                    from,
+                    to,
+                    faces(raw.get("faces")),
+                    ElementRotation.from(raw, from, to),
+                    Json.bool(raw, "shade", true));
         }
 
         private static Map<String, FaceDefinition> faces(Object value) {
