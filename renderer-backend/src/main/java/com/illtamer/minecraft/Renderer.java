@@ -4044,10 +4044,22 @@ final class Renderer {
             return sprite;
         }
 
-        /** The metadata of one texture: the request's copy for an inline one, the file's otherwise. */
+        /**
+         * The metadata of one texture: the request's copy for an inline one, the file's otherwise. A
+         * document that does not parse only loses the sprite framing — the texture is then drawn as
+         * the single image it is — because one broken file must never take the icon down.
+         */
         private Map<String, Object> spriteMetadata(String relative) throws IOException {
             Map<String, Object> inline = inlineMetadata.get(relative);
-            return inline != null ? inline : metadataOf(relative);
+            if (inline != null) {
+                return inline;
+            }
+            try {
+                return metadataOf(relative);
+            } catch (IOException | IllegalArgumentException error) {
+                System.err.println("sprite metadata of " + relative + " is invalid, drawing the whole sheet: " + error.getMessage());
+                return null;
+            }
         }
 
         private static BufferedImage firstFrame(BufferedImage image, Map<String, Object> metadata) {

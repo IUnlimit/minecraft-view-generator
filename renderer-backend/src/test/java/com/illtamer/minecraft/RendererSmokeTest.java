@@ -756,6 +756,12 @@ public final class RendererSmokeTest {
                 "a sprite of the resource tree ignores its .png.mcmeta");
         require(countExact(fromDisk, shaded(second & 0xFFFFFF, 0.8)) == 0,
                 "the second frame of a sprite of the resource tree is drawn");
+
+        // A .png.mcmeta that does not parse loses the framing, not the icon: the sheet is still the
+        // one image the model asked for instead of degrading to the missing model.
+        BufferedImage broken = plateIcon(renderer, root, 3006, faces, "minecraft:block/fixture_broken_meta", null, Map.of());
+        require(countExact(broken, shaded(0x3060E0, 0.8)) == 64 * 64,
+                "a malformed sprite metadata took the whole icon down");
     }
 
     /**
