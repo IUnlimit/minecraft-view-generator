@@ -13,7 +13,7 @@
 - **资源路径自检**：`GET /api/v1/resources/sources` 列出当前读取的每个目录与文件（原版树 / addon / 资源包栈 / 字体资产 / 自定义包与索引）及存在性，`POST /api/v1/resources/custom/reload` 可在用户改了 pack 或索引后热重建。
 - **版本化资源管理**：资源层级为 vanilla → addon → 用户资源包，通过 HTTP 接口显式准备与查询状态；客户端 JAR、资源对象按 SHA-1 缓存在数据目录，重复准备不重复下载。
 - **资源缺失也降级**：未知物品、缺失模型、未直译的 special 族、损坏贴图、单个槽位失败都只影响那一层/那个槽位，并在 stderr 里说明原因。
-- **内嵌交互式文档**：`/docs`（Scalar）与 `/api/v1/openapi.json`，内置十种类型的可直接发送报文。
+- **内嵌交互式文档**：`/docs`（Scalar）与 `/api/v1/openapi.json`，内置十种 type 与 `player_head` 的可直接发送报文；`data` 不再是匿名的 object，每种 type 的结构、必填与默认值都在 `components.schemas` 里可导航。`player_head` 可直接用 `item.texture` 传 64×64 皮肤（内联 base64 或资源路径，优先级高于 `components["minecraft:profile"]` 的双层 base64 写法）。
 
 ## 目录结构
 
@@ -84,7 +84,7 @@ curl -X POST http://localhost:4666/api/v1/render \
   -o starfish.png
 ```
 
-请求统一使用 `version`、`type`、`output`、`data`，以及可选的 `options.width/height/transparent/background/scale/frame`。`width`/`height` 指定画布尺寸（只给一个时按该类型的原生画布比例换算，不拉伸）；`scale` 是成品图的放大倍率，既可以写固定比例（`"scale": 2.5`，支持小数），也可以写目标最终尺寸（`"scale": {"width": 1024, "height": 768}`，按画布等比放进目标框）。三者语义、上限与各类型原生尺寸见 [`docs/api.md`](docs/api.md)，交互式文档见 `/docs`。
+请求统一使用 `version`、`type`、`output`、`data`，以及可选的 `options.width/height/transparent/background/scale`（`options.frame` 与 `options.projection` 已删除，继续传会返回 `400 invalid_json`）。`width`/`height` 指定画布尺寸（只给一个时按该类型的原生画布比例换算，不拉伸）；`scale` 是成品图的放大倍率，既可以写固定比例（`"scale": 2.5`，支持小数），也可以写目标最终尺寸（`"scale": {"width": 1024, "height": 768}`，按画布等比放进目标框）。逐字段的类型、必填、默认值与上限见 [`docs/api.md`](docs/api.md) 的「请求参数总表」，交互式文档见 `/docs`。
 
 ## 本地运行（不使用 Docker）
 
