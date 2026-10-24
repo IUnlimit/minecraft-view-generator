@@ -8,7 +8,7 @@
 
 交互式 Scalar API Reference 位于 `http://127.0.0.1:4666/docs`，`/scalar` 是同一个页面的别名；原始 OpenAPI 文档位于 `http://127.0.0.1:4666/api/v1/openapi.json`。Scalar 页面通过 CDN 加载前端，浏览器访问文档页时需要能够访问 jsDelivr。
 
-`POST /api/v1/render` 的 requestBody 内置了十种 type 的可直接发送报文（Scalar 示例切换器：`item`、`tooltip`、`inventory`、`item_container`、`enderchest`、`playerInventory`、`skin`、`playerlist`、`map`、`achievement`），统一使用 `output=base64`。示例中的皮肤是服务启动时生成的 64×64 占位贴图，因此可以直接执行；渲染前仍需先准备资源。
+`POST /api/v1/render` 的 requestBody 内置了十一种可直接发送的报文（Scalar 示例切换器：十种 type 的 `item`、`tooltip`、`inventory`、`item_container`、`enderchest`、`playerInventory`、`skin`、`playerlist`、`map`、`achievement`，外加一个用 `item.texture` 传皮肤的 `player_head` 示例），统一使用 `output=base64`。`data` 的每个结构都在 `components.schemas` 里，逐字段说明见「请求参数总表」。示例中的皮肤是服务启动时生成的 64×64 占位贴图，因此可以直接执行；渲染前仍需先准备资源。
 
 OpenAPI 文档随二进制内嵌生成：调整接口后执行 `make build`（或让 `./run.sh` 自动构建）并重启服务，即完成文档重新生成，随后核对 `/docs` 与 `/api/v1/openapi.json`。
 
@@ -24,7 +24,7 @@ curl http://localhost:4666/api/v1/versions
 
 ## 统一渲染请求
 
-所有类型都使用：`version`、`type`、`output`、`data`、可选 `options.width/height/transparent/background/scale/frame`。
+所有类型都使用：`version`、`type`、`output`、`data`，以及可选的 `options`。每个字段的类型、必填、默认值与上限见下面的**请求参数总表**。原来的 `options.frame` 与 `options.projection` 已删除（Java 渲染器从不读取它们）；由于它们属于顶层 `options` 的字段，继续传会被 `DisallowUnknownFields` 拒绝并返回 `400 invalid_json`。
 
 ```sh
 curl -X POST http://localhost:4666/api/v1/render \
@@ -34,6 +34,250 @@ curl -X POST http://localhost:4666/api/v1/render \
 ```
 
 `output=png` 返回 `image/png`；`output=base64` 返回 `{ "mimeType":"image/png", "encoding":"base64", "data":"...", "width":n, "height":n }`。响应里的 `width`/`height` 就是这张图的最终尺寸。
+
+## 请求参数总表
+
+<!-- params:start -->
+
+下面这几张表就是 `POST /api/v1/render` 的完整契约：字段、类型、必填、默认值与上限。[internal/model/docs_test.go](../internal/model/docs_test.go) 会反射遍历接口结构体，断言每个 json 字段都在本节里以 `` `字段名` `` 的形式出现；漏写一个，`go test ./...` 就会失败。
+
+### 公共字段
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `version` | string | ✔ | 只能是 `"1.21.11"`，其他版本返回 `400 invalid_data` |
+| `type` | string | ✔ | 十种 type 选一，见「每种 type 生成什么图」 |
+| `output` | string | ✔ | `png` 返回 `image/png`；`base64` 返回带 `width`/`height` 的 JSON |
+| `data` | object | ✔ | 结构由 `type` 决定，见下文各表 |
+| `options` | object |  | 画布尺寸、倍率与外观，见下表 |
+
+**三条最容易踩的规则：**
+
+- 顶层字段与 `options` 内的未知字段由 `DisallowUnknownFields` 拒绝 → `400 invalid_json`。所以 `options.frame`、`options.projection` 现在会直接报错。
+- `data` 内的未知字段**静默忽略**：既不报错，也不生效。拼错的字段名不会提醒你，只会让效果消失。
+- `output=base64` 响应里的 `width`/`height` 是这张图的**最终成品尺寸**，可能不等于 `options.width/height`——`tooltip` 与 `playerlist` 的高度由内容撑开。
+
+### options
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `width` | integer | 各类型原生宽度 | 画布宽度（渲染分辨率），≥16，上限默认 1600（`MAX_IMAGE_WIDTH`） |
+| `height` | integer | 按原生比例换算 | 画布高度，≥16，上限默认 1200（`MAX_IMAGE_HEIGHT`） |
+| `scale` | number \| object | 不放大 | `2`、`{"ratio":2}`、`{"width":800}`、`{"width":800,"height":600}`；倍率 0–16，允许小数，详见「图片尺寸与放大倍率」 |
+| `background` | string | 透明 | `#RRGGBB`（`#` 可省）。**只对 `item` 有效**：先铺满整张画布，图标自身的透明像素会透出这个颜色；格式不对按透明处理 |
+| `transparent` | boolean | false | **只对 `item` 有效**：保留图标自身的透明像素并忽略 `background` |
+
+其余九种类型都自绘不透明背景，`background` 与 `transparent` 对它们没有作用。
+
+### item 的物品字段
+
+`item`、`tooltip.item`、`slots[].item`、`armor[]`、`mainHand`/`offhand`、`achievement.icon` 共用同一套字段。
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | — | **必填**，如 `minecraft:diamond_sword`；缺失返回 `400 invalid_data` |
+| `count` | integer | 0 | 堆叠数量，≥0。只在容器 / 背包槽位画右下角数字（>1 才画），`item` 图标本身不画 |
+| `damage` | integer | 0 | 已消耗耐久；与 `maxDamage` 同时 >0 时在图标上画耐久条 |
+| `maxDamage` | integer | 0 | 最大耐久；与 `damage` 同时 >0 时在图标上画耐久条 |
+| `customModelData` | integer | — | 原版 `custom_model_data`，驱动模型的 `select` / `range_dispatch` 覆盖 |
+| `customData` | integer | — | ItemsAdder 索引键的数值部分，≥0；与 `id` 的基础材料组合命中 `data/contents`，见「自定义物品」 |
+| `components` | object | — | 原版组件表，键可带或不带 `minecraft:` 前缀 |
+| `nbt` | object | — | 任意 NBT/JSON；`tooltip` 的 advanced 模式用它生成 `item.nbt_tags` 计数行 |
+| `name` | string | — | 悬停名（tooltip 首行），支持 `§` 与 `&` 颜色码 |
+| `lore` | string[] | — | tooltip 正文，≤128 行 × 1024 字符 |
+| `enchantments` | string[] | — | `"sharpness 5"` 或 `"minecraft:sharpness V"`；同时触发附魔光效（glint） |
+| `texture` | string | — | **仅 `minecraft:player_head`**：头颅皮肤，见「player_head 头颅皮肤」；不能是网络 URL（`400 invalid_data`），其他物品传了忽略 |
+
+### 每种 type 的 data
+
+| type | data 结构 |
+| --- | --- |
+| `item` | 上一节的物品字段 |
+| `tooltip` | `TooltipData` |
+| `inventory` / `item_container` / `enderchest` | `ContainerData` |
+| `playerInventory` | `PlayerInventoryData` |
+| `skin` | `SkinData` |
+| `playerlist` | `PlayerListData`（`players[]` 为 `PlayerListEntry`） |
+| `map` | `MapData`（`markers[]` 为 `MapMarker`） |
+| `achievement` | `AchievementData`（`icon` 为物品字段） |
+
+`Slot`（容器 `slots`/`items` 与 `playerInventory` 的 `slots`/`armor` 共用）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `slot` | integer | 0 | 菜单槽位下标 0–255；容器的 `0..rows*9-1` 是容器区，之后是玩家背包区 |
+| `item` | Item | — | 该槽位的物品 |
+| `empty` | boolean | false | 标记空槽：此时可以省略 `item.id` |
+
+`ContainerData`（`inventory` / `item_container` / `enderchest`）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `title` | string | — | 界面标题，按原版画在左上角，支持 `§` 与 `&` |
+| `container` | string | — | **`item_container` 必填**：`hopper`、`furnace`/`blast_furnace`/`smoker`、`crafting_table`（别名 `crafting`）、`anvil`、`brewing_stand`（别名 `brewing`）；未知容器返回 `422 unsupported_container` |
+| `rows` | integer | 3 | `inventory` 1–6；`enderchest` 只能 3；其余容器忽略 |
+| `columns` | integer | 9 | 只能 9 |
+| `slots` | Slot[] | — | 槽位列表 |
+| `items` | Slot[] | — | `slots` 的别名；两者都给时 `slots` 优先 |
+
+`TooltipData`（`tooltip`）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `item` | Item | — | 物品；`item.id` 与 `title` 至少给一个，否则 `400 invalid_data` |
+| `title` | string | — | 显式标题行；给出后不再按原版顺序生成行 |
+| `advanced` | boolean | false | 原版 F3+H 高级提示：追加物品 id、组件 dump 与计数，并叠加 `tooltip/frame` 边框 |
+| `icon` | boolean | false | 在左侧绘制 72px 物品图标 |
+
+`SkinData`（`skin`，以及 `playerInventory.skin`）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `texture` | string | — | **必填**：内联 `data:image/png;base64,...`（64×64，或 legacy 64×32）或已准备资源树里的贴图路径；不能是网络 URL |
+| `model` | string | classic | `classic` / `slim` |
+| `slim` | boolean | false | 等价写法：`true` 即 `slim` |
+| `cape` | string | — | 斗篷 PNG，64×32 或 22×17 |
+| `outerLayer` | boolean | false | 第二层（头发 / 外套 / 袖子 / 裤腿） |
+| `textureUrl` | string | — | **禁止**：任何非空值都返回 `400 invalid_data`（`skin.textureUrl is not accepted`） |
+
+`PlayerInventoryData`（`playerInventory`）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `title` | string | — | 标题，原版 `(97, 6)` |
+| `skin` | SkinData | — | **必填**，其中 `texture` 也必填 |
+| `slots` | Slot[] | — | 菜单槽 0–26 背包、27–35 快捷栏 |
+| `armor` | Slot[] | — | 槽 0–3 依次是头盔、胸甲、护腿、靴子；缺失装备定义返回 `422` |
+| `mainHand` | Item | — | 主手物品，挂载时用 `display.thirdperson_righthand` |
+| `offhand` | Item | — | 副手物品，挂载时用 `display.thirdperson_lefthand` |
+
+`PlayerListData`（`playerlist`）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `header` | string | — | 页眉，按 `\n` 分行并逐行居中 |
+| `footer` | string | — | 页脚，规则同 `header` |
+| `players` | PlayerListEntry[] | — | 玩家条目，≤500 人 |
+| `columns` | integer | 0 | 0 = 自动：>40 人 3 列、>20 人 2 列、否则 1 列。只接受 0–16（17 及以上 `400 invalid_data`）；渲染器只画得下 1–8 列，9–16 会因画布宽度超过 `MAX_IMAGE_WIDTH` 而以 `422` 失败 |
+
+`PlayerListEntry`
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | — | 玩家名，与 `display` 至少给一个 |
+| `display` | string | — | 显示名，优先于 `name`；支持 `§` 与 `&` |
+| `texture` | string | — | **必填**：头像皮肤，规则同 `SkinData.texture`，不能是网络 URL |
+| `ping` | integer | 0 | 延迟毫秒，按官方阈值 `<150`/`<300`/`<600`/`<1000` 选 `ping_5..ping_1`；`<=0` 用 `ping_unknown` |
+
+`MapData`（`map`）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `pixels` | integer[] | — | 16384 项扁平数组，`index = z*128+x`，0 表示透明，取值 0–255 |
+| `pixelData` | string | — | `base64:` 前缀（base64 编码）或原始字节字符串，解码后 ≤16384 字节 |
+| `markers` | MapMarker[] | — | 装饰图标 |
+| `locked` | boolean | false | 在左下角绘制 `LOCKED`（服务辅助信息，非原版元素） |
+| `dimension` | string | — | 在左上角绘制维度名（服务辅助信息，非原版元素） |
+
+`MapMarker`
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `x` | integer | 0 | 地图内 x，0–127 |
+| `z` | integer | 0 | 地图内 z，0–127 |
+| `rotation` | integer | 0 | 0–15，每个单位 22.5° |
+| `type` | string | — | 原版装饰名或别名；未收录的名称返回 `422`，清单见「map 示例」 |
+| `name` | string | — | 标记名，会绘制在地图上 |
+
+`AchievementData`（`achievement`）
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `title` | string | — | **必填**，≤256 字符；完成态为黄色 |
+| `description` | string | — | 描述行，≤1024 字符 |
+| `icon` | Item | — | **必填**（`icon.id` 必填） |
+| `completed` | boolean | false | 完成态：obtained 边框 + 黄色标题 |
+| `frame` | string | task | `task` / `goal` / `challenge` |
+
+### 每种 type 生成什么图
+
+| type | 原生画布 | 内容 | 背景 | `width`/`height` 的作用 |
+| --- | --- | --- | --- | --- |
+| `item` | 128×128 正方形 | 物品图标（3D quad 管线） | 图标自身的透明像素；`background` 铺在它下面，`transparent` 保持透明 | 改变画布尺寸，整数倍时原生重绘 |
+| `tooltip` | 宽 360，高由内容决定 | 九宫格背景 + 文本 | 不透明 | `width` 改变折行宽度（改变版式），高度始终自算；纵向只认 `scale` |
+| `inventory` | 176 × (17 + 18×行数 + 96)（3 行 = 167） | `generic_54` 容器界面 | 不透明 | 整数倍原生重绘 |
+| `enderchest` | 176×167 | 同上，固定 3 行 9 列 | 不透明 | 整数倍原生重绘 |
+| `item_container` | `hopper` 176×133，其余 176×166 | 各自的原版容器界面 | 不透明 | 整数倍原生重绘 |
+| `playerInventory` | 176×166 | `InventoryScreen` 1:1 + 3D 玩家预览 | 不透明 | 整数倍原生重绘 |
+| `skin` | 256×384 | 3D 玩家模型 | 透明 | 改变画布，整数倍时原生重绘 |
+| `playerlist` | 宽度按列数（最少 360），高由人数决定 | TAB 列表 | 不透明 | `width` 改变版式，不放大；要放大只认 `scale` |
+| `map` | 140×140 | 羊皮纸 + 128×128 像素网格 + 装饰 | 不透明 | 缩放整图，不裁剪 |
+| `achievement` | 480×96 | advancement toast | 不透明 | 整数倍原生重绘 |
+
+`width`/`height` 只给一个时，另一个按该行的原生画布比例换算，不会拉伸。整数倍会按最终分辨率**原生重绘**（文字按目标像素尺寸光栅化、3D 模型重新光栅化），小数倍率或非整数比则对成品图做最近邻放大；细节见「图片尺寸与放大倍率」。
+
+### 行为与降级规则
+
+- **头颅皮肤优先级**：`item.texture` → `components["minecraft:profile"]` 里内联的皮肤 → 客户端默认皮肤 `entity/player/wide/steve`。只给 `name`、`uuid` 或远端 hash 的 profile 不会联网解析，一律回退到默认皮肤。
+- **坏皮肤不失败**：`item.texture` 解不出来（尺寸不对、不是 PNG、路径不存在）时，只在 stderr 打一行 `player head texture fell back to its profile` 并继续走 profile → 默认皮肤，HTTP 仍是 200。
+- **单个贴图缺失只影响那一层**：其余层照常绘制；整个物品都没有可用几何时画原版紫黑缺失模型。
+- **未知物品 id / 未知模型**：画原版缺失模型，不返回 422。
+
+### player_head 头颅皮肤
+
+`minecraft:player_head` 的皮肤有两条入口，推荐第一条：
+
+```json
+{
+  "version": "1.21.11",
+  "type": "item",
+  "output": "base64",
+  "data": {
+    "id": "minecraft:player_head",
+    "texture": "data:image/png;base64,<64x64 或 64x32 的皮肤 PNG>"
+  }
+}
+```
+
+第二条是原版 `minecraft:profile` 组件：`properties[].value` 必须是 **profile JSON 文档的 base64**，而文档里的 `textures.SKIN.url` 又必须是 **`data:image/png;base64,...`**——也就是双层 base64，手工拼非常容易错。下面的片段直接把一份皮肤 PNG 包装成可发送的报文：
+
+```sh
+python3 - <<'PY' | curl -X POST http://localhost:4666/api/v1/render \
+  -H 'Content-Type: application/json' \
+  --data-binary @-
+import base64, json
+
+png = open("alex.png", "rb").read()          # 64x64 或 legacy 64x32 的皮肤
+skin = "data:image/png;base64," + base64.b64encode(png).decode()
+profile = {"textures": {"SKIN": {"url": skin}}}
+request = {
+    "version": "1.21.11",
+    "type": "item",
+    "output": "base64",
+    "data": {
+        "id": "minecraft:player_head",
+        "components": {
+            "minecraft:profile": {
+                "properties": [{"name": "textures",
+                                "value": base64.b64encode(json.dumps(profile).encode()).decode()}]
+            }
+        },
+    },
+}
+print(json.dumps(request))
+PY
+```
+
+四点事实：
+
+1. **只对 `player_head` 生效**：其他物品即使带 `texture` 也会被忽略（不报错）。
+2. **legacy 64×32 自动补齐**：左右肢体会按原版方式从右侧镜像出来，不需要自己预处理。
+3. **优先级与降级**：`item.texture` 优先于 profile；`texture` 不可用时回退到 profile，再回退到 `entity/player/wide/steve`。
+4. **任何物品位置都生效**：`item`、容器槽位、`playerInventory` 的手持物、`tooltip` 的图标都用同一条皮肤解析链。
+
+皮肤值除了内联 `data:image/png;base64,...`（推荐，永远不会有歧义），也可以写成资源树里的贴图 id。**贴图 id 必须带命名空间或 `.png` 后缀**（如 `minecraft:textures/entity/player/wide/alex.png`）：解析器先尝试把值当裸 base64 解码，只用字母数字和 `/` 的短路径（例如 `textures/entity/player/wide/alex`）会被误判成 base64，结果退回默认皮肤。
+
+<!-- params:end -->
 
 ## 图片尺寸与放大倍率
 
@@ -60,7 +304,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 **小数倍率、非整数目标尺寸**回退为对成品图做最近邻放大：像素行/列宽窄交替，目标框的非约束轴可能出现 ±1px 的取整误差。
 
-各类型的原生画布：`item` 正方形（缺省 128×128）、`tooltip` 宽 360 高由内容决定、`inventory` / `enderchest` / `item_container` 取各自界面贴图尺寸（普通容器 176×166，盒子按行数 `176×(17 + 18×行数 + 96)`，hopper 176×133）、`skin` 256×384、`playerInventory` 176×166、`playerlist` 宽度按列数（最少 360）高由人数决定、`map` 140×140、`achievement` 480×96。原生高度由内容决定的类型（`tooltip`、`playerlist`）只接受画布宽度，高度仍交给渲染器自算；需要限制最终高度时用 `scale` 的目标框。
+各类型的原生画布、背景与 `width`/`height` 的作用见「请求参数总表」里的**每种 type 生成什么图**表。原生高度由内容决定的类型（`tooltip`、`playerlist`）只接受画布宽度，高度仍交给渲染器自算；需要限制最终高度时用 `scale` 的目标框。
 
 最终尺寸仍需满足 `MAX_IMAGE_WIDTH` / `MAX_IMAGE_HEIGHT`：`scale` 目标尺寸或“显式画布 × 固定倍率”超限时在入口以 `400 invalid_image_options` 拒绝，原生画布放大后超限则返回 `422 image_too_large`。
 
@@ -101,7 +345,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 | `enderchest` | 固定 3×9，与普通三行箱子完全一致（同一 `generic_54` 贴图、配色与槽位，无额外叠加） |
 | `playerInventory` | 原版 InventoryScreen 1:1 布局（默认 176×166，面板贴图不缩放）、标题 `(97, 6)`、原版预览视口内的 3D 玩家（26→75 / 8→78，30 像素每方块）、外层与披风、`equipment/*.json` 盔甲分层（染色层、elytra 翼）、手持物 thirdperson 3D 变换（手部高度、躯干前方，special 模型也用 3D 几何）、InventoryMenu 槽位（背包 / 快捷栏 / 装备 / 副手） |
 | `skin` | 原版 3D 玩家模型：64×64 classic/slim、legacy 64×32（自动补齐左侧肢体）、外层第二层、原版斗篷 UV、手持物 thirdperson 3D 变换（含在自适应缩放内；special 模型同样使用其 3D 几何） |
-| `playerlist` | 原版 TAB 布局：行距 9px、8×8 头像、官方 ping 图标与阈值、header/footer 居中、多列（每列 20 行），最多 500 人，整体 2 倍渲染（字体同步放大）；`gameMode` 接受校验但不绘制 |
+| `playerlist` | 原版 TAB 布局：行距 9px、8×8 头像、官方 ping 图标与阈值、header/footer 居中、多列（每列 20 行），最多 500 人，整体 2 倍渲染（字体同步放大） |
 | `map` | 原版地图图像：`map/map_background` 羊皮纸背景 + 内缩的完整 128×128 像素网格（默认 140×140，内容 1:1）+ `map/decorations/*` 原版装饰图标，最多 16384 项 pixels 或解码后最多 16384 字节 pixelData、marker rotation/type/name、dimension/locked/scale |
 | `achievement` | 官方 advancement toast（160×32 内容，默认放大 3 倍到 480×96）、task/goal/challenge obtained/unobtained frame、icon、标题与描述在 x=30 的第 7/18 行 |
 
@@ -234,7 +478,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 手持物按原版 `ItemInHandLayer` 链路计算，但整条链在乘入场景空间之前仍处于原版实体模型空间：原版模型空间 y 向下、原点在颈部（脚底 +24px）、模型朝 -z，而玩家模型、披风与装备层所在的场景空间 y 向上、脚底为 0、模型朝观察者 +z，两者相差绕 x 轴半圈 `F = T(0, 24, 0)·Rx(180°)`。乘上 F 后，手持物与原版一致地挂在手心高度、位于躯干之前（默认 3/4 视角下主手与副手物品都可见），而不是落到躯干背后。显式传入 `options.width` / `options.height` 且正好是 176×166 的整数倍时，整张界面（含 3D 预览）按该倍率原生重绘；非整数比则退化为整图最近邻拉伸，语义与 `inventory` / `enderchest` 一致。`options.scale` 为整数倍时同样原生重绘，因此放大后的皮肤是重新光栅化的，而不是把 1 倍的预览放大。
 
-`playerlist` 使用原版 TAB 列表几何（9px 行距与 8×8 头像，本服务按 2 倍渲染以便在 Discord 等场景查看，字体同样放大 2 倍）：每个玩家必须提供 `texture`（与 `skin` 相同的校验，不能是网络 URL），头像取皮肤 `(8,8)` 脸部与 `(40,8)` 外层，右侧 ping 图标按原版阈值选择 `gui/sprites/icon/ping_5..ping_1`（`<150`/`<300`/`<600`/`<1000`），`ping <= 0` 或缺失时使用 `ping_unknown`；每列最多 20 行、多列从左到右、header/footer 每行居中。`gameMode` 字段仍接受并校验，但不会绘制，以保持与原版一致的行布局。
+`playerlist` 使用原版 TAB 列表几何（9px 行距与 8×8 头像，本服务按 2 倍渲染以便在 Discord 等场景查看，字体同样放大 2 倍）：每个玩家必须提供 `texture`（与 `skin` 相同的校验，不能是网络 URL），头像取皮肤 `(8,8)` 脸部与 `(40,8)` 外层，右侧 ping 图标按原版阈值选择 `gui/sprites/icon/ping_5..ping_1`（`<150`/`<300`/`<600`/`<1000`），`ping <= 0` 或缺失时使用 `ping_unknown`；每列最多 20 行、多列从左到右、header/footer 每行居中。`columns` 缺省为 0（自动：>40 人 3 列、>20 人 2 列、否则 1 列），只接受 0–16；渲染器只画得下 1–8 列，9–16 会因画布宽度超过 `MAX_IMAGE_WIDTH` 而以 `422` 失败。
 
 `achievement` 按原版 `AdvancementToast` 渲染 160×32 的 toast 内容，再整图放大到默认 480×96：标题在 `(30, 7)`、描述在 `(30, 18)`，图标与 frame 贴图沿用原版位置。
 
@@ -285,7 +529,7 @@ PY
 | `banner` | 旗杆 + 横杆（`entity/banner_base`）与旗面：先按模型的 `color` 染 `entity/banner/base`，再按 `banner_patterns` 的每个图案染 `entity/banner/<pattern>`；`base_color` 组件覆盖模型颜色 |
 | `bed` | 床头 / 床尾两半（`entity/bed/<texture>`），按 `BedRenderer` 的 `translate(0, 0.5625, 0/-1) → rotateX(90°)` 摆放 |
 | `head` | `kind` 对应 `entity/{skeleton, creeper, zombie, piglin, enderdragon}/…`，`texture` 字段可覆盖；8³ 头颅 + 0.25 膨胀覆盖层（humanoid kind），固定 `yRot = 180°` 面对观察者 |
-| `player_head` | 同上的人类头层，皮肤取 `profile` 组件里内联 PNG；没有内联皮肤（含只给远端 hash 的 profile）时回退到客户端默认皮肤 `entity/player/wide/steve` |
+| `player_head` | 同上的人类头层，皮肤按优先级取 `item.texture`（推荐）→ `components["minecraft:profile"]` 里内联的皮肤 → 客户端默认皮肤 `entity/player/wide/steve`；不联网解析 name / uuid / 远端 hash，详见「player_head 头颅皮肤」 |
 | `shield` | 盾面 + 握把（`entity/shield_base_nopattern` / `entity/shield_base`），有图案时按 `banner_patterns` 逐层染 `entity/shield/base` 与 `entity/shield/<pattern>` |
 | `conduit` | 未激活状态的外壳（6³，`entity/conduit/base`）+ `translate(0.5, 0.5, 0.5)`；笼、风与眼睛三层属于方块实体的激活状态，不在物品图标里 |
 | `decorated_pot` | 颈 + 盖 + 四面侧壁（`entity/decorated_pot/*`），`pot_decorations` 按原版 back/left/right/front 顺序选陶片图案 `*_pottery_pattern`，没有陶片的侧面用 `decorated_pot_side` |
