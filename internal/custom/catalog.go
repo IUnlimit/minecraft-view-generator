@@ -63,7 +63,7 @@ type state struct {
 
 	mu       sync.Mutex
 	art      map[string]artEntry
-	textures map[string]string
+	textures map[string]inlineSprite
 	layouts  map[string][]string
 	reported map[string]struct{}
 	resolved int
@@ -126,7 +126,7 @@ func New(cfg config.Config, logger *slog.Logger) *Catalog {
 		cache:    &Cache{byKey: map[string]string{}},
 		defs:     map[string]definition{},
 		art:      map[string]artEntry{},
-		textures: map[string]string{},
+		textures: map[string]inlineSprite{},
 		layouts:  map[string][]string{},
 		reported: map[string]struct{}{},
 	}
@@ -242,7 +242,7 @@ func (c *Catalog) scan() *state {
 		cache:    &Cache{byKey: map[string]string{}},
 		defs:     map[string]definition{},
 		art:      map[string]artEntry{},
-		textures: map[string]string{},
+		textures: map[string]inlineSprite{},
 		layouts:  map[string][]string{},
 		reported: map[string]struct{}{},
 		builtAt:  time.Now(),

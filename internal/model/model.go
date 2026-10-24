@@ -190,9 +190,14 @@ type Item struct {
 // CustomArt is the drawing instruction of one custom item: a flat model (its parent chain already
 // merged down to the first vanilla parent) and the inline textures that model references. Texture
 // values are data URIs, so a render never has to reach outside the request for user content.
+//
+// Metadata carries the .png.mcmeta document of every inline texture that ships one, keyed like
+// Textures. The renderer needs it to draw the first frame of an animated sprite: without it the
+// frame count of a vertical strip is unknown and a face would stretch across every frame.
 type CustomArt struct {
 	Model    map[string]any    `json:"model"`
 	Textures map[string]string `json:"textures,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // CustomArtKey is the lookup key of CustomArt: a base material and the custom_model_data value that

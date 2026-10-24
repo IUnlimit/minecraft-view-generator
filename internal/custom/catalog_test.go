@@ -240,6 +240,49 @@ APPLE:
 	}
 }
 
+// A custom pack lives outside the resource tree the renderer can read, so the .png.mcmeta of an
+// animated sprite has to travel with the inlined texture: without it the renderer cannot tell a
+// vertical animation strip from one tall still image, and the face would smear across every frame.
+func TestCatalogCarriesTheSpriteMetadata(t *testing.T) {
+	contents := filepath.Join(t.TempDir(), "contents")
+	writeFile(t, filepath.Join(contents, "pack/configs/items.yml"), `
+info:
+  namespace: pack
+items:
+  flame:
+    resource:
+      material: PAPER
+      generate: false
+      model_path: item/flame
+`)
+	writeFile(t, filepath.Join(contents, "pack/resourcepack/assets/pack/models/item/flame.json"),
+		`{"textures":{"2":"pack:hammer","1":"pack:animations/animations_2"},"elements":[{"from":[0,0,7],"to":[16,16,9],"faces":{"south":{"texture":"#2","uv":[0,0,16,16]}}}]}`)
+	writePNG(t, filepath.Join(contents, "pack/resourcepack/assets/pack/textures/hammer.png"))
+	writePNG(t, filepath.Join(contents, "pack/resourcepack/assets/pack/textures/animations/animations_2.png"))
+	writeFile(t, filepath.Join(contents, "pack/resourcepack/assets/pack/textures/animations/animations_2.png.mcmeta"),
+		`{"animation": {"frametime": 2}}`)
+	writeFile(t, filepath.Join(contents, "items_ids_cache.yml"), "PAPER:\n  pack:flame: 1134\n")
+
+	catalog := New(testConfig(contents), nil)
+	catalog.Reload()
+	art, reason, ok := catalog.Art("minecraft:paper", 1134)
+	if !ok {
+		t.Fatalf("the animated item did not resolve: %s", reason)
+	}
+	if art.Textures["pack:animations/animations_2"] == "" {
+		t.Fatal("the animated texture was not inlined")
+	}
+	if meta := art.Metadata["pack:animations/animations_2"]; !strings.Contains(meta, "animation") {
+		t.Fatalf("the animation metadata was not carried with the texture: %q", meta)
+	}
+	if meta, present := art.Metadata["pack:hammer"]; present {
+		t.Fatalf("a still texture carries metadata: %q", meta)
+	}
+	if art.Textures["pack:hammer"] == "" {
+		t.Fatal("the still texture was not inlined")
+	}
+}
+
 // A custom model may inherit from another custom model, which the renderer cannot reach: the catalog
 // flattens the chain and keeps only the vanilla parent.
 func TestCatalogFlattensCustomParents(t *testing.T) {

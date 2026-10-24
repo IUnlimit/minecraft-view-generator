@@ -296,6 +296,8 @@ PY
 
 **所有** item 图标共用一条 3D 管线：普通模型 JSON 里的 `elements`（方块、家具）、上表的 `minecraft:special` 几何、以及原版缺失模型，都按「`display.gui` 的 `T·R(rotationXYZ)·S·T(-0.5,-0.5,-0.5)` 摆姿势 + 正交直视相机（1 单位 = 1 像素、物品中心落在图标中心）」在最终分辨率上逐像素光栅化，面按深度排序、逐面按 `uv` 采样，因此方块不会被按外接框拉伸、棱边是直线。
 
+`uv` 是**模型空间 0..16 的纹理坐标**，不是贴图像素下标：0..16 映射到整张贴图，所以 32×32、96×96、112×112 的高清贴图会整张参与采样（Blockbench 写进模型的 `texture_size` 只是编辑器元数据，原版不读，这里也不参与换算）。带动画元数据的贴图（`.png.mcmeta` 的 `animation`）取**第一帧**作为静态图标，不会把整条竖表拉到一个面上。
+
 `elements` 模型的面明暗取自原版 `ModelBlockRenderer` 的面方向表——上 `1.0`、下 `0.5`、南北 `0.8`、东西 `0.6`（按模型面自己的方向，不是按变换后的法线），`gui_light: front` 的模型不参与——所以标准 `display.gui` 姿态下的整方块是「上表面最亮、两侧一深一浅」的等轴立方体，这也是原版槽位图标的观感。声明了 `tintindex` 的面仍叠一层 42/255 的白色（原版染色表另行排期）。
 
 手持走 `thirdperson_righthand` / `thirdperson_lefthand` 与 `ItemInHandLayer` 链条，深度排序与遮挡和玩家模型共用。
@@ -314,7 +316,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 - **定位键 = 基础材料 + 数值**：`id` 的命名空间与 `customData` 组合成索引键（`minecraft:paper` + `1134` → `PAPER#1134`），与 `items_ids_cache.yml` 里的 `<MATERIAL>: {<namespace>:<name>: <cmd>}` 对应。同一数值在不同材料下是不同物品（`PAPER 1134` 与 `FISHING_ROD 1134` 互不相干），所以调用方必须传真实的基础材料。
 - **`customData` 与 `customModelData` 是两件事**：`customModelData` 仍然喂给原版的 `range_dispatch` 覆盖；`customData` 只用于自定义内容索引。
 - **任何物品位置都生效**：`item`、`tooltip.item`、`inventory/item_container/enderchest.slots[].item`、`playerInventory.armor/mainHand/offhand`、`achievement.icon`。
-- **绘制的是贴图 + 模型几何**：模型 JSON 的 `parent` 链会被逐层合并（遇到 `minecraft:` 父模型即停，并保留它以便沿用原版的 `display` 手部变换），`textures` 里的自定义贴图按需读文件并内联成 data URI 传给渲染后端。因此 `generated` 平面图标、带 `elements` 的 Blockbench 家具模型、以及**手持物品**都能画。
+- **绘制的是贴图 + 模型几何**：模型 JSON 的 `parent` 链会被逐层合并（遇到 `minecraft:` 父模型即停，并保留它以便沿用原版的 `display` 手部变换），`textures` 里的自定义贴图按需读文件并内联成 data URI 传给渲染后端（同名 `.png.mcmeta` 一并带上，用于取动画贴图的第一帧）。因此 `generated` 平面图标、带 `elements` 的 Blockbench 家具模型、以及**手持物品**都能画；高清贴图按模型 `uv` 的 0..16 坐标整体采样，不会被截成左上角。
 - **未命中不报错**：材料不匹配、索引里没有这个数值、配置里没有这个物品、贴图缺失，都会回退成原版物品并记一条 `WARN`（每个键一次），HTTP 仍然返回 200。
 
 ### 目录与索引

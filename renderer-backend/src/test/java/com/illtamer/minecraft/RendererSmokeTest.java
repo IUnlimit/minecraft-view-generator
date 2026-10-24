@@ -43,6 +43,8 @@ public final class RendererSmokeTest {
         testSpecialHeldItems(renderer, root);
         testSpecialItemList(renderer, root);
         testCustomArt(renderer, root);
+        testHdTextures(renderer, root);
+        testAnimatedSprite(renderer, root);
         testMissingResources(renderer, root);
         System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/resources paths passed");
     }
@@ -692,6 +694,131 @@ public final class RendererSmokeTest {
         require(hasPixels(renderer.render(unresolved)), "an unresolved customData left the icon empty");
     }
 
+    /**
+     * A model {@code uv} is a coordinate of the 0..16 model space, so one face samples the whole
+     * sprite whatever its resolution is. The renderer used to read {@code uv} as a texel index, which
+     * made every texture larger than 16 px show only its top left corner — the reason a 96 px custom
+     * weapon icon came out as a handful of stray colours.
+     */
+    private static void testHdTextures(Renderer renderer, Path root) throws Exception {
+        int topLeft = 0xFF30E030;
+        int topRight = 0xFFE03030;
+        int bottomLeft = 0xFF3030E0;
+        int bottomRight = 0xFFE0E030;
+        Map<String, Object> faces = Map.of("south", Map.of("texture", "#0", "uv", List.of(0, 0, 16, 16)));
+        BufferedImage icon = plateIcon(renderer, root, 3001, faces, "test:plate",
+                quadrantPNG(64, topLeft, topRight, bottomLeft, bottomRight), Map.of());
+        for (int colour : new int[]{topLeft, topRight, bottomLeft, bottomRight}) {
+            require(countExact(icon, shaded(colour & 0xFFFFFF, 0.8)) > 400,
+                    "the 64 px sheet is not sampled across all four quadrants: " + Integer.toHexString(colour));
+        }
+        // A 16 px sheet keeps the pixel perfect result of the renderer before this rule.
+        BufferedImage plain = plateIcon(renderer, root, 3002, faces, "test:plate", solidPNG(0xFF3060E0), Map.of());
+        require(countExact(plain, shaded(0x3060E0, 0.8)) == 64 * 64,
+                "the 16 px sheet is no longer a full plate of one colour");
+    }
+
+    /**
+     * An animated sprite answers with its first frame: a 16x64 sheet is four frames, so one face must
+     * sample the top quarter only. The metadata of a custom texture arrives with the request, the one
+     * of a texture in the resource tree is read from its {@code .png.mcmeta}.
+     */
+    private static void testAnimatedSprite(Renderer renderer, Path root) throws Exception {
+        int first = 0xFFE03030;
+        int second = 0xFF30E030;
+        int third = 0xFF3030E0;
+        int fourth = 0xFFE0E030;
+        Map<String, Object> faces = Map.of("south", Map.of("texture", "#0", "uv", List.of(0, 0, 16, 16)));
+        String strip = stripPNG(16, new int[]{first, second, third, fourth});
+
+        BufferedImage animated = plateIcon(renderer, root, 3003, faces, "test:plate", strip,
+                Map.of("test:plate", "{\"animation\":{\"frametime\":1}}"));
+        require(countExact(animated, shaded(first & 0xFFFFFF, 0.8)) == 64 * 64,
+                "the animated sprite is not drawn from its first frame");
+        for (int later : new int[]{second, third, fourth}) {
+            require(countExact(animated, shaded(later & 0xFFFFFF, 0.8)) == 0,
+                    "a later animation frame leaked into the icon: " + Integer.toHexString(later));
+        }
+        // The same sheet without metadata is one tall sprite, which is what keeps still textures exact.
+        BufferedImage whole = plateIcon(renderer, root, 3004, faces, "test:plate", strip, Map.of());
+        for (int colour : new int[]{first, second, third, fourth}) {
+            require(countExact(whole, shaded(colour & 0xFFFFFF, 0.8)) > 100,
+                    "an animated swatch without metadata lost a frame: " + Integer.toHexString(colour));
+        }
+
+        // The fixture strip is a file in the resource tree with an .png.mcmeta next to it, so the
+        // renderer has to frame it from the file system instead of from the request.
+        BufferedImage fromDisk = plateIcon(renderer, root, 3005, faces, "minecraft:block/fixture_strip", null, Map.of());
+        require(countExact(fromDisk, shaded(first & 0xFFFFFF, 0.8)) == 64 * 64,
+                "a sprite of the resource tree ignores its .png.mcmeta");
+        require(countExact(fromDisk, shaded(second & 0xFFFFFF, 0.8)) == 0,
+                "the second frame of a sprite of the resource tree is drawn");
+    }
+
+    /**
+     * Renders a custom item drawn from one 16x16 plate: the geometry a flat custom asset reduces to,
+     * which keeps an assertion about texture sampling independent of the model that samples it. A
+     * {@code texture} of null reads the id from the resource tree instead of the request.
+     */
+    private static BufferedImage plateIcon(Renderer renderer, Path root, int customData, Map<String, Object> faces,
+            String textureID, String texture, Map<String, String> metadata) throws Exception {
+        Map<String, Object> model = Map.of(
+                "textures", Map.of("0", textureID),
+                "elements", List.of(Map.of(
+                        "from", List.of(0, 0, 7),
+                        "to", List.of(16, 16, 9),
+                        "faces", faces)));
+        Map<String, Object> art = new LinkedHashMap<>();
+        art.put("model", model);
+        if (texture != null) {
+            art.put("textures", Map.of(textureID, texture));
+        }
+        if (!metadata.isEmpty()) {
+            art.put("metadata", metadata);
+        }
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("operation", "item");
+        request.put("resourceRoot", root.toString());
+        request.put("item", Map.of("id", "minecraft:diamond", "customData", customData));
+        request.put("customArt", Map.of("DIAMOND#" + customData, art));
+        request.put("width", 64);
+        request.put("height", 64);
+        return renderer.render(request);
+    }
+
+    /** A square sheet of four quadrant colours as the data URI of a custom texture. */
+    private static String quadrantPNG(int size, int topLeft, int topRight, int bottomLeft, int bottomRight) throws Exception {
+        BufferedImage image = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        int half = size / 2;
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                boolean top = y < half;
+                boolean left = x < half;
+                image.setRGB(x, y, top ? (left ? topLeft : topRight) : (left ? bottomLeft : bottomRight));
+            }
+        }
+        return dataURI(image);
+    }
+
+    /** A vertical animation strip, one square frame per colour, as the data URI of a custom texture. */
+    private static String stripPNG(int width, int[] frameColours) throws Exception {
+        BufferedImage image = new BufferedImage(width, width * frameColours.length, BufferedImage.TYPE_INT_ARGB);
+        for (int frame = 0; frame < frameColours.length; frame++) {
+            for (int y = 0; y < width; y++) {
+                for (int x = 0; x < width; x++) {
+                    image.setRGB(x, frame * width + y, frameColours[frame]);
+                }
+            }
+        }
+        return dataURI(image);
+    }
+
+    private static String dataURI(BufferedImage image) throws Exception {
+        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
+        ImageIO.write(image, "png", buffer);
+        return "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(buffer.toByteArray());
+    }
+
     /** Renders one item icon at the given square size. */
     private static BufferedImage itemIcon(Renderer renderer, Path root, String id, int size) throws Exception {
         Map<String, Object> request = new LinkedHashMap<>();
@@ -747,9 +874,7 @@ public final class RendererSmokeTest {
                 image.setRGB(x, y, argb);
             }
         }
-        java.io.ByteArrayOutputStream buffer = new java.io.ByteArrayOutputStream();
-        ImageIO.write(image, "png", buffer);
-        return "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(buffer.toByteArray());
+        return dataURI(image);
     }
 
     /**

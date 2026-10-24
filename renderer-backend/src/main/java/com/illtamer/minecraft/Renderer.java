@@ -166,7 +166,7 @@ final class Renderer {
             }
             List<BufferedImage> layers = new ArrayList<>();
             for (String layer : model.generatedLayers()) {
-                layers.add(resources.texture(model.texture(layer, layer)));
+                layers.add(resources.sprite(model.texture(layer, layer)));
             }
             return generatedSprite(layers, size);
         }
@@ -228,9 +228,11 @@ final class Renderer {
                 }
             }
             if (art.get("textures") instanceof Map<?, ?> textures) {
+                Map<?, ?> metadata = art.get("metadata") instanceof Map<?, ?> map ? map : Map.of();
                 for (Map.Entry<?, ?> texture : textures.entrySet()) {
                     if (texture.getKey() instanceof String id && texture.getValue() instanceof String encoded) {
-                        resources.putInlineTexture(id, encoded);
+                        Object mcmeta = metadata.get(id);
+                        resources.putInlineTexture(id, encoded, mcmeta instanceof String text ? text : null);
                     }
                 }
             }
@@ -2762,6 +2764,12 @@ final class Renderer {
         final Vec3[] corners = new Vec3[4];
         Vec3 normal;
         final BufferedImage texture;
+        /**
+         * The sampled rectangle of {@link #texture} in <em>its own pixels</em> — {@code u0, v0, u1,
+         * v1} — because every other producer (vanilla boxes, skins, generated plates) measures its
+         * texture that way. A model JSON, whose {@code uv} lives in the 0..16 space of the model, has
+         * to convert at construction instead of handing its units to this table.
+         */
         final double[] uv = new double[4];
         /** Vanilla {@code gui_light: front} models (every generated item model) are drawn unshaded. */
         boolean fullBright;
@@ -2935,6 +2943,9 @@ final class Renderer {
         int canvasWidth = canvas.getWidth();
         int canvasHeight = canvas.getHeight();
         int[] target = ((DataBufferInt) canvas.getRaster().getDataBuffer()).getData();
+        // One copy of each sprite per scene: a model can reference the same texture from hundreds of
+        // faces, and copying a 480 px sheet per face used to dominate the rasterisation.
+        Map<BufferedImage, int[]> texels = new HashMap<>();
         for (Quad quad : ordered) {
             double u0 = quad.uv[0];
             double v0 = quad.uv[1];
@@ -2976,7 +2987,8 @@ final class Renderer {
             BufferedImage texture = quad.texture;
             int textureWidth = texture.getWidth();
             int textureHeight = texture.getHeight();
-            int[] textureData = texture.getRGB(0, 0, textureWidth, textureHeight, null, 0, textureWidth);
+            int[] textureData = texels.computeIfAbsent(texture,
+                    image -> image.getRGB(0, 0, image.getWidth(), image.getHeight(), null, 0, image.getWidth()));
             int startX = Math.max(0, (int) Math.floor(left));
             int endX = Math.min(canvasWidth - 1, (int) Math.ceil(right));
             int startY = Math.max(0, (int) Math.floor(top));
@@ -3505,7 +3517,16 @@ final class Renderer {
                 .multiply(Mat4.translation(-8, -8, -8));
     }
 
-    /** Model face geometry of a {@code minecraft:model} item, reusing the element face table of the item pipeline. */
+    /**
+     * Model face geometry of a {@code minecraft:model} item, reusing the element face table of the item
+     * pipeline.
+     *
+     * <p>A model {@code uv} is a texture coordinate of the 0..16 model space, not a texel index: the
+     * client maps 0..16 onto the whole sprite whatever the resolution of its PNG is. The quad
+     * pipeline works in texels, so the rectangle is scaled by the sprite size here — a 96 px texture
+     * of a custom weapon is sampled edge to edge instead of losing everything right of its
+     * seventeenth column. The sprite is the first frame of an animated sheet.</p>
+     */
     private void addElementGeometry(List<Quad> quads, Model model) throws IOException {
         for (Element element : model.elements) {
             for (Map.Entry<String, FaceDefinition> entry : element.faces.entrySet()) {
@@ -3514,8 +3535,10 @@ final class Renderer {
                     continue;
                 }
                 FaceDefinition definition = entry.getValue();
-                BufferedImage texture = resources.texture(model.texture(definition.texture, definition.texture));
+                BufferedImage texture = resources.sprite(model.texture(definition.texture, definition.texture));
                 int[] uv = definition.uv == null ? defaultUV(element, entry.getKey()) : definition.uv;
+                double scaleU = texture.getWidth() / 16.0;
+                double scaleV = texture.getHeight() / 16.0;
                 Quad quad = new Quad(faceNormal(entry.getKey()), texture);
                 quad.shade = blockFaceShade(entry.getKey());
                 quad.tint = definition.tintIndex >= 0;
@@ -3529,10 +3552,10 @@ final class Renderer {
                 for (int index = 0; index < 4; index++) {
                     quad.corners[index] = vertices.get(order[index]);
                 }
-                quad.uv[0] = uv[0];
-                quad.uv[1] = uv[1];
-                quad.uv[2] = uv[2];
-                quad.uv[3] = uv[3];
+                quad.uv[0] = uv[0] * scaleU;
+                quad.uv[1] = uv[1] * scaleV;
+                quad.uv[2] = uv[2] * scaleU;
+                quad.uv[3] = uv[3] * scaleV;
                 quads.add(quad);
             }
         }
@@ -3571,7 +3594,7 @@ final class Renderer {
      */
     private void addGeneratedGeometry(List<Quad> quads, Model model) throws IOException {
         for (String layer : model.generatedLayers()) {
-            BufferedImage texture = resources.texture(model.texture(layer, layer));
+            BufferedImage texture = resources.sprite(model.texture(layer, layer));
             addGeneratedPlate(quads, texture);
             addGeneratedOutline(quads, texture);
         }
@@ -3593,8 +3616,8 @@ final class Renderer {
         quad.corners[3] = new Vec3(16, 0, z);
         quad.uv[0] = 0;
         quad.uv[1] = 0;
-        quad.uv[2] = 16;
-        quad.uv[3] = 16;
+        quad.uv[2] = texture.getWidth();
+        quad.uv[3] = texture.getHeight();
         return quad;
     }
 
@@ -3612,10 +3635,11 @@ final class Renderer {
                 double x1 = (x + 1) * scaleX;
                 double y0 = 16 - (y + 1) * scaleY;
                 double y1 = 16 - y * scaleY;
-                double u0 = (x + 0.1) * scaleX;
-                double u1 = (x + 0.9) * scaleX;
-                double v0 = (y + 0.1) * scaleY;
-                double v1 = (y + 0.9) * scaleY;
+                // The strip samples the pixel it stands on, in the texels of the sprite itself.
+                double u0 = x + 0.1;
+                double u1 = x + 0.9;
+                double v0 = y + 0.1;
+                double v1 = y + 0.9;
                 if (!opaque(texture, x, y - 1)) {
                     quads.add(strip(texture, new Vec3(0, 1, 0), new double[]{u0, v0, u1, v1},
                             new Vec3(x0, y1, 8.5), new Vec3(x1, y1, 8.5), new Vec3(x0, y1, 7.5), new Vec3(x1, y1, 7.5)));
@@ -3890,6 +3914,14 @@ final class Renderer {
          * outside the tree the service downloaded.
          */
         private final Map<String, BufferedImage> inlineTextures = new HashMap<>();
+        /**
+         * The {@code .png.mcmeta} of the inline textures that ship one, keyed like
+         * {@link #inlineTextures}. A custom item lives in a pack outside the resource tree, so the
+         * metadata of its animated sprites can only arrive with the request.
+         */
+        private final Map<String, Map<String, Object>> inlineMetadata = new HashMap<>();
+        /** The framed sprite of every texture this request has already resolved, keyed like the cache above. */
+        private final Map<String, BufferedImage> spriteCache = new HashMap<>();
         private final Set<String> missingWarnings = java.util.Collections.newSetFromMap(new HashMap<>());
         private BufferedImage missingTexture;
         private Map<String, Object> language;
@@ -3965,6 +3997,60 @@ final class Renderer {
             return image;
         }
 
+        /**
+         * The sprite of a texture: the image itself, or — when its {@code .png.mcmeta} declares an
+         * animation — the first frame of the sheet. A model samples one 16 unit sprite rectangle, so
+         * an animated sprite has to answer with its frame size instead of the whole strip, exactly
+         * like the atlas does on the client.
+         *
+         * <p>Vanilla {@code AnimationMetadataSection}: {@code width} and {@code height} spell the
+         * frame out, the frame count comes from the {@code frames} list, and a sheet without either
+         * is a vertical strip of square frames.</p>
+         */
+        BufferedImage sprite(String textureID) throws IOException {
+            String relative = texturePath(textureID);
+            BufferedImage cached = spriteCache.get(relative);
+            if (cached != null) {
+                return cached;
+            }
+            // A model references the same sprite from hundreds of faces, and resolving the metadata
+            // of each of them would stat the pack once per face.
+            BufferedImage sprite = firstFrame(texture(textureID), spriteMetadata(relative));
+            spriteCache.put(relative, sprite);
+            return sprite;
+        }
+
+        /** The metadata of one texture: the request's copy for an inline one, the file's otherwise. */
+        private Map<String, Object> spriteMetadata(String relative) throws IOException {
+            Map<String, Object> inline = inlineMetadata.get(relative);
+            return inline != null ? inline : metadataOf(relative);
+        }
+
+        private static BufferedImage firstFrame(BufferedImage image, Map<String, Object> metadata) {
+            if (metadata == null || !(metadata.get("animation") instanceof Map<?, ?> rawAnimation)) {
+                return image;
+            }
+            Map<String, Object> animation = castMap(rawAnimation);
+            int frameWidth = Json.integer(animation, "width", image.getWidth());
+            int frameHeight = Json.integer(animation, "height", 0);
+            if (frameHeight <= 0) {
+                int frames = 1;
+                if (animation.get("frames") instanceof List<?> list && !list.isEmpty()) {
+                    frames = list.size();
+                } else if (frameWidth > 0 && image.getHeight() > frameWidth && image.getHeight() % frameWidth == 0) {
+                    frames = image.getHeight() / frameWidth;
+                }
+                frameHeight = Math.max(1, image.getHeight() / frames);
+            }
+            if (frameWidth <= 0 || frameWidth > image.getWidth() || frameHeight > image.getHeight()) {
+                return image;
+            }
+            if (frameWidth == image.getWidth() && frameHeight == image.getHeight()) {
+                return image;
+            }
+            return image.getSubimage(0, 0, frameWidth, frameHeight);
+        }
+
         /** Whether a texture file exists, for the call sites that must still report a bad reference. */
         boolean hasTexture(String textureID) throws IOException {
             if (MISSING_TEXTURE.equals(textureID)) {
@@ -3976,24 +4062,45 @@ final class Renderer {
 
         /**
          * Registers a texture that comes with the request, as the data URI the custom content index
-         * produced. A texture that does not decode is skipped with a note: one broken layer must not
-         * take the whole picture down.
+         * produced, together with the {@code .png.mcmeta} of that file if it shipped one. A texture
+         * that does not decode is skipped with a note: one broken layer must not take the whole
+         * picture down. Unreadable metadata only loses the sprite framing, never the texture.
          */
-        void putInlineTexture(String textureID, String value) {
+        void putInlineTexture(String textureID, String value, String metadata) {
             String prefix = "data:image/png;base64,";
             if (value == null || !value.startsWith(prefix)) {
                 return;
             }
+            String relative;
             try {
+                relative = texturePath(textureID);
                 byte[] data = Base64.getDecoder().decode(value.substring(prefix.length()));
                 BufferedImage image = ImageIO.read(new ByteArrayInputStream(data));
                 if (image == null) {
                     System.err.println("inline texture " + textureID + " is not a PNG, skipping it");
                     return;
                 }
-                inlineTextures.put(texturePath(textureID), image);
+                inlineTextures.put(relative, image);
             } catch (IOException | IllegalArgumentException error) {
                 System.err.println("inline texture " + textureID + " is invalid, skipping it");
+                return;
+            }
+            Map<String, Object> parsed = parseMetadata(metadata);
+            if (parsed != null) {
+                inlineMetadata.put(relative, parsed);
+            }
+        }
+
+        /** Reads one metadata document, answering null for absent or malformed content. */
+        static Map<String, Object> parseMetadata(String metadata) {
+            if (metadata == null || metadata.isBlank()) {
+                return null;
+            }
+            try {
+                return Json.object(Json.parse(metadata), "mcmeta");
+            } catch (IllegalArgumentException error) {
+                System.err.println("inline texture metadata is invalid, drawing the whole sheet: " + error.getMessage());
+                return null;
             }
         }
 
@@ -4017,7 +4124,12 @@ final class Renderer {
 
         /** Sprite metadata of a texture, used for the tooltip nine slice borders. Null when absent. */
         Map<String, Object> metadata(String textureID) throws IOException {
-            byte[] data = bytes(texturePath(textureID) + ".mcmeta");
+            return metadataOf(texturePath(textureID));
+        }
+
+        /** The same document, addressed by the relative path the caches already use. */
+        private Map<String, Object> metadataOf(String relative) throws IOException {
+            byte[] data = bytes(relative + ".mcmeta");
             if (data == null) {
                 return null;
             }

@@ -56,9 +56,9 @@ func (c *Catalog) artFor(state *state, entry definition) (model.CustomArt, strin
 	}
 	flat, chainWarnings := c.flattenModel(state, entry, document)
 	warnings = append(warnings, chainWarnings...)
-	textures, textureWarnings := c.inlineTextures(state, entry, flat)
+	textures, metadata, textureWarnings := c.inlineTextures(state, entry, flat)
 	warnings = append(warnings, textureWarnings...)
-	art := model.CustomArt{Model: flat, Textures: textures}
+	art := model.CustomArt{Model: flat, Textures: textures, Metadata: metadata}
 	for _, warning := range warnings {
 		state.report(c.logger, entry.ID, warning)
 	}
@@ -174,10 +174,22 @@ func mergeModel(base, child map[string]any) map[string]any {
 	return merged
 }
 
-// inlineTextures reads every texture of a custom namespace and encodes it as a data URI.
-func (c *Catalog) inlineTextures(state *state, entry definition, flat map[string]any) (map[string]string, []string) {
+// inlineSprite is one texture of a custom item as it travels to the renderer: the PNG itself and,
+// when the pack ships one, its .png.mcmeta so the renderer can find the first frame of an animation.
+type inlineSprite struct {
+	data string
+	meta string
+}
+
+// maxMetadataBytes bounds a .png.mcmeta, which is a few hundred bytes in every pack in the wild.
+const maxMetadataBytes = 64 << 10
+
+// inlineTextures reads every texture of a custom namespace and encodes it as a data URI, carrying
+// the metadata beside it.
+func (c *Catalog) inlineTextures(state *state, entry definition, flat map[string]any) (map[string]string, map[string]string, []string) {
 	var warnings []string
 	textures := map[string]string{}
+	metadata := map[string]string{}
 	declared, _ := flat["textures"].(map[string]any)
 	for name, raw := range declared {
 		id := normalizeTextureID(stringValue(raw))
@@ -196,52 +208,72 @@ func (c *Catalog) inlineTextures(state *state, entry definition, flat map[string
 			break
 		}
 		declared[name] = id
-		encoded, ok, reason := c.inlineTexture(state, entry, id)
+		sprite, ok, reason := c.inlineTexture(state, entry, id)
 		if !ok {
 			if reason != "" {
 				warnings = append(warnings, reason)
 			}
 			continue
 		}
-		textures[id] = encoded
+		textures[id] = sprite.data
+		if sprite.meta != "" {
+			metadata[id] = sprite.meta
+		}
 	}
-	return textures, warnings
+	return textures, metadata, warnings
 }
 
-func (c *Catalog) inlineTexture(state *state, entry definition, id string) (string, bool, string) {
+func (c *Catalog) inlineTexture(state *state, entry definition, id string) (inlineSprite, bool, string) {
 	state.mu.Lock()
 	cached, ok := state.textures[id]
 	state.mu.Unlock()
 	if ok {
-		return cached, cached != "", ""
+		return cached, cached.data != "", ""
 	}
 	namespace, path, _ := splitID(id)
 	file, found := c.findFile(state, entry, namespace, "textures", path, ".png")
 	if !found {
 		state.mu.Lock()
-		state.textures[id] = ""
+		state.textures[id] = inlineSprite{}
 		state.mu.Unlock()
-		return "", false, "the texture " + id + " is not in any pack"
+		return inlineSprite{}, false, "the texture " + id + " is not in any pack"
 	}
 	info, err := os.Stat(file)
 	if err != nil || info.Size() > int64(c.cfg.MaxCustomTextureBytes) {
 		state.mu.Lock()
-		state.textures[id] = ""
+		state.textures[id] = inlineSprite{}
 		state.mu.Unlock()
-		return "", false, "the texture " + id + " is larger than the configured maximum"
+		return inlineSprite{}, false, "the texture " + id + " is larger than the configured maximum"
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {
 		state.mu.Lock()
-		state.textures[id] = ""
+		state.textures[id] = inlineSprite{}
 		state.mu.Unlock()
-		return "", false, "cannot read the texture " + id
+		return inlineSprite{}, false, "cannot read the texture " + id
 	}
-	encoded := "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
+	sprite := inlineSprite{
+		data: "data:image/png;base64," + base64.StdEncoding.EncodeToString(data),
+		meta: metadataOf(file),
+	}
 	state.mu.Lock()
-	state.textures[id] = encoded
+	state.textures[id] = sprite
 	state.mu.Unlock()
-	return encoded, true, ""
+	return sprite, true, ""
+}
+
+// metadataOf reads the .png.mcmeta next to a texture. An absent or oversized file answers the empty
+// string: the sprite is then drawn as one image, which is exactly what a still texture needs.
+func metadataOf(file string) string {
+	info, err := os.Stat(file + ".mcmeta")
+	if err != nil || info.IsDir() || info.Size() > maxMetadataBytes {
+		return ""
+	}
+	data, err := os.ReadFile(file + ".mcmeta")
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // loadModelDocument reads the JSON of a model by its resource location.
