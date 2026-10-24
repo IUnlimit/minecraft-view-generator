@@ -228,6 +228,17 @@ type documentExample struct {
 	Value       json.RawMessage `json:"value"`
 }
 
+// exampleCatalog returns the example keys in the order renderExamples declares them, which is the
+// order the OpenAPI document serialises them in. A map cannot carry that order back from the document.
+func exampleCatalog() []string {
+	catalog := renderExamples()
+	kinds := make([]string, 0, len(catalog))
+	for _, example := range catalog {
+		kinds = append(kinds, example.kind)
+	}
+	return kinds
+}
+
 func renderExamplesFromDocument(t *testing.T) map[string]documentExample {
 	t.Helper()
 	encoded, err := json.Marshal(openAPIDocument)
@@ -339,11 +350,22 @@ func assertSkinTexture(t *testing.T, label, texture string) {
 
 func TestOpenAPIRenderExamplesCoverSupportedTypes(t *testing.T) {
 	examples := renderExamplesFromDocument(t)
-	types := model.SupportedTypes()
-	if len(examples) != len(types) {
-		t.Fatalf("example count = %d, want %d", len(examples), len(types))
+	kinds := exampleCatalog()
+	if len(examples) != len(kinds) {
+		t.Fatalf("example count = %d, want %d", len(examples), len(kinds))
 	}
-	for _, kind := range types {
+	// Every documented type comes first, in the order the API lists them; extra examples (a concrete
+	// player_head skin, for instance) follow and may repeat the type of an earlier one.
+	types := model.SupportedTypes()
+	if len(kinds) < len(types) {
+		t.Fatalf("example catalogue has %d entries, want at least %d", len(kinds), len(types))
+	}
+	for index, kind := range types {
+		if kinds[index] != kind {
+			t.Fatalf("example %d is %q, want %q", index, kinds[index], kind)
+		}
+	}
+	for index, kind := range kinds {
 		example, ok := examples[kind]
 		if !ok {
 			t.Fatalf("missing prefilled example for %q", kind)
@@ -352,7 +374,7 @@ func TestOpenAPIRenderExamplesCoverSupportedTypes(t *testing.T) {
 			t.Fatalf("example %q needs a summary and description", kind)
 		}
 		request := decodeExample(t, kind, example.Value)
-		if request.Type != kind {
+		if index < len(types) && request.Type != kind {
 			t.Fatalf("example %q declares type %q", kind, request.Type)
 		}
 		if request.Version != model.SupportedVersion {
@@ -370,7 +392,7 @@ func TestOpenAPIRenderExamplesKeepCatalogOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := -1
-	for _, kind := range model.SupportedTypes() {
+	for _, kind := range exampleCatalog() {
 		index := bytes.Index(encoded, []byte(`"`+kind+`":{"description"`))
 		if index < 0 {
 			t.Fatalf("example %q is missing from the document", kind)
@@ -388,13 +410,19 @@ func TestOpenAPIRenderExamplesCarryRenderableAssets(t *testing.T) {
 	mapPixels := 0
 	enderShulker := false
 	inventoryHelmet := false
-	for _, kind := range model.SupportedTypes() {
+	headTexture := false
+	for _, kind := range exampleCatalog() {
 		request := decodeExample(t, kind, examples[kind].Value)
 		data, err := request.DecodeData()
 		if err != nil {
 			t.Fatalf("example %q has invalid data: %v", kind, err)
 		}
 		switch value := data.(type) {
+		case *model.Item:
+			if value.Texture != "" {
+				assertSkinTexture(t, kind, value.Texture)
+				headTexture = true
+			}
 		case *model.SkinData:
 			assertSkinTexture(t, kind, value.Texture)
 		case *model.PlayerInventoryData:
@@ -445,6 +473,9 @@ func TestOpenAPIRenderExamplesCarryRenderableAssets(t *testing.T) {
 	if !inventoryHelmet {
 		t.Fatal("playerInventory example does not demonstrate a diamond helmet")
 	}
+	if !headTexture {
+		t.Fatal("no example demonstrates an inline player_head skin")
+	}
 }
 
 func TestOrderedObjectPreservesInsertionOrder(t *testing.T) {
@@ -462,7 +493,7 @@ func TestOrderedObjectPreservesInsertionOrder(t *testing.T) {
 func TestRenderAcceptsEveryPrefilledExample(t *testing.T) {
 	server := testServer(t)
 	examples := renderExamplesFromDocument(t)
-	for _, kind := range model.SupportedTypes() {
+	for _, kind := range exampleCatalog() {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/render", bytes.NewReader(examples[kind].Value))
 		request.Header.Set("Content-Type", "application/json")
 		record := httptest.NewRecorder()

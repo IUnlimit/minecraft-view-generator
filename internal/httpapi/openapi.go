@@ -36,8 +36,290 @@ func buildOpenAPIDocument() map[string]any {
 			"/api/v1/resources/custom/reload": reloadOperation(),
 			"/api/v1/render":                  renderOperation(),
 		},
-		"components": map[string]any{"schemas": map[string]any{"RenderRequest": map[string]any{"type": "object", "required": []string{"version", "type", "output", "data"}, "properties": map[string]any{"version": map[string]any{"type": "string", "const": model.SupportedVersion}, "type": map[string]any{"type": "string", "enum": model.SupportedTypes()}, "output": map[string]any{"type": "string", "enum": []string{model.OutputPNG, model.OutputBase64}}, "data": map[string]any{"type": "object"}, "options": map[string]any{"type": "object", "description": "图片尺寸与外观：width/height 是画布尺寸（渲染分辨率，只给一个时按该类型的原生画布比例换算）；scale 是成品图的放大倍率，数字表示固定倍率（支持小数），对象用 {ratio} 或目标尺寸 {width,height} 表达。", "properties": map[string]any{"projection": map[string]any{"type": "string", "enum": []string{"gui", "orthographic"}}, "width": map[string]any{"type": "integer", "minimum": 16, "description": "画布宽度（渲染分辨率）；与 height 同时给出时直接使用这对尺寸，不保持比例"}, "height": map[string]any{"type": "integer", "minimum": 16, "description": "画布高度（渲染分辨率）；只给出宽度时按原生画布比例换算"}, "scale": map[string]any{"description": "成品图的放大倍率：数字为固定倍率（0 与 1 表示不放大，支持小数）；对象可用 ratio，或用 width/height 给出目标最终尺寸并按画布等比取倍率。", "oneOf": []any{map[string]any{"type": "number", "minimum": 0, "maximum": model.MaxScaleRatio}, map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{"ratio": map[string]any{"type": "number", "minimum": 0, "maximum": model.MaxScaleRatio}, "width": map[string]any{"type": "integer", "minimum": 16}, "height": map[string]any{"type": "integer", "minimum": 16}}}}}, "frame": map[string]any{"type": "integer", "minimum": 0}, "transparent": map[string]any{"type": "boolean"}}}}}, "Error": map[string]any{"type": "object", "required": []string{"error"}, "properties": map[string]any{"error": map[string]any{"type": "object", "required": []string{"code", "message"}, "properties": map[string]any{"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}}}}}}},
+		"components": map[string]any{"schemas": componentSchemas()},
 	}
+}
+
+// componentSchemas assembles the navigable half of the contract: the request envelope, one schema per
+// data structure a render type decodes, and the error payload. The field tables mirror the
+// "请求参数总表" section of docs/api.md; internal/model/docs_test.go fails when the two drift apart.
+func componentSchemas() map[string]any {
+	schemas := dataSchemas()
+	schemas["RenderRequest"] = renderRequestSchema()
+	schemas["Error"] = map[string]any{"type": "object", "required": []string{"error"}, "properties": map[string]any{"error": map[string]any{"type": "object", "required": []string{"code", "message"}, "properties": map[string]any{"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}}}}}
+	return schemas
+}
+
+func renderRequestSchema() map[string]any {
+	return map[string]any{
+		"type":     "object",
+		"required": []string{"version", "type", "output", "data"},
+		"properties": map[string]any{
+			"version": map[string]any{"type": "string", "const": model.SupportedVersion, "description": "固定为 1.21.11，其他版本返回 400 invalid_data。"},
+			"type":    map[string]any{"type": "string", "enum": model.SupportedTypes(), "description": "渲染类型，决定 data 的结构。"},
+			"output":  map[string]any{"type": "string", "enum": []string{model.OutputPNG, model.OutputBase64}, "description": "png 直接返回 image/png；base64 返回 {mimeType, encoding, data, width, height}。"},
+			"data": map[string]any{
+				"description": dataDescription(),
+				"oneOf": []any{
+					schemaRef("Item"), schemaRef("TooltipData"), schemaRef("ContainerData"),
+					schemaRef("SkinData"), schemaRef("PlayerInventoryData"), schemaRef("PlayerListData"),
+					schemaRef("MapData"), schemaRef("AchievementData"),
+				},
+			},
+			"options": optionsSchema(),
+		},
+	}
+}
+
+// dataDescription is the type → schema map rendered into the Scalar page, so a caller that only reads
+// the OpenAPI document still learns which structure each type takes and which fields are required.
+func dataDescription() string {
+	return strings.Join([]string{
+		"data 的结构由 type 决定，逐字段说明见 docs/api.md 的「请求参数总表」。",
+		"",
+		"| type | data 结构 |",
+		"| --- | --- |",
+		"| item | Item |",
+		"| tooltip | TooltipData（item 为 Item） |",
+		"| inventory / item_container / enderchest | ContainerData |",
+		"| playerInventory | PlayerInventoryData |",
+		"| skin | SkinData |",
+		"| playerlist | PlayerListData（players[] 为 PlayerListEntry） |",
+		"| map | MapData（markers[] 为 MapMarker） |",
+		"| achievement | AchievementData（icon 为 Item） |",
+		"",
+		"必填：item.id；tooltip 的 item.id 与 title 至少一个；item_container.container；skin.texture；playerInventory.skin.texture；playerlist 每个玩家的 texture 与 name/display 之一；achievement.title 与 icon.id。",
+		"data 内的未知字段被静默忽略（不报错也不生效）；顶层字段与 options 内的未知字段由 DisallowUnknownFields 拒绝，返回 400 invalid_json。",
+	}, "\n")
+}
+
+func optionsSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "画布尺寸、放大倍率与外观。width/height 是画布（渲染分辨率）；scale 是成品图的放大倍率。background 与 transparent 只对 item 有效（其余九种类型自绘不透明背景）。",
+		"properties": map[string]any{
+			"width":       field("integer", "画布宽度。只给宽度时高度按该类型的原生画布比例换算，不拉伸。", map[string]any{"minimum": 16, "maximum": 1600}),
+			"height":      field("integer", "画布高度。只给高度时宽度同样按原生比例换算。", map[string]any{"minimum": 16, "maximum": 1200}),
+			"scale":       scaleSchema(),
+			"background":  field("string", "以 #RRGGBB 指定的画布底色，只对 item 有效：先铺满整张画布，图标自身的透明像素会透出这个颜色。缺省透明，格式不对按透明处理。", map[string]any{"pattern": "^#?[0-9a-fA-F]{6}$"}),
+			"transparent": field("boolean", "只对 item 有效：保留图标自身的透明像素并忽略 background。", map[string]any{"default": false}),
+		},
+	}
+}
+
+func scaleSchema() map[string]any {
+	return map[string]any{
+		"description": "成品图的放大倍率。数字为固定倍率（0 与 1 表示不放大，支持小数，上限 16）；对象可用 ratio，或用 width/height 给出目标最终尺寸并按画布等比取倍率。",
+		"oneOf": []any{
+			map[string]any{"type": "number", "minimum": 0, "maximum": model.MaxScaleRatio},
+			map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+				"ratio":  map[string]any{"type": "number", "minimum": 0, "maximum": model.MaxScaleRatio},
+				"width":  map[string]any{"type": "integer", "minimum": 16},
+				"height": map[string]any{"type": "integer", "minimum": 16},
+			}},
+		},
+	}
+}
+
+// dataSchemas returns the structures a render type decodes. The names are the exported Go types, which
+// is also how docs/api.md refers to them.
+func dataSchemas() map[string]any {
+	return map[string]any{
+		"Item":                itemSchema(),
+		"Slot":                slotSchema(),
+		"ContainerData":       containerDataSchema(),
+		"TooltipData":         tooltipDataSchema(),
+		"SkinData":            skinDataSchema(),
+		"PlayerInventoryData": playerInventoryDataSchema(),
+		"PlayerListEntry":     playerListEntrySchema(),
+		"PlayerListData":      playerListDataSchema(),
+		"MapMarker":           mapMarkerSchema(),
+		"MapData":             mapDataSchema(),
+		"AchievementData":     achievementDataSchema(),
+	}
+}
+
+func itemSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "一件物品。item、tooltip.item、slots[].item、armor[]、mainHand/offhand、achievement.icon 共用这套字段。",
+		"required":    []string{"id"},
+		"properties": map[string]any{
+			"id":              field("string", "物品 id，如 minecraft:diamond_sword。物品位置必填，缺失返回 400 invalid_data。", nil),
+			"count":           field("integer", "堆叠数量，默认 0。只在容器 / 背包槽位画右下角的堆叠数字（>1 才画），item 图标本身不画。", map[string]any{"minimum": 0, "default": 0}),
+			"damage":          field("integer", "已消耗的耐久度。与 maxDamage 同时 >0 时在图标上画耐久条。", map[string]any{"default": 0}),
+			"maxDamage":       field("integer", "最大耐久度。与 damage 同时 >0 时在图标上画耐久条。", map[string]any{"default": 0}),
+			"customModelData": field("integer", "原版 custom_model_data，驱动模型的 select / range_dispatch 覆盖。", nil),
+			"customData":      field("integer", "ItemsAdder 的 custom_model_data 数值：与 id 的基础材料组合命中 data/contents 的自定义物品，未命中回退原版物品。不能为负。", map[string]any{"minimum": 0}),
+			"components":      field("object", "原版组件表，键可带或不带 minecraft: 前缀（minecraft:profile、banner_patterns、dyed_color 等），值就是组件自身的 JSON。", nil),
+			"nbt":             field("object", "任意 NBT/JSON。tooltip 的 advanced 模式用它生成 item.nbt_tags 计数行。", nil),
+			"name":            field("string", "悬停名，tooltip 的第一行；支持 § 与 & 颜色码。", nil),
+			"lore":            field("array", "tooltip 正文，最多 128 行、每行 1024 字符。", map[string]any{"items": map[string]any{"type": "string"}, "maxItems": 128}),
+			"enchantments":    field("array", "附魔，写法 \"sharpness 5\" 或 \"minecraft:sharpness V\"；同时让物品图标出现附魔光效（glint）。", map[string]any{"items": map[string]any{"type": "string"}}),
+			"texture":         field("string", "仅 minecraft:player_head 生效：头颅皮肤，内联 data:image/png;base64,...（64×64，或 legacy 64×32 会自动镜像左右肢体）或资源树里的贴图 id（带命名空间或 .png 后缀，如 minecraft:textures/entity/player/wide/alex.png）。不能是网络 URL（400 invalid_data），其他物品传了忽略。", nil),
+		},
+	}
+}
+
+func slotSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "一个槽位。容器的 slots / items 与 playerInventory 的 slots / armor 共用。",
+		"properties": map[string]any{
+			"slot":  field("integer", "菜单槽位下标 0–255。容器的 0..rows*9-1 属于容器区，之后是玩家背包区。", map[string]any{"minimum": 0, "maximum": 255}),
+			"item":  schemaRef("Item"),
+			"empty": field("boolean", "标记该槽位为空，此时可以省略 item.id。", map[string]any{"default": false}),
+		},
+	}
+}
+
+func containerDataSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "inventory、item_container、enderchest 共用的容器界面。",
+		"properties": map[string]any{
+			"title":     field("string", "界面标题，按原版 AbstractContainerScreen 画在左上角，支持 § 与 & 颜色码。", nil),
+			"container": field("string", "仅 item_container 必填。未知容器返回 422 unsupported_container。", map[string]any{"enum": []string{"hopper", "furnace", "blast_furnace", "smoker", "crafting_table", "crafting", "anvil", "brewing_stand", "brewing"}}),
+			"rows":      field("integer", "行数。inventory 1–6，缺省 3；enderchest 只能 3；其余容器忽略。", map[string]any{"minimum": 1, "maximum": 6, "default": 3}),
+			"columns":   field("integer", "列数，只能是 9（缺省 9）。", map[string]any{"enum": []int{9}, "default": 9}),
+			"slots":     field("array", "槽位列表。", map[string]any{"items": schemaRef("Slot")}),
+			"items":     field("array", "slots 的别名；两者都给时以 slots 为准。", map[string]any{"items": schemaRef("Slot")}),
+		},
+	}
+}
+
+func tooltipDataSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "原版悬浮提示框。item.id 与 title 至少给一个。",
+		"properties": map[string]any{
+			"item":     schemaRef("Item"),
+			"title":    field("string", "显式标题行；给出后不再按原版顺序生成行。", nil),
+			"advanced": field("boolean", "原版 F3+H 高级提示：追加物品 id、组件 dump 与计数，并叠加 tooltip/frame 边框。", map[string]any{"default": false}),
+			"icon":     field("boolean", "在左侧绘制 72px 物品图标。", map[string]any{"default": false}),
+		},
+	}
+}
+
+func skinDataSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "玩家模型的皮肤。",
+		"required":    []string{"texture"},
+		"properties": map[string]any{
+			"texture":    field("string", "必填：皮肤 PNG，内联 data:image/png;base64,...（64×64，或 legacy 64×32）或资源树里的贴图 id（带命名空间或 .png 后缀，如 minecraft:textures/entity/player/wide/alex.png）。不能是网络 URL。", nil),
+			"model":      field("string", "模型种类，缺省 classic。", map[string]any{"enum": []string{"classic", "slim"}, "default": "classic"}),
+			"slim":       field("boolean", "model 的等价简写：true 等同 model=slim。", map[string]any{"default": false}),
+			"cape":       field("string", "斗篷 PNG，64×32 或 22×17。", nil),
+			"outerLayer": field("boolean", "第二层（头发 / 外套 / 袖子 / 裤腿）。", map[string]any{"default": false}),
+			"textureUrl": field("string", "禁止：任何非空值都返回 400 invalid_data（skin.textureUrl is not accepted），皮肤只能内联或走资源路径。", nil),
+		},
+	}
+}
+
+func playerInventoryDataSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "原版 InventoryScreen 1:1 布局，默认输出 176×166。",
+		"required":    []string{"skin"},
+		"properties": map[string]any{
+			"title":    field("string", "标题，按原版 titleLabelX=97、行 6 绘制，支持 § 与 & 颜色码。", nil),
+			"skin":     schemaRef("SkinData"),
+			"slots":    field("array", "背包槽位，菜单槽 0–26 为背包、27–35 为快捷栏。", map[string]any{"items": schemaRef("Slot")}),
+			"armor":    field("array", "穿戴槽 0–3 依次是头盔、胸甲、护腿、靴子；缺失装备定义返回 422。", map[string]any{"items": schemaRef("Slot")}),
+			"mainHand": describedRef("Item", "主手物品，按 display.thirdperson_righthand 挂在右手。"),
+			"offhand":  describedRef("Item", "副手物品，按 display.thirdperson_lefthand 挂在左手。"),
+		},
+	}
+}
+
+func playerListEntrySchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "TAB 列表的一行。name 与 display 至少给一个，texture 必填。",
+		"properties": map[string]any{
+			"name":    field("string", "玩家名，与 display 至少给一个。", nil),
+			"display": field("string", "显示名，优先于 name；支持 § 与 & 颜色码。", nil),
+			"texture": field("string", "必填：头像皮肤，规则同 skin.texture（内联 PNG 或资源路径，不能是网络 URL）。", nil),
+			"ping":    field("integer", "延迟毫秒。按官方阈值 <150/<300/<600/<1000 选 ping_5..ping_1；<=0 或缺省用 ping_unknown。", map[string]any{"default": 0}),
+		},
+	}
+}
+
+func playerListDataSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "原版 TAB 玩家列表。",
+		"properties": map[string]any{
+			"header":  field("string", "页眉，按 \\n 分行并逐行居中。", nil),
+			"footer":  field("string", "页脚，规则同 header。", nil),
+			"players": field("array", "玩家条目，最多 500 人。", map[string]any{"items": schemaRef("PlayerListEntry"), "maxItems": 500}),
+			"columns": field("integer", "列数。0 表示自动：>40 人 3 列、>20 人 2 列、否则 1 列。只接受 0–16；渲染器只画得下 1–8 列，9–16 会因画布宽度超过 MAX_IMAGE_WIDTH 而以 422 失败。", map[string]any{"minimum": 0, "maximum": 16, "default": 0}),
+		},
+	}
+}
+
+func mapMarkerSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "地图上的一个装饰图标。",
+		"properties": map[string]any{
+			"x":        field("integer", "地图内 x，0–127，缺省 0。", map[string]any{"minimum": 0, "maximum": 127, "default": 0}),
+			"z":        field("integer", "地图内 z，0–127，缺省 0。", map[string]any{"minimum": 0, "maximum": 127, "default": 0}),
+			"rotation": field("integer", "朝向，0–15，每个单位 22.5°。", map[string]any{"minimum": 0, "maximum": 15, "default": 0}),
+			"type":     field("string", "原版装饰名或别名（player、target_point、<颜色>_banner、plains_village…）；未收录的名称返回 422。", nil),
+			"name":     field("string", "标记名，会绘制在地图上。", nil),
+		},
+	}
+}
+
+func mapDataSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "原版地图图像，默认输出 140×140。",
+		"properties": map[string]any{
+			"pixels":    field("array", "16384 项扁平调色板下标数组，index = z*128+x，0 表示透明，取值 0–255。", map[string]any{"items": map[string]any{"type": "integer", "minimum": 0, "maximum": 255}, "maxItems": 16384}),
+			"pixelData": field("string", "像素字节的另一种写法：base64: 前缀（base64 编码）或原始字节字符串，解码后最多 16384 字节，每字节即调色板下标。", nil),
+			"markers":   field("array", "装饰图标。", map[string]any{"items": schemaRef("MapMarker")}),
+			"locked":    field("boolean", "在左下角绘制 LOCKED（服务辅助信息，非原版元素）。", map[string]any{"default": false}),
+			"dimension": field("string", "在左上角绘制维度名（服务辅助信息，非原版元素）。", nil),
+		},
+	}
+}
+
+func achievementDataSchema() map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": "官方 advancement toast，默认输出 480×96。",
+		"required":    []string{"title", "icon"},
+		"properties": map[string]any{
+			"title":       field("string", "必填，最多 256 字符。完成态为黄色。", nil),
+			"description": field("string", "描述行，最多 1024 字符。", nil),
+			"icon":        schemaRef("Item"),
+			"completed":   field("boolean", "完成态：使用 obtained 边框与黄色标题。", map[string]any{"default": false}),
+			"frame":       field("string", "边框种类，缺省 task。", map[string]any{"enum": []string{"task", "goal", "challenge"}, "default": "task"}),
+		},
+	}
+}
+
+func schemaRef(name string) map[string]any {
+	return map[string]any{"$ref": "#/components/schemas/" + name}
+}
+
+// describedRef is a schema reference that still carries the field description, which OpenAPI 3.1
+// allows next to $ref.
+func describedRef(name, description string) map[string]any {
+	return map[string]any{"$ref": "#/components/schemas/" + name, "description": description}
+}
+
+// field builds one property schema: its JSON type, its Chinese description, and the keywords
+// (enum, minimum, maximum, default, items, pattern) the contract needs.
+func field(kind, description string, extra map[string]any) map[string]any {
+	schema := map[string]any{"type": kind, "description": description}
+	for key, value := range extra {
+		schema[key] = value
+	}
+	return schema
 }
 
 // renderOperation documents POST /api/v1/render together with one prefilled
@@ -68,7 +350,7 @@ func renderOperation() map[string]any {
 	return map[string]any{
 		"post": map[string]any{
 			"summary":     "Render a Minecraft 1.21.11 asset",
-			"description": "requestBody 中的每个示例都是可直接发送的完整报文，覆盖 item、tooltip、inventory、item_container、enderchest、playerInventory、skin、playerlist、map、achievement。示例统一使用 output=base64，响应会返回 PNG 的 base64 与宽高，便于在文档内查看结果；需要二进制图片时把 output 改成 png。渲染前必须先 PUT /api/v1/resources/1.21.11。物品入参可带 customData 指向 data/contents 的自定义物品；读取了哪些资源见 GET /api/v1/resources/sources。",
+			"description": "requestBody 中的每个示例都是可直接发送的完整报文，覆盖 item、tooltip、inventory、item_container、enderchest、playerInventory、skin、playerlist、map、achievement，以及 player_head 的空头颅皮肤用法。示例统一使用 output=base64，响应会返回 PNG 的 base64 与宽高，便于在文档内查看结果；需要二进制图片时把 output 改成 png。渲染前必须先 PUT /api/v1/resources/1.21.11。物品入参可带 customData 指向 data/contents 的自定义物品；读取了哪些资源见 GET /api/v1/resources/sources。",
 			"requestBody": map[string]any{
 				"required": true,
 				"content": map[string]any{
@@ -98,7 +380,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypeItem,
 			summary:     "item · 物品图标",
-			description: "1.21.11 item definition：模型继承、generated/handheld、纹理层与 glint 都由真实资源决定；带 elements 的模型与 special 模型走同一条 3D quad 管线（gui display 变换 + 正交相机 + 原版方块面明暗：上 1.0、南北 0.8、东西 0.6、下 0.5），方块图标是逐面贴图的标准等轴立方体。minecraft:special 模型按客户端代码直译的几何渲染（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟），组件驱动图案、染色、陶片与内联皮肤；潜影盒按 ShulkerBoxModel 的 lid + base 两个盒子渲染成 3D 方块，贴图取模型定义里已染色的 entity/shulker/shulker（16 色）而不再是平面贴图；箱子族仍为平面贴图。模型不可用时画原版紫黑缺失模型，不返回 422。物品可带 customData（ItemsAdder 的 custom_model_data 数值），与 id 的基础材料组合命中 data/contents 里的自定义物品；命中后按其贴图与模型几何绘制，未命中回退原版并记一条警告。options.scale 在这里演示固定倍率放大。",
+			description: "1.21.11 item definition：模型继承、generated/handheld、纹理层与 glint 都由真实资源决定；带 elements 的模型与 special 模型走同一条 3D quad 管线（gui display 变换 + 正交相机 + 原版方块面明暗：上 1.0、南北 0.8、东西 0.6、下 0.5），方块图标是逐面贴图的标准等轴立方体。minecraft:special 模型按客户端代码直译的几何渲染（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟），组件驱动图案、染色、陶片与内联皮肤；潜影盒按 ShulkerBoxModel 的 lid + base 两个盒子渲染成 3D 方块，贴图取模型定义里已染色的 entity/shulker/shulker（16 色）而不再是平面贴图；箱子族仍为平面贴图。模型不可用时画原版紫黑缺失模型，不返回 422。物品可带 customData（ItemsAdder 的 custom_model_data 数值），与 id 的基础材料组合命中 data/contents 里的自定义物品；命中后按其贴图与模型几何绘制，未命中回退原版并记一条警告。minecraft:player_head 还可以用顶层 texture 直接传 64×64 皮肤，见最后一个示例。options.scale 在这里演示固定倍率放大。",
 			payload: `{
   "version": "1.21.11",
   "type": "item",
@@ -258,7 +540,7 @@ func renderExamples() []renderExample {
 		{
 			kind:        model.TypePlayerList,
 			summary:     "playerlist · 玩家列表",
-			description: "原版 TAB 列表布局：9px 行距（2 倍渲染，字体同步放大 2 倍）、8x8 头像（皮肤 (8,8) 与外层 (40,8)）、右侧 ping 图标与官方阈值（<150/<300/<600/<1000 对应 ping_5..ping_1，ping<=0 为 ping_unknown），每列最多 20 行、多列从左到右、header/footer 居中。玩家名与 header/footer 都支持 § 或 & 颜色码，列宽与居中按去码后的宽度计算。gameMode 仍接受校验但不会绘制，以保持原版行布局。",
+			description: "原版 TAB 列表布局：9px 行距（2 倍渲染，字体同步放大 2 倍）、8x8 头像（皮肤 (8,8) 与外层 (40,8)）、右侧 ping 图标与官方阈值（<150/<300/<600/<1000 对应 ping_5..ping_1，ping<=0 为 ping_unknown），每列最多 20 行、多列从左到右、header/footer 居中。玩家名与 header/footer 都支持 § 或 & 颜色码，列宽与居中按去码后的宽度计算。columns 缺省为 0（自动：>40 人 3 列、>20 人 2 列、否则 1 列）；渲染器只画得下 1–8 列，9–16 会因画布宽度超过 MAX_IMAGE_WIDTH 以 422 失败。",
 			payload: `{
   "version": "1.21.11",
   "type": "playerlist",
@@ -268,9 +550,9 @@ func renderExamples() []renderExample {
     "footer": "play.example.com",
     "columns": 2,
     "players": [
-      {"name": "Steve", "display": "Steve", "texture": "{{skinTexture}}", "ping": 42, "gameMode": "survival"},
-      {"name": "Alex", "display": "Alex", "texture": "{{skinTexture}}", "ping": 88, "gameMode": "creative"},
-      {"name": "Herobrine", "display": "Herobrine", "texture": "{{skinTexture}}", "ping": 5, "gameMode": "adventure"}
+      {"name": "Steve", "display": "Steve", "texture": "{{skinTexture}}", "ping": 42},
+      {"name": "Alex", "display": "Alex", "texture": "{{skinTexture}}", "ping": 88},
+      {"name": "Herobrine", "display": "Herobrine", "texture": "{{skinTexture}}", "ping": 5}
     ]
   }
 }`,
@@ -310,6 +592,20 @@ func renderExamples() []renderExample {
     "icon": {"id": "minecraft:diamond", "count": 1},
     "frame": "challenge",
     "completed": true
+  }
+}`,
+		},
+		{
+			kind:        "player_head",
+			summary:     "player_head · 玩家头颅",
+			description: "minecraft:player_head 的皮肤来源按优先级：item.texture（本例）→ components[\"minecraft:profile\"] 里内联的皮肤 → 客户端默认皮肤 entity/player/wide/steve。item.texture 接受内联 data:image/png;base64,...（64×64，或 legacy 64×32 自动镜像左右肢体）或已准备资源树里的贴图路径；不联网解析 username / uuid / 远端 hash，网络 URL 直接 400。贴图损坏时只打一行 stderr 并回退到 profile，仍返回 200。例子里用的是服务启动时生成的 64×64 占位皮肤；同一条数据在手持、容器槽位与 tooltip 图标里同样生效。",
+			payload: `{
+  "version": "1.21.11",
+  "type": "item",
+  "output": "base64",
+  "data": {
+    "id": "minecraft:player_head",
+    "texture": "{{skinTexture}}"
   }
 }`,
 		},
