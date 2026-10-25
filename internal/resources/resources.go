@@ -1113,5 +1113,5 @@ func extractAssetsFromJar(path, target string, maxFiles int, maxBytes int64) err
 			assets = append(assets, entry)
 		}
 	}
-	return extractZipEntries(assets, target, maxFiles, maxBytes, func(entry *zip.File) (io.ReadCloser, error) { return entry.Open() })
+	return extractZipEntries(assets, target, maxFiles, maxBytes)
 }

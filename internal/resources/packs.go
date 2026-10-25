@@ -465,7 +465,7 @@ func (s *packStore) extract(path, target string) error {
 		return err
 	}
 	defer os.RemoveAll(staging)
-	if err = extractZipEntries(archive.File, staging, s.cfg.MaxArchiveFiles, s.cfg.MaxArchiveBytes, func(entry *zip.File) (io.ReadCloser, error) { return entry.Open() }); err != nil {
+	if err = extractZipEntries(archive.File, staging, s.cfg.MaxArchiveFiles, s.cfg.MaxArchiveBytes); err != nil {
 		return err
 	}
 	if err = os.RemoveAll(target); err != nil {
