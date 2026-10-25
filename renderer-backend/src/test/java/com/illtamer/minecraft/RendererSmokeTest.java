@@ -49,6 +49,7 @@ public final class RendererSmokeTest {
         testSpecialItemList(renderer, root);
         testCustomArt(renderer, root);
         testPackOverride(renderer, root);
+        testModelPathWithoutPrefix(renderer, root);
         testHdTextures(renderer, root);
         testAnimatedSprite(renderer, root);
         testFaceRotation(renderer, root);
@@ -57,7 +58,7 @@ public final class RendererSmokeTest {
         testBrokenPNGTexture(renderer, root);
         testAtlasSpriteAlias(renderer, root);
         testMissingResources(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/pack/resources/atlas paths passed");
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/pack/model/resources/atlas paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -652,6 +653,51 @@ public final class RendererSmokeTest {
             deleteTree(base);
             deleteTree(overlay);
         }
+    }
+
+    /**
+     * A model id is the literal file the client reads, {@code assets/<namespace>/models/<path>.json}.
+     * An ItemsAdder pack keeps its models without the {@code item/} directory, so an override that
+     * names {@code fixturepack:plain} has to find exactly that file; rewriting it to {@code
+     * models/item/plain.json} is what turned those icons into the missing model.
+     *
+     * <p>An override that names a model no pack ships keeps the vanilla semantics instead: the item is
+     * drawn as the missing model, not as the base model it overrode.</p>
+     */
+    private static void testModelPathWithoutPrefix(Renderer renderer, Path root) throws Exception {
+        BufferedImage plain = renderItemFields(renderer, root, "minecraft:fixture_plain_model", Map.of("customModelData", 1));
+        require(hasPixels(plain), "a model outside the item/ directory drew nothing");
+        require(countColor(plain, ColorKind.MISSING_MAGENTA) == 0,
+                "a model outside the item/ directory fell back to the missing model");
+        BufferedImage base = renderItemFields(renderer, root, "minecraft:fixture_plain_model", Map.of());
+        require(differs(plain, base), "the custom model data override did not select the pack model");
+
+        // An override that names a model no pack ships keeps the vanilla semantics instead of falling
+        // back to the model it overrode: the item is drawn as the missing model.
+        BufferedImage absent = renderItemFields(renderer, root, "minecraft:fixture_absent_model", Map.of("customModelData", 1));
+        requireMissingModel(absent, "an override naming an absent model");
+
+        // A pack written against the old prefix is still served: the literal path has no file, so the
+        // renderer answers with the legacy models/item/ one instead of the missing model.
+        BufferedImage legacy = renderItemFields(renderer, root, "minecraft:fixture_legacy_model", Map.of("customModelData", 1));
+        require(hasPixels(legacy), "a model under the legacy item/ prefix drew nothing");
+        require(countColor(legacy, ColorKind.MISSING_MAGENTA) == 0,
+                "a model under the legacy item/ prefix fell back to the missing model");
+    }
+
+    /** Whether two images of the same size differ in at least one opaque pixel. */
+    private static boolean differs(BufferedImage left, BufferedImage right) {
+        if (left.getWidth() != right.getWidth() || left.getHeight() != right.getHeight()) {
+            return true;
+        }
+        for (int y = 0; y < left.getHeight(); y++) {
+            for (int x = 0; x < left.getWidth(); x++) {
+                if (left.getRGB(x, y) != right.getRGB(x, y)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** Writes a pack that replaces the diamond icon with one solid colour. */

@@ -4436,9 +4436,36 @@ final class Renderer {
 
         /** Whether a relative path exists in the stack, without reading the file. */
         boolean exists(String relative) throws IOException {
-            if (relative.startsWith("/") || relative.contains("..") || relative.indexOf('\0') >= 0) {
-                throw new IOException("unsafe resource path " + relative);
+            return find(relative) != null;
+        }
+
+        byte[] bytes(String relative) throws IOException {
+            Path file = find(relative);
+            return file == null ? null : Files.readAllBytes(file);
+        }
+
+        /**
+         * Every copy of one relative path in the stack, the highest priority pack first. A few
+         * resource formats are cumulative on the client — the provider list of a font definition is
+         * the one this service reads that way — so a definition which the top pack replaces instead
+         * of merging would drop the bottom of the chain. Callers that only want the winning file keep
+         * using {@link #bytes}, which answers the first copy.
+         */
+        List<byte[]> copies(String relative) throws IOException {
+            List<Path> files = findAll(relative);
+            if (files.isEmpty()) {
+                return List.of();
             }
+            List<byte[]> copies = new ArrayList<>(files.size());
+            for (Path file : files) {
+                copies.add(Files.readAllBytes(file));
+            }
+            return copies;
+        }
+
+        /** The file of the highest pack that ships a relative path, or null when none does. */
+        private Path find(String relative) throws IOException {
+            checkPath(relative);
             for (int i = roots.size() - 1; i >= 0; i--) {
                 Path root = roots.get(i);
                 Path candidate = root.resolve(relative).normalize();
@@ -4446,24 +4473,37 @@ final class Renderer {
                     throw new IOException("resource path escapes pack root");
                 }
                 if (Files.isRegularFile(candidate)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        byte[] bytes(String relative) throws IOException {
-            if (!exists(relative)) {
-                return null;
-            }
-            for (int i = roots.size() - 1; i >= 0; i--) {
-                Path root = roots.get(i);
-                Path candidate = root.resolve(relative).normalize();
-                if (Files.isRegularFile(candidate)) {
-                    return Files.readAllBytes(candidate);
+                    return candidate;
                 }
             }
             return null;
+        }
+
+        /** Every file of the stack that ships a relative path, highest priority pack first. */
+        private List<Path> findAll(String relative) throws IOException {
+            checkPath(relative);
+            List<Path> files = new ArrayList<>();
+            for (int i = roots.size() - 1; i >= 0; i--) {
+                Path root = roots.get(i);
+                Path candidate = root.resolve(relative).normalize();
+                if (!candidate.startsWith(root)) {
+                    throw new IOException("resource path escapes pack root");
+                }
+                if (Files.isRegularFile(candidate)) {
+                    files.add(candidate);
+                }
+            }
+            return files;
+        }
+
+        /**
+         * The one path validation of the stack, shared by {@link #find} and {@link #findAll} so the
+         * two lookups can never disagree about which names they accept.
+         */
+        private static void checkPath(String relative) throws IOException {
+            if (relative.startsWith("/") || relative.contains("..") || relative.indexOf('\0') >= 0) {
+                throw new IOException("unsafe resource path " + relative);
+            }
         }
     }
 

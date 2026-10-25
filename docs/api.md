@@ -67,6 +67,7 @@ curl -X PUT http://localhost:4666/api/v1/resources/packs \
 - 目录被轮询监听（`RESOURCE_PACK_WATCH_INTERVAL`，默认 `1s`，设为 `0` 关闭）；写入、替换或删除压缩包后最多约 2 个周期自动重载，不需要重启，也不需要重新 `PUT /api/v1/resources/<version>`。
 - 材质包是全局的（当前只支持 1.21.11），与版本树无关：调整优先级或重载包都不需要重新准备资源。`RESOURCE_PACK_ROOT` 只表示一个材质包目录；`data/resourcepack`（旧名字）不再被读取，需要手动改名为 `data/resourcepacks`。
 - 模型里的贴图引用先按路径读 `assets/<namespace>/textures/<path>.png`，路径不存在时再按包的 `assets/<namespace>/atlases/*.json` 解析**精灵名**：ItemsAdder 生成包把每个精灵改名成 `ia:0`、`ia:1`…（本仓库里的包是 2383 个），只有图集的 `single` 源能说明 `ia:1789` 其实是 `minecraft:item/diamond_sword`，所以这种引用照样能出图。同名的图集文件以优先级最高的包为准（整文件覆盖，不合并），同一文档里靠后的 source 覆盖靠前的；`directory` / `paletted_permutations` / `filter` / `unstitch` 暂不支持，解析不到的名字（包括 atlas 里根本没声明的）照旧降级为缺失贴图，不会让整次渲染失败。
+- 模型 id 按**字面**路径解析：`assets/<namespace>/models/<path>.json`，与客户端一致，不补 `item/` 前缀。ItemsAdder 导出的模型就放在 `assets/<包命名空间>/models/<name>.json`（没有 `item/` 子目录），模型的 `overrides` 里直接写 `包命名空间/<name>` 即可；`minecraft:item/diamond` 这种自带 `item/` 的写法照旧。覆盖（`custom_model_data`）指向的模型一个包都没有时按原版语义画**缺失模型**（紫黑）并写一条诊断，不会退回被覆盖的基础物品模型。历史上依赖自动补 `item/` 的包仍能出图：只有字面路径不存在时才回退到 `assets/<namespace>/models/item/<path>.json`，并在 stderr 记一条 `resolved through the legacy item/ prefix`。
 - 已知限制：字体 provider 只支持 `space` / `bitmap` / `unihex` / `reference`（与渲染器一致），只带 `ttf` provider 的字体包会退化成缺字框。
 
 ## 统一渲染请求
