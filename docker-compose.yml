@@ -32,7 +32,7 @@ services:
       # - MAX_CONCURRENT_RENDERS=4
       # - ADDON_ENABLED=true
       # 把收到的请求报文打到日志（单条上限 64 KiB），排查客户端报文时打开
-      # - DEBUG=true
+      - DEBUG=true
     volumes:
       # 原版资源、资源包栈、准备状态与自定义物品包都落在这里，整个目录可整体备份/迁移。
       # 自定义物品：把 ItemsAdder 的 contents/ 各包目录放进 ./data/contents/，
