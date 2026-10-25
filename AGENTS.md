@@ -10,7 +10,7 @@
 | `internal/model` | **接口契约的唯一定义**：`Request` / `Options` / 各 type 的 data 结构体、json tag、校验与默认值 |
 | `internal/httpapi` | 路由、鉴权、CORS、OpenAPI 文档（`openapi.go`）与示例目录 |
 | `internal/renderer` | 渲染后端适配（子进程 JSON 协议）、画布合成、放大、简化后端 |
-| `internal/resources` | 原版资源下载与校验、材质包栈（`data/resourcepack` 扫描/解包/优先级/监听）与版本状态 |
+| `internal/resources` | 原版资源下载与校验、材质包栈（`data/resourcepacks` 扫描/解包/优先级/overlays/监听）与版本状态 |
 | `internal/custom` | 自定义物品索引：ItemsAdder 配置子集、`items_ids_cache.yml`、模型扁平化与贴图内联 |
 | `internal/font` | 原版字体 provider 管线（space / bitmap / unihex / reference） |
 | `renderer-backend` | Java 渲染器：`src/main` 渲染代码、`src/test` 冒烟测试、`fixture` 自制资源包 |

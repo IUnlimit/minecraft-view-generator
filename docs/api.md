@@ -20,14 +20,14 @@ curl http://localhost:4666/api/v1/resources/1.21.11
 curl http://localhost:4666/api/v1/versions
 ```
 
-资源层级为 vanilla → addon → 用户材质包（`data/resourcepack/`，按加载顺序，越靠后越优先），后者覆盖前者。材质包的目录、顺序与接口见下一节。
+资源层级为 vanilla → addon → 用户材质包（`data/resourcepacks/`，按加载顺序，越靠后越优先），后者覆盖前者。材质包的目录、顺序与接口见下一节。
 
 ## 材质包（resource packs）
 
-把材质包压缩包放进 `data/resourcepack/`（启动时自动创建，目录可用 `RESOURCE_PACK_ROOT` 改），服务启动时自动解压并作为资源栈的最后一层参与渲染：贴图、模型、`items/` 定义、语言文件与字体（`assets/minecraft/font/…`）都按同一规则覆盖 vanilla 与 addon。
+把材质包压缩包放进 `data/resourcepacks/`（启动时自动创建，目录可用 `RESOURCE_PACK_ROOT` 改），服务启动时自动解压并作为资源栈的最后一层参与渲染：贴图、模型、`items/` 定义、语言文件与字体（`assets/minecraft/font/…`）都按同一规则覆盖 vanilla 与 addon。
 
 ```sh
-cp MyPack.zip data/resourcepack/                 # 放包；服务运行中也会自动重载（默认 1s 轮询）
+cp MyPack.zip data/resourcepacks/                # 放包；服务运行中也会自动重载（默认 1s 轮询）
 curl http://localhost:4666/api/v1/resources/packs
 curl -X PUT http://localhost:4666/api/v1/resources/packs \
   -H 'Content-Type: application/json' \
@@ -38,7 +38,7 @@ curl -X PUT http://localhost:4666/api/v1/resources/packs \
 
 ```json
 {
-  "directory": "/app/data/resourcepack",
+  "directory": "/app/data/resourcepacks",
   "cacheRoot": "/app/data/resources/.packs",
   "status": "ready",
   "packs": [
@@ -47,20 +47,24 @@ curl -X PUT http://localhost:4666/api/v1/resources/packs \
      "files": 312, "packFormat": 46, "status": "loaded"},
     {"file": "MyPack.zip", "priority": 2, "addedAt": "2026-01-02T00:00:00Z",
      "root": "/app/data/resources/.packs/pack-8899aabbccddeeff",
-     "files": 8, "packFormat": 46, "status": "loaded"}
+     "overlays": ["ia_overlay_1_21_6_plus", "ia_overlay_modern_atlas"],
+     "files": 6773, "packFormat": 75, "status": "loaded"}
   ],
   "updatedAt": "2026-01-02T00:00:01Z"
 }
 ```
 
 - `priority` 就是加载顺序，从 1 开始，**数值越大越优先**：`packs` 数组第 1 项最先加载、被后面的覆盖，最后一项覆盖所有人。
+- `overlays` 是该包在 1.21.11（资源包格式 **75**）下生效的 overlay 目录，按叠加顺序排列：它们依次覆盖包根，所以包内版本专属的 `items/` 定义与贴图会生效。其它版本的 overlay、目录不存在、`directory` 指到包外（绝对路径或含 `..`）的条目一律忽略；一个包的 overlay 不会越过下一个包。
+- 任何 `pack.mcmeta` 写法都能读：`pack_format` / `min_format` / `max_format` 可以是数字或 `[major, minor]` 数组，`supported_formats` 可以是 `{min_inclusive, max_inclusive}` 对象或 `[min, max]` 数组（1.21.9+ 的写法），overlays 条目同理。只有**整段**声明的格式都高于 100（例如 `pack_format: 200`）才判定为面向未来版本并拒绝，`max_format: [1000, 0]` 这种写法照常接受。`packFormat` 报告 `pack_format`，缺省时取声明区间的下界。
 - `PUT /api/v1/resources/packs` 的 `order` 必须恰好是 `packs[].file` 的一个排列（每个一次）；数组顺序即新的优先级，立即对下一次渲染生效，并持久化到 `data/states/resource-packs.json`。未知、重复、缺失或空文件名返回 `400 invalid_pack_order`，原顺序保持不变。
 - 默认顺序：首次发现时按文件**修改时间**升序、再按**文件名**升序；此后新放入的包一律追加到末尾，不会改变已有包之间的覆盖关系。改名视为「删除 + 新增」。
 - 只读取目录下的 `*.zip`（扩展名大小写不敏感）；点开头的条目与其它文件被忽略并记入 `warnings`。目录形式的包（未压缩）不再支持，请打包成 zip。
-- 坏包（缺 `pack.mcmeta`、格式越界、zip 损坏、超 `MAX_ARCHIVE_FILES`/`MAX_ARCHIVE_BYTES`）以 `status: "failed"` + `error` 列出且**不参与渲染**，其余包裹照常；替换或修好后自动恢复，不会让服务起不来。
+- 坏包（缺 `pack.mcmeta`、`pack.mcmeta` 无法解析、整段格式声明都高于 100、zip 数据损坏、超 `MAX_ARCHIVE_FILES`/`MAX_ARCHIVE_BYTES`）以 `status: "failed"` + `error` 列出且**不参与渲染**，其余包裹照常；替换或修好后自动恢复，不会让服务起不来。
+- 解包只信 deflate 流本身：中央目录声明的大小不可信时按实际字节解出（ItemsAdder 生成包把每条的未压缩大小写成 1337、CRC 写成 0，仍能完整解包）；CRC 声明为非 0 时仍然校验，不符即整包 `failed`。大小上限按**实际写入**的字节数统计，zip 炸弹依旧被挡住。
 - zip 解包到 `data/resources/.packs/pack-<sha1>/`，按内容寻址：重启只算一次哈希，不会重复解包；不再被引用的旧缓存目录在启动时清理，整个 `.packs` 目录任何时候都可以删。
 - 目录被轮询监听（`RESOURCE_PACK_WATCH_INTERVAL`，默认 `1s`，设为 `0` 关闭）；写入、替换或删除压缩包后最多约 2 个周期自动重载，不需要重启，也不需要重新 `PUT /api/v1/resources/<version>`。
-- 材质包是全局的（当前只支持 1.21.11），与版本树无关：调整优先级或重载包都不需要重新准备资源。旧的 `RESOURCE_PACK_ROOT` 布局（`<root>/<version>/` 每版本子目录，或直接指向单个文件）已废弃，现在该变量只表示一个材质包目录。
+- 材质包是全局的（当前只支持 1.21.11），与版本树无关：调整优先级或重载包都不需要重新准备资源。`RESOURCE_PACK_ROOT` 只表示一个材质包目录；`data/resourcepack`（旧名字）不再被读取，需要手动改名为 `data/resourcepacks`。
 - 已知限制：字体 provider 只支持 `space` / `bitmap` / `unihex` / `reference`（与渲染器一致），只带 `ttf` provider 的字体包会退化成缺字框。
 
 ## 统一渲染请求
@@ -642,7 +646,7 @@ curl http://localhost:4666/api/v1/resources/sources
 {
   "dataDir": "/app/data",
   "resourcePacks": {
-    "directory": "/app/data/resourcepack",
+    "directory": "/app/data/resourcepacks",
     "cacheRoot": "/app/data/resources/.packs",
     "status": "ready",
     "packs": [{

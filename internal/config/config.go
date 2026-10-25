@@ -127,14 +127,15 @@ func FromEnv() Config {
 	return cfg
 }
 
-// PackDir is the directory the user resource packs are read from. It defaults to resourcepack/ next
-// to the data directory rather than to a literal Default() value, so a config whose DataDir is
-// changed after Default() (tests, embedders) still keeps its packs inside that data directory.
+// PackDir is the directory the user resource packs are read from. It defaults to resourcepacks/ next
+// to the data directory — the name Minecraft itself gives its pack folder — rather than to a literal
+// Default() value, so a config whose DataDir is changed after Default() (tests, embedders) still
+// keeps its packs inside that data directory.
 func (c Config) PackDir() string {
 	if root := strings.TrimSpace(c.ResourcePackRoot); root != "" {
 		return root
 	}
-	return filepath.Join(c.DataDir, "resourcepack")
+	return filepath.Join(c.DataDir, "resourcepacks")
 }
 
 func (c Config) Validate() error {

@@ -10,7 +10,7 @@
 - **完整物品模型支持**：1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、`select`/`condition`/`range` dispatch、九类 `minecraft:special`（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟）与箱子族贴图；组件驱动的图案、染色、陶片与内联皮肤。
 - **文本按原版字体管线**：直接跑原版 `font/default.json` 的 space / bitmap / unihex / reference provider，空格 4、拉丁「宽 + 1」、CJK 全角 9 与原版一致；中文来自 `assets/minecraft/font/unifont.zip` 的 16×16 Unifont 点阵：1 倍用 2×2 归并的 8×8 五档半透明（原版 GUI scale 1 的柔边），2 倍及以上直接按原始点阵逐 texel 重采样，放大后的汉字是实色笔画而不是放大的灰块；`§` 与 `&` 颜色/修饰符前缀（含 `§x§R§R§G§G§B§B` 任意 RGB）、去码后的宽度参与居中与折行、原版字形盒与阴影规则。
 - **自定义物品（ItemsAdder）**：`data/contents/` 按 ItemsAdder `contents/` 布局放用户包，配合 `data/items_ids_cache.yml`，请求里用 `customData`（`custom_model_data` 数值 + 物品基础材料）定位；命中后按「贴图 + 模型几何」绘制，图标、槽位、tooltip 与手持都生效，未命中回退原版并记一条警告。
-- **用户材质包**：把 zip 放进 `data/resourcepack/`（启动时自动创建）即参与渲染，覆盖 vanilla 与 addon 的贴图、模型、语言与字体；放包、换包、删包都会被目录监听自动拾取。`GET /api/v1/resources/packs` 查看已加载的包与加载顺序，`PUT /api/v1/resources/packs` 用 `{"order":[…]}` 全量重设优先级（越靠后越优先），下一个渲染请求即生效。
+- **用户材质包**：把 zip 放进 `data/resourcepacks/`（启动时自动创建）即参与渲染，覆盖 vanilla 与 addon 的贴图、模型、语言与字体；放包、换包、删包都会被目录监听自动拾取。`GET /api/v1/resources/packs` 查看已加载的包与加载顺序，`PUT /api/v1/resources/packs` 用 `{"order":[…]}` 全量重设优先级（越靠后越优先），下一个渲染请求即生效。
 - **资源路径自检**：`GET /api/v1/resources/sources` 列出当前读取的每个目录与文件（原版树 / addon / 材质包目录与包文件 / 字体资产 / 自定义包与索引）及存在性，`POST /api/v1/resources/custom/reload` 可在用户改了 pack 或索引后热重建。
 - **版本化资源管理**：资源层级为 vanilla → addon → 用户材质包（按加载顺序，越靠后越优先），通过 HTTP 接口显式准备与查询状态；客户端 JAR、资源对象按 SHA-1 缓存在数据目录，重复准备不重复下载。
 - **资源缺失也降级**：未知物品、缺失模型、未直译的 special 族、损坏贴图、单个槽位失败都只影响那一层/那个槽位，并在 stderr 里说明原因。
@@ -27,7 +27,7 @@ internal/font             原版字体 provider 管线（space/bitmap/unihex/ref
 internal/custom           自定义物品索引：ItemsAdder 配置子集解析、items_ids_cache、模型扁平化与贴图内联
 renderer-backend/         Java 21 渲染后端（源码、fixture、build.sh/test.sh）
 docs/api.md               接口与各渲染类型的详细说明
-data/                     运行时数据：原版资源、材质包（resourcepack/ 与 .packs 缓存）、准备状态、自定义物品包（不纳入版本控制）
+data/                     运行时数据：原版资源、材质包（resourcepacks/ 与 .packs 缓存）、准备状态、自定义物品包（不纳入版本控制）
 Dockerfile                三阶段镜像：Go 构建 → JDK 编译渲染后端 → JRE 运行
 docker-compose.yml        单机部署编排
 ```
@@ -66,17 +66,17 @@ curl http://localhost:4666/api/v1/versions                   # 列出所有版�
 
 ### 材质包
 
-把材质包压缩包放进 `data/resourcepack/` 即可（服务运行中也可以，目录每 `RESOURCE_PACK_WATCH_INTERVAL` 轮询一次并自动重载）：
+把材质包压缩包放进 `data/resourcepacks/` 即可（服务运行中也可以，目录每 `RESOURCE_PACK_WATCH_INTERVAL` 轮询一次并自动重载）：
 
 ```sh
-mkdir -p data/resourcepack && cp MyPack.zip data/resourcepack/
+mkdir -p data/resourcepacks && cp MyPack.zip data/resourcepacks/
 curl http://localhost:4666/api/v1/resources/packs               # 目录、已加载的包与优先级
 curl -X PUT http://localhost:4666/api/v1/resources/packs \
   -H 'Content-Type: application/json' \
   --data '{"order":["Base.zip","MyPack.zip"]}'                  # 全量重设加载顺序（越靠后越优先）
 ```
 
-默认顺序是首次发现时按文件修改时间、再按文件名升序；之后新放入的包追加到末尾，用户显式设置的顺序会持久化到 `data/states/resource-packs.json`。损坏或不兼容的包只会以 `status: "failed"` 列在报告里，不影响其余包渲染；详见 [docs/api.md](docs/api.md#材质包resource-packs)。
+默认顺序是首次发现时按文件修改时间、再按文件名升序；之后新放入的包追加到末尾，用户显式设置的顺序会持久化到 `data/states/resource-packs.json`。包内 `pack.mcmeta` 声明的 `overlays` 中覆盖 1.21.11（资源包格式 75）的条目会自动叠加在包根之上，报告里以 `overlays` 列出。损坏或不兼容的包只会以 `status: "failed"` 列在报告里，不影响其余包渲染；详见 [docs/api.md](docs/api.md#材质包resource-packs)。
 
 ## 渲染示例
 
@@ -122,7 +122,7 @@ renderer-backend/build.sh      # 编译 Java 渲染后端（产物：renderer-ba
 | `LISTEN_ADDR` | `:8080`（`run.sh` 为 `0.0.0.0:4666`） | HTTP 监听地址 |
 | `DATA_DIR` | `./data` | 资源、缓存与准备状态的根目录 |
 | `RENDERER_COMMAND` | `./renderer-backend/run.sh` | 渲染后端进程；留空则后端不可用 |
-| `RESOURCE_PACK_ROOT` | `<DATA_DIR>/resourcepack` | 用户材质包目录：只读取其中的 `*.zip`，按加载顺序覆盖 addon 与 vanilla（越靠后越优先）；启动时自动创建 |
+| `RESOURCE_PACK_ROOT` | `<DATA_DIR>/resourcepacks` | 用户材质包目录：只读取其中的 `*.zip`，按加载顺序覆盖 addon 与 vanilla（越靠后越优先）；启动时自动创建 |
 | `RESOURCE_PACK_WATCH_INTERVAL` | `1s` | 轮询材质包目录的间隔，放包/换包/删包后自动重载；`0` 关闭监听（需重启才生效） |
 | `CUSTOM_CONTENTS_DIR` | `<DATA_DIR>/contents` | 用户自定义物品包根目录，布局同 ItemsAdder `contents/`；不存在时视为空索引 |
 | `CUSTOM_ITEMS_CACHE` | `<DATA_DIR>/items_ids_cache.yml` | ItemsAdder 的 `storage/items_ids_cache.yml`，把「材料 + custom_model_data」映射到物品 id |

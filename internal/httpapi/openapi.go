@@ -61,7 +61,7 @@ func resourcePackReportSchema() map[string]any {
 		"type":     "object",
 		"required": []string{"directory", "status", "packs"},
 		"properties": map[string]any{
-			"directory": field("string", "读取的材质包目录：RESOURCE_PACK_ROOT，缺省为 <DATA_DIR>/resourcepack，启动时不存在会自动创建。", nil),
+			"directory": field("string", "读取的材质包目录：RESOURCE_PACK_ROOT，缺省为 <DATA_DIR>/resourcepacks（与 Minecraft 的目录名一致），启动时不存在会自动创建。", nil),
 			"cacheRoot": field("string", "zip 的解包缓存目录（内容哈希寻址），可整目录删除，服务重启后会按需重建。", nil),
 			"status":    field("string", "ready 表示目录可读；error 表示目录无法创建或读取，原因见 error，此时保留上一份可渲染的包栈。", map[string]any{"enum": []string{"ready", "error"}}),
 			"error":     field("string", "目录级错误，仅 status=error 时出现。", nil),
@@ -398,7 +398,7 @@ func resourcePacksOperation() map[string]any {
 	return map[string]any{
 		"get": map[string]any{
 			"summary":     "List the resource packs and their priority",
-			"description": "返回 RESOURCE_PACK_ROOT（默认 <DATA_DIR>/resourcepack）中的压缩包与加载顺序。packs 的数组顺序就是加载顺序：第 1 个最先加载、被后面的覆盖，所以最后一项优先级最高（vanilla → addon → 包 1 → 包 2 …）。每个包在包根之上再叠加 pack.mcmeta 中覆盖当前渲染版本格式（75）的 overlays（见 packs[].overlays），因此包内版本专属的物品定义与贴图会生效；一个包的 overlay 不会越过下一个包。默认顺序在首次发现时按文件修改时间升序、再按文件名升序确定，并持久化到 <DATA_DIR>/states/resource-packs.json；之后新放入的包一律追加到末尾，不会改变已有包的覆盖关系。损坏、元数据无法解析或格式不兼容的包以 status=failed 列出且不参与渲染；压缩包声明的大小/CRC 与数据不符（例如 ItemsAdder 生成包把两者写成占位值）不影响加载，CRC 声明为非 0 时仍校验。目录被监听（RESOURCE_PACK_WATCH_INTERVAL，默认 1s），放入、替换或删除压缩包都会自动重载，无需重启。",
+			"description": "返回 RESOURCE_PACK_ROOT（默认 <DATA_DIR>/resourcepacks）中的压缩包与加载顺序。packs 的数组顺序就是加载顺序：第 1 个最先加载、被后面的覆盖，所以最后一项优先级最高（vanilla → addon → 包 1 → 包 2 …）。每个包在包根之上再叠加 pack.mcmeta 中覆盖当前渲染版本格式（75）的 overlays（见 packs[].overlays），因此包内版本专属的物品定义与贴图会生效；一个包的 overlay 不会越过下一个包。默认顺序在首次发现时按文件修改时间升序、再按文件名升序确定，并持久化到 <DATA_DIR>/states/resource-packs.json；之后新放入的包一律追加到末尾，不会改变已有包的覆盖关系。损坏、元数据无法解析或格式不兼容的包以 status=failed 列出且不参与渲染；压缩包声明的大小/CRC 与数据不符（例如 ItemsAdder 生成包把两者写成占位值）不影响加载，CRC 声明为非 0 时仍校验。目录被监听（RESOURCE_PACK_WATCH_INTERVAL，默认 1s），放入、替换或删除压缩包都会自动重载，无需重启。",
 			"responses":   map[string]any{"200": map[string]any{"description": "The resource pack stack"}},
 		},
 		"put": map[string]any{
