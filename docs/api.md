@@ -20,7 +20,48 @@ curl http://localhost:4666/api/v1/resources/1.21.11
 curl http://localhost:4666/api/v1/versions
 ```
 
-资源层级为 vanilla → addon → 用户 `RESOURCE_PACK_ROOT` 中按名称排序的 pack，后者覆盖前者。
+资源层级为 vanilla → addon → 用户材质包（`data/resourcepack/`，按加载顺序，越靠后越优先），后者覆盖前者。材质包的目录、顺序与接口见下一节。
+
+## 材质包（resource packs）
+
+把材质包压缩包放进 `data/resourcepack/`（启动时自动创建，目录可用 `RESOURCE_PACK_ROOT` 改），服务启动时自动解压并作为资源栈的最后一层参与渲染：贴图、模型、`items/` 定义、语言文件与字体（`assets/minecraft/font/…`）都按同一规则覆盖 vanilla 与 addon。
+
+```sh
+cp MyPack.zip data/resourcepack/                 # 放包；服务运行中也会自动重载（默认 1s 轮询）
+curl http://localhost:4666/api/v1/resources/packs
+curl -X PUT http://localhost:4666/api/v1/resources/packs \
+  -H 'Content-Type: application/json' \
+  --data '{"order":["Base.zip","MyPack.zip"]}'
+```
+
+`GET /api/v1/resources/packs` 返回读取的目录、解包缓存与按**加载顺序**排列的包：
+
+```json
+{
+  "directory": "/app/data/resourcepack",
+  "cacheRoot": "/app/data/resources/.packs",
+  "status": "ready",
+  "packs": [
+    {"file": "Base.zip", "priority": 1, "addedAt": "2026-01-01T00:00:00Z",
+     "root": "/app/data/resources/.packs/pack-1a2b3c4d5e6f7788",
+     "files": 312, "packFormat": 46, "status": "loaded"},
+    {"file": "MyPack.zip", "priority": 2, "addedAt": "2026-01-02T00:00:00Z",
+     "root": "/app/data/resources/.packs/pack-8899aabbccddeeff",
+     "files": 8, "packFormat": 46, "status": "loaded"}
+  ],
+  "updatedAt": "2026-01-02T00:00:01Z"
+}
+```
+
+- `priority` 就是加载顺序，从 1 开始，**数值越大越优先**：`packs` 数组第 1 项最先加载、被后面的覆盖，最后一项覆盖所有人。
+- `PUT /api/v1/resources/packs` 的 `order` 必须恰好是 `packs[].file` 的一个排列（每个一次）；数组顺序即新的优先级，立即对下一次渲染生效，并持久化到 `data/states/resource-packs.json`。未知、重复、缺失或空文件名返回 `400 invalid_pack_order`，原顺序保持不变。
+- 默认顺序：首次发现时按文件**修改时间**升序、再按**文件名**升序；此后新放入的包一律追加到末尾，不会改变已有包之间的覆盖关系。改名视为「删除 + 新增」。
+- 只读取目录下的 `*.zip`（扩展名大小写不敏感）；点开头的条目与其它文件被忽略并记入 `warnings`。目录形式的包（未压缩）不再支持，请打包成 zip。
+- 坏包（缺 `pack.mcmeta`、格式越界、zip 损坏、超 `MAX_ARCHIVE_FILES`/`MAX_ARCHIVE_BYTES`）以 `status: "failed"` + `error` 列出且**不参与渲染**，其余包裹照常；替换或修好后自动恢复，不会让服务起不来。
+- zip 解包到 `data/resources/.packs/pack-<sha1>/`，按内容寻址：重启只算一次哈希，不会重复解包；不再被引用的旧缓存目录在启动时清理，整个 `.packs` 目录任何时候都可以删。
+- 目录被轮询监听（`RESOURCE_PACK_WATCH_INTERVAL`，默认 `1s`，设为 `0` 关闭）；写入、替换或删除压缩包后最多约 2 个周期自动重载，不需要重启，也不需要重新 `PUT /api/v1/resources/<version>`。
+- 材质包是全局的（当前只支持 1.21.11），与版本树无关：调整优先级或重载包都不需要重新准备资源。旧的 `RESOURCE_PACK_ROOT` 布局（`<root>/<version>/` 每版本子目录，或直接指向单个文件）已废弃，现在该变量只表示一个材质包目录。
+- 已知限制：字体 provider 只支持 `space` / `bitmap` / `unihex` / `reference`（与渲染器一致），只带 `ttf` provider 的字体包会退化成缺字框。
 
 ## 统一渲染请求
 
@@ -600,13 +641,27 @@ curl http://localhost:4666/api/v1/resources/sources
 ```json
 {
   "dataDir": "/app/data",
+  "resourcePacks": {
+    "directory": "/app/data/resourcepack",
+    "cacheRoot": "/app/data/resources/.packs",
+    "status": "ready",
+    "packs": [{
+      "file": "Base.zip",
+      "priority": 1,
+      "addedAt": "2026-01-01T00:00:00Z",
+      "root": "/app/data/resources/.packs/pack-1a2b3c4d5e6f7788",
+      "files": 312,
+      "packFormat": 46,
+      "status": "loaded"
+    }]
+  },
   "versions": [{
     "version": "1.21.11",
     "status": "ready",
     "resourceRoot": "/app/data/resources/1.21.11",
     "vanillaRoot": "/app/data/resources/1.21.11/vanilla",
     "addonRoot": "/app/data/resources/1.21.11/addon",
-    "packRoots": ["/app/data/packs/pack-000"],
+    "packRoots": ["/app/data/resources/.packs/pack-1a2b3c4d5e6f7788"],
     "font": {
       "definition": "/app/data/resources/1.21.11/vanilla/assets/minecraft/font/default.json",
       "definitionPresent": true,
@@ -628,6 +683,8 @@ curl http://localhost:4666/api/v1/resources/sources
   }
 }
 ```
+
+`resourcePacks` 与 `GET /api/v1/resources/packs` 返回同一份报告（目录、包文件、优先级、解包路径）；每个版本的 `packRoots` 是**实时**的材质包栈，与版本树无关，`PUT` 调整顺序后这里立刻反映。
 
 `items.cached` 是索引里能读到的映射条数，`withDefinition` 是其中真正有包配置支持的条数，`resolved` 是本次进程已经成功解析过（并缓存）的物品数——`resolved` 按需增长，避免为了统计去读走整盘几千张贴图。
 
