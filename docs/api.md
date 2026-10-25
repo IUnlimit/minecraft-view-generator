@@ -128,8 +128,8 @@ curl -X POST http://localhost:4666/api/v1/render \
 | `count` | integer | 0 | 堆叠数量，≥0。只在容器 / 背包槽位画右下角数字（>1 才画），`item` 图标本身不画 |
 | `damage` | integer | 0 | 已消耗耐久；与 `maxDamage` 同时 >0 时在图标上画耐久条 |
 | `maxDamage` | integer | 0 | 最大耐久；与 `damage` 同时 >0 时在图标上画耐久条 |
-| `customModelData` | integer | — | 原版 `custom_model_data`，驱动模型的 `select` / `range_dispatch` 覆盖 |
-| `customData` | integer | — | ItemsAdder 索引键的数值部分，≥0；与 `id` 的基础材料组合命中 `data/contents`，见「自定义物品」 |
+| `customData` | integer | — | **原版 `custom_model_data` 数值**，≥0：驱动模型 `overrides` 的 `custom_model_data` predicate 与 item definition 的 `select` / `range_dispatch`，同时是 ItemsAdder 索引键的数值部分（与 `id` 的基础材料组合命中 `data/contents`，见「自定义物品」） |
+| `customModelData` | integer | — | 同一数值的旧拼写，等价于 `customData`；两者都传时以 `customData` 为准，新调用方不需要这个字段 |
 | `components` | object | — | 原版组件表，键可带或不带 `minecraft:` 前缀 |
 | `nbt` | object | — | 任意 NBT/JSON；`tooltip` 的 advanced 模式用它生成 `item.nbt_tags` 计数行 |
 | `name` | string | — | 悬停名（tooltip 首行），支持 `§` 与 `&` 颜色码 |
@@ -609,7 +609,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 ```
 
 - **定位键 = 基础材料 + 数值**：`id` 的命名空间与 `customData` 组合成索引键（`minecraft:paper` + `1134` → `PAPER#1134`），与 `items_ids_cache.yml` 里的 `<MATERIAL>: {<namespace>:<name>: <cmd>}` 对应。同一数值在不同材料下是不同物品（`PAPER 1134` 与 `FISHING_ROD 1134` 互不相干），所以调用方必须传真实的基础材料。
-- **`customData` 与 `customModelData` 是两件事**：`customModelData` 仍然喂给原版的 `range_dispatch` 覆盖；`customData` 只用于自定义内容索引。
+- **`customData` 就是原版 `custom_model_data`**：它既是自定义内容索引的键（基础材料 + 数值），也是模型 `overrides` 的 `custom_model_data` predicate 与 item definition 的 `select` / `range_dispatch` 读的那个数。`customModelData` 只是同一个数值的旧拼写，保留兼容；两者都传时以 `customData` 为准。
 - **任何物品位置都生效**：`item`、`tooltip.item`、`inventory/item_container/enderchest.slots[].item`、`playerInventory.armor/mainHand/offhand`、`achievement.icon`。
 - **绘制的是贴图 + 模型几何**：模型 JSON 的 `parent` 链会被逐层合并（遇到 `minecraft:` 父模型即停，并保留它以便沿用原版的 `display` 手部变换），`textures` 里的自定义贴图按需读文件并内联成 data URI 传给渲染后端（同名 `.png.mcmeta` 一并带上，用于取动画贴图的第一帧）。因此 `generated` 平面图标、带 `elements` 的 Blockbench 家具模型、以及**手持物品**都能画；高清贴图按模型 `uv` 的 0..16 坐标整体采样，不会被截成左上角。
 - **未命中不报错**：材料不匹配、索引里没有这个数值、配置里没有这个物品、贴图缺失，都会回退成原版物品并记一条 `WARN`（每个键一次），HTTP 仍然返回 200。

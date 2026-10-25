@@ -50,6 +50,7 @@ public final class RendererSmokeTest {
         testCustomArt(renderer, root);
         testPackOverride(renderer, root);
         testModelPathWithoutPrefix(renderer, root);
+        testCustomModelDataSpellings(renderer, root);
         testFontProviderStackMerge(root);
         testHdTextures(renderer, root);
         testAnimatedSprite(renderer, root);
@@ -659,14 +660,14 @@ public final class RendererSmokeTest {
     /**
      * A model id is the literal file the client reads, {@code assets/<namespace>/models/<path>.json}.
      * An ItemsAdder pack keeps its models without the {@code item/} directory, so an override that
-     * names {@code fixturepack:plain} has to find exactly that file; rewriting it to {@code
-     * models/item/plain.json} is what turned those icons into the missing model.
+     * names {@code fixturepack:plain} has to find exactly that file; rewriting it to
+     * {@code models/item/plain.json} is what turned those icons into the missing model.
      *
      * <p>An override that names a model no pack ships keeps the vanilla semantics instead: the item is
      * drawn as the missing model, not as the base model it overrode.</p>
      */
     private static void testModelPathWithoutPrefix(Renderer renderer, Path root) throws Exception {
-        BufferedImage plain = renderItemFields(renderer, root, "minecraft:fixture_plain_model", Map.of("customModelData", 1));
+        BufferedImage plain = renderItemFields(renderer, root, "minecraft:fixture_plain_model", Map.of("customData", 1));
         require(hasPixels(plain), "a model outside the item/ directory drew nothing");
         require(countColor(plain, ColorKind.MISSING_MAGENTA) == 0,
                 "a model outside the item/ directory fell back to the missing model");
@@ -675,15 +676,43 @@ public final class RendererSmokeTest {
 
         // An override that names a model no pack ships keeps the vanilla semantics instead of falling
         // back to the model it overrode: the item is drawn as the missing model.
-        BufferedImage absent = renderItemFields(renderer, root, "minecraft:fixture_absent_model", Map.of("customModelData", 1));
+        BufferedImage absent = renderItemFields(renderer, root, "minecraft:fixture_absent_model", Map.of("customData", 1));
         requireMissingModel(absent, "an override naming an absent model");
 
         // A pack written against the old prefix is still served: the literal path has no file, so the
         // renderer answers with the legacy models/item/ one instead of the missing model.
-        BufferedImage legacy = renderItemFields(renderer, root, "minecraft:fixture_legacy_model", Map.of("customModelData", 1));
+        BufferedImage legacy = renderItemFields(renderer, root, "minecraft:fixture_legacy_model", Map.of("customData", 1));
         require(hasPixels(legacy), "a model under the legacy item/ prefix drew nothing");
         require(countColor(legacy, ColorKind.MISSING_MAGENTA) == 0,
                 "a model under the legacy item/ prefix fell back to the missing model");
+    }
+
+    /**
+     * {@code customData} is the field a caller sends for an ItemsAdder {@code custom_model_data}
+     * value, so every selector that reads that number has to see it: the {@code custom_model_data}
+     * predicate of a model override and the {@code select} property of an item definition.
+     * {@code customModelData} stays readable as the older spelling of the same number, and the
+     * documented field wins when a request carries both.
+     */
+    private static void testCustomModelDataSpellings(Renderer renderer, Path root) throws Exception {
+        BufferedImage viaCustomData = renderItemFields(renderer, root, "minecraft:fixture_plain_model", Map.of("customData", 1));
+        BufferedImage viaOldSpelling = renderItemFields(renderer, root, "minecraft:fixture_plain_model", Map.of("customModelData", 1));
+        require(!differs(viaCustomData, viaOldSpelling),
+                "customModelData no longer selects the same override as customData");
+
+        // A select on minecraft:custom_model_data compares the number as spelled in its case list, so
+        // customData has to answer that property too.
+        BufferedImage selected = renderItemFields(renderer, root, "minecraft:fixture_select_model", Map.of("customData", 1));
+        BufferedImage fallback = renderItemFields(renderer, root, "minecraft:fixture_select_model", Map.of());
+        require(hasPixels(selected), "a select on customData drew nothing");
+        require(countColor(selected, ColorKind.MISSING_MAGENTA) == 0,
+                "a select on customData fell back to the missing model");
+        require(differs(selected, fallback), "a select on customData did not reach its case");
+
+        // Both fields at once: the documented one wins.
+        BufferedImage both = renderItemFields(renderer, root, "minecraft:fixture_plain_model",
+                Map.of("customData", 1, "customModelData", 0));
+        require(!differs(both, viaCustomData), "customModelData overrode the documented customData value");
     }
 
     /**

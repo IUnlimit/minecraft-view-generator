@@ -340,7 +340,7 @@ final class Renderer {
         if (type.equals("minecraft:range_dispatch") || type.equals("range_dispatch")) {
             String property = Json.string(object, "property", "").toLowerCase();
             double actual = switch (property) {
-                case "minecraft:custom_model_data", "custom_model_data" -> Json.number(item, "customModelData", 0);
+                case "minecraft:custom_model_data", "custom_model_data" -> customModelData(item);
                 case "minecraft:damage", "damage" -> {
                     double damage = Json.number(item, "damage", 0);
                     double max = Json.number(item, "maxDamage", 0);
@@ -371,15 +371,54 @@ final class Renderer {
                 for (Object caseValue : cases) {
                     if (!(caseValue instanceof Map<?, ?> caseRaw)) continue;
                     Map<String, Object> entry = castMap(caseRaw);
-                    Object when = entry.get("when");
-                    boolean matches = when instanceof String s && s.equalsIgnoreCase(actual)
-                            || when instanceof List<?> values && values.stream().anyMatch(v -> String.valueOf(v).equalsIgnoreCase(actual));
-                    if (matches) return selectItemSelection(entry.get("model"), item);
+                    if (selectionMatches(entry.get("when"), actual)) {
+                        return selectItemSelection(entry.get("model"), item);
+                    }
                 }
             }
             return selectItemSelection(object.get("fallback"), item);
         }
         return new ItemSelection("", null);
+    }
+
+    /**
+     * Whether a {@code select} case applies to the property value it was asked about.
+     *
+     * <p>The type of {@code when} follows the property: a string property such as {@code
+     * display_context} spells its value out, while an integer property such as {@code
+     * custom_model_data} arrives as a JSON number. Comparing only strings is what made a numeric case
+     * unreachable, so a number is compared by value against the text the property produced.</p>
+     */
+    private static boolean selectionMatches(Object when, String actual) {
+        if (when instanceof List<?> values) {
+            for (Object value : values) {
+                if (selectionMatches(value, actual)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (when instanceof Number number) {
+            return selectNumber(number.doubleValue()).equals(actual);
+        }
+        return when instanceof String text && text.replace("minecraft:", "").equalsIgnoreCase(actual);
+    }
+
+    /**
+     * The {@code custom_model_data} value of an item, the one number that drives every vanilla model
+     * selector.
+     *
+     * <p>A caller spells it {@code customData}: that is the field this service documents for a custom
+     * item, and it is what an ItemsAdder pack means by its {@code custom_model_data} value.
+     * {@code customModelData} is still read as the older spelling of the same number, so a request
+     * written against the previous documentation keeps selecting the same models.</p>
+     */
+    private static double customModelData(Map<String, Object> item) {
+        Object value = item.get("customData");
+        if (!(value instanceof Number)) {
+            value = item.get("customModelData");
+        }
+        return value instanceof Number number ? number.doubleValue() : 0;
     }
 
     private String selectPropertyValue(String property, Map<String, Object> item) {
@@ -402,10 +441,18 @@ final class Renderer {
             value = switch (key) {
                 case "trim_material" -> item.getOrDefault("trimMaterial", "");
                 case "display_context" -> item.getOrDefault("displayContext", "gui");
+                // A select case spells its value as an integer, so the number has to come back without a
+                // fractional part; customData itself carries the value, see customModelData().
+                case "custom_model_data" -> selectNumber(customModelData(item));
                 default -> "";
             };
         }
         return String.valueOf(value).replace("minecraft:", "");
+    }
+
+    /** A selector number as the text a {@code select} case compares against: {@code 10017}, not {@code 10017.0}. */
+    private static String selectNumber(double value) {
+        return value == Math.rint(value) ? Long.toString((long) value) : Double.toString(value);
     }
 
     private String itemIdPath(String id) {
@@ -1042,7 +1089,7 @@ final class Renderer {
         if (type.equals("minecraft:range_dispatch") || type.equals("range_dispatch")) {
             String property = Json.string(object, "property", "");
             double actual = switch (property) {
-                case "minecraft:custom_model_data", "custom_model_data" -> Json.number(item, "customModelData", 0);
+                case "minecraft:custom_model_data", "custom_model_data" -> customModelData(item);
                 case "minecraft:damage", "damage" -> {
                     double damage = Json.number(item, "damage", 0);
                     double max = Json.number(item, "maxDamage", 0);
@@ -1102,11 +1149,6 @@ final class Renderer {
                     return normalizeID(string);
                 }
             }
-        }
-        Object customModelData = item.get("customModelData");
-        if (customModelData instanceof Number) {
-            // The old item override predicate is selected below. The value is
-            // deliberately not converted to a path: the model owns that map.
         }
         return "";
     }
@@ -4854,7 +4896,7 @@ final class Renderer {
             for (Map.Entry<String, Object> entry : predicate.entrySet()) {
                 double expected = entry.getValue() instanceof Number number ? number.doubleValue() : 0;
                 double actual = switch (entry.getKey()) {
-                    case "custom_model_data" -> Json.number(item, "customModelData", 0);
+                    case "custom_model_data" -> customModelData(item);
                     case "damage" -> Json.number(item, "damage", 0);
                     default -> 0;
                 };
