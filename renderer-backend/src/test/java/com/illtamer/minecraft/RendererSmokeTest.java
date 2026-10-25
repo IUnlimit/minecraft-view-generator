@@ -53,6 +53,7 @@ public final class RendererSmokeTest {
         testCustomModelDataSpellings(renderer, root);
         testFontProviderStackMerge(root);
         testBitmapGlyphHeight(root);
+        testBitmapGlyphColours(root);
         testHdTextures(renderer, root);
         testAnimatedSprite(renderer, root);
         testFaceRotation(renderer, root);
@@ -871,6 +872,89 @@ public final class RendererSmokeTest {
                 + "\"file\":\"fixturepack:font/scaled.png\","
                 + (fields.isEmpty() ? "" : fields + ",")
                 + "\"chars\":[\"\\uE139\"]}]}");
+        Files.writeString(packRoot.resolve("pack.mcmeta"), "{\"pack\":{\"pack_format\":46}}");
+    }
+
+    /**
+     * A bitmap sheet may ship colours of its own, and the client draws them as the texture colour
+     * times the text colour: a white pixel becomes the label colour, a red button stays red at the
+     * brightness of that label. Painting every glyph pixel in the text colour turned such an icon into
+     * a solid block, which is what an ItemsAdder lore icon looked like.
+     */
+    private static void testBitmapGlyphColours(Path root) throws Exception {
+        Path pack = Files.createTempDirectory("renderer-font-colours");
+        try {
+            writeColouredFontPack(pack, 8, "");
+            Map<String, Object> stack = new LinkedHashMap<>();
+            stack.put("packRoots", List.of(pack.toString()));
+            MinecraftFont font = MinecraftFont.load(Renderer.ResourceStack.from(stack, root.toString()));
+            MinecraftFont.Glyph glyph = font.glyph(0xE13A);
+            require(glyph.width() == 8 && glyph.height() == 8,
+                    "the coloured glyph is not its eight pixel box: " + glyph.width() + "x" + glyph.height());
+            require(pixelOf(glyph, 0xFFFFFF, 0, 0) == 0xF44040,
+                    "the red half of the sheet under a white label is not red: "
+                            + Integer.toHexString(pixelOf(glyph, 0xFFFFFF, 0, 0)));
+            require(pixelOf(glyph, 0xFFFFFF, 7, 0) == 0xFFFFFF,
+                    "the white half of the sheet under a white label is not white: "
+                            + Integer.toHexString(pixelOf(glyph, 0xFFFFFF, 7, 0)));
+            // A red label scales both halves: the white one becomes the label colour, the red one keeps
+            // its hue at 0xFF5555's green and blue channel.
+            require(pixelOf(glyph, 0xFF5555, 0, 0) == 0xF41515,
+                    "the red half under a red label is not scaled by it: "
+                            + Integer.toHexString(pixelOf(glyph, 0xFF5555, 0, 0)));
+            require(pixelOf(glyph, 0xFF5555, 7, 0) == 0xFF5555,
+                    "the white half under a red label is not that label colour: "
+                            + Integer.toHexString(pixelOf(glyph, 0xFF5555, 7, 0)));
+        } finally {
+            deleteTree(pack);
+        }
+        // The same sheet at two times the resolution declared at height 8 keeps its colours through the
+        // resampling into the halved box.
+        Path halved = Files.createTempDirectory("renderer-font-colours");
+        try {
+            writeColouredFontPack(halved, 16, "\"height\":8");
+            Map<String, Object> stack = new LinkedHashMap<>();
+            stack.put("packRoots", List.of(halved.toString()));
+            MinecraftFont font = MinecraftFont.load(Renderer.ResourceStack.from(stack, root.toString()));
+            MinecraftFont.Glyph glyph = font.glyph(0xE13A);
+            require(glyph.width() == 8 && glyph.height() == 8,
+                    "the halved coloured glyph is not its eight pixel box: " + glyph.width() + "x" + glyph.height());
+            require(pixelOf(glyph, 0xFFFFFF, 0, 0) == 0xF44040 && pixelOf(glyph, 0xFFFFFF, 7, 0) == 0xFFFFFF,
+                    "the halved glyph lost the colours of its sheet");
+        } finally {
+            deleteTree(halved);
+        }
+    }
+
+    /** Draws one glyph pixel through the glyph itself and answers the colour it produced. */
+    private static int pixelOf(MinecraftFont.Glyph glyph, int rgb, int column, int row) {
+        BufferedImage canvas = new BufferedImage(glyph.width() + 2, glyph.height() + 2, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D graphics = canvas.createGraphics();
+        glyph.draw(graphics, 1, 1, 1, 1, rgb, false, false);
+        graphics.dispose();
+        return canvas.getRGB(1 + column, 1 + row) & 0xFFFFFF;
+    }
+
+    /**
+     * Writes a pack whose single provider covers {@code U+E13A} with a square cell whose left half is
+     * red and whose right half is white, the shape of a coloured ItemsAdder icon.
+     */
+    private static void writeColouredFontPack(Path packRoot, int cell, String fields) throws Exception {
+        Path sheet = packRoot.resolve("assets/fixturepack/textures/font/coloured.png");
+        Files.createDirectories(sheet.getParent());
+        BufferedImage image = new BufferedImage(cell, cell, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < cell; y++) {
+            for (int x = 0; x < cell; x++) {
+                image.setRGB(x, y, x < cell / 2 ? 0xFFF44040 : 0xFFFFFFFF);
+            }
+        }
+        ImageIO.write(image, "png", sheet.toFile());
+        Path definition = packRoot.resolve("assets/minecraft/font/default.json");
+        Files.createDirectories(definition.getParent());
+        Files.writeString(definition, "{\"providers\":[{\"type\":\"bitmap\","
+                + "\"file\":\"fixturepack:font/coloured.png\","
+                + (fields.isEmpty() ? "" : fields + ",")
+                + "\"chars\":[\"\\uE13A\"]}]}");
         Files.writeString(packRoot.resolve("pack.mcmeta"), "{\"pack\":{\"pack_format\":46}}");
     }
 

@@ -8,7 +8,7 @@
 
 - **十种渲染类型**：`item`、`tooltip`、`inventory`、`item_container`、`enderchest`、`playerInventory`、`skin`、`playerlist`、`map`、`achievement`，几何、配色与文本度量对齐原版客户端。
 - **完整物品模型支持**：1.21.11 item definition、model parent、generated/handheld、3D elements、纹理层、`select`/`condition`/`range` dispatch、九类 `minecraft:special`（旗帜 / 床 / 潜影盒 / 头颅与玩家头 / 盾牌 / 潮涌核心 / 饰纹陶罐 / 铜傀儡雕像 / 三叉戟）与箱子族贴图；组件驱动的图案、染色、陶片与内联皮肤。
-- **文本按原版字体管线**：直接跑原版 `font/default.json` 的 space / bitmap / unihex / reference provider，空格 4、拉丁「宽 + 1」、CJK 全角 9 与原版一致；中文来自 `assets/minecraft/font/unifont.zip` 的 16×16 Unifont 点阵：1 倍用 2×2 归并的 8×8 五档半透明（原版 GUI scale 1 的柔边），2 倍及以上直接按原始点阵逐 texel 重采样，放大后的汉字是实色笔画而不是放大的灰块；`§` 与 `&` 颜色/修饰符前缀（含 `§x§R§R§G§G§B§B` 任意 RGB）、去码后的宽度参与居中与折行、原版字形盒与阴影规则。
+- **文本按原版字体管线**：直接跑原版 `font/default.json` 的 space / bitmap / unihex / reference provider，空格 4、拉丁「宽 + 1」、CJK 全角 9 与原版一致；中文来自 `assets/minecraft/font/unifont.zip` 的 16×16 Unifont 点阵：1 倍用 2×2 归并的 8×8 五档半透明（原版 GUI scale 1 的柔边），2 倍及以上直接按原始点阵逐 texel 重采样，放大后的汉字是实色笔画而不是放大的灰块；材质包的 `bitmap` 字形按声明的 `height` 绘制（缺省 8，与贴图分辨率无关），并保留贴图自带的颜色（按文本颜色调制），所以 ItemsAdder 的 2 倍分辨率彩色图标能按原版大小与配色显示；`§` 与 `&` 颜色/修饰符前缀（含 `§x§R§R§G§G§B§B` 任意 RGB）、去码后的宽度参与居中与折行、原版字形盒与阴影规则。
 - **自定义物品（ItemsAdder）**：`data/contents/` 按 ItemsAdder `contents/` 布局放用户包，配合 `data/items_ids_cache.yml`，请求里用 `customData`（`custom_model_data` 数值 + 物品基础材料）定位；命中后按「贴图 + 模型几何」绘制，图标、槽位、tooltip 与手持都生效，未命中回退原版并记一条警告。
 - **用户材质包**：把 zip 放进 `data/resourcepacks/`（启动时自动创建）即参与渲染，覆盖 vanilla 与 addon 的贴图、模型、语言与字体；放包、换包、删包都会被目录监听自动拾取。`GET /api/v1/resources/packs` 查看已加载的包与加载顺序，`PUT /api/v1/resources/packs` 用 `{"order":[…]}` 全量重设优先级（越靠后越优先），下一个渲染请求即生效。
 - **资源路径自检**：`GET /api/v1/resources/sources` 列出当前读取的每个目录与文件（原版树 / addon / 材质包目录与包文件 / 字体资产 / 自定义包与索引）及存在性，`POST /api/v1/resources/custom/reload` 可在用户改了 pack 或索引后热重建。

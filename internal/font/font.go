@@ -13,6 +13,10 @@
 // the ascent line, one pixel below the baseline. Advances are the per glyph values the client
 // computes — the last inked column plus one for a bitmap glyph, half the inked column count plus one
 // for a unihex glyph.
+//
+// Colour is the client's too: every drawn pixel is the colour the sheet ships times the text colour.
+// The vanilla sheets are pure white and therefore answer the text colour, while an icon a resource
+// pack ships with colours of its own keeps them, dimmed by a coloured label.
 package font
 
 import (
@@ -72,6 +76,11 @@ type Glyph struct {
 	Width    int
 	Height   int
 	coverage []uint8
+	// ink is the colour of each font pixel as 0xRRGGBB, or nil when the glyph paints its whole box
+	// white — every vanilla sheet and every unihex glyph. A drawn pixel is that colour times the text
+	// colour, which is how the client draws a sheet that ships colours of its own: a white pixel takes
+	// the text colour, a coloured one keeps its hue at the brightness of that colour.
+	ink []uint32
 	// texels is the native texel grid as 0xAARRGGBB, row major, or nil when the glyph has no
 	// resolution above its own pixels.
 	texels []uint32
@@ -111,8 +120,9 @@ func (g *Glyph) String() string {
 // scale device pixels. A glyph that carries a texel grid and is drawn at its own texel scale or
 // larger is resampled from that grid, so twice the size is the sixteen texel bitmap itself; every
 // other glyph is composited from its averaged coverage, which is the half scale soft edge the client
-// has at GUI scale one. Every write goes through draw.Over, so text stays readable on top of a
-// panel.
+// has at GUI scale one. A glyph that carries colours of its own is drawn as its colour times the text
+// colour, so a pack's coloured icon keeps its tint instead of turning into a solid block. Every write
+// goes through draw.Over, so text stays readable on top of a panel.
 func (g *Glyph) Draw(dst *image.RGBA, x, top, scale int, foreground color.RGBA) {
 	if dst == nil {
 		return
@@ -131,7 +141,7 @@ func (g *Glyph) Draw(dst *image.RGBA, x, top, scale int, foreground color.RGBA) 
 			if coverage == 0 {
 				continue
 			}
-			ink := foreground
+			ink := modulate(g.inkAt(column, row), foreground)
 			if coverage < 4 {
 				ink.A = uint8(int(foreground.A) * coverage / 4)
 			}
@@ -144,14 +154,47 @@ func (g *Glyph) Draw(dst *image.RGBA, x, top, scale int, foreground color.RGBA) 
 	}
 }
 
+// inkAt answers the colour of one font pixel, white when the glyph paints none: a blank pixel and
+// the column a bold glyph widens past its own box both fall back to the text colour.
+func (g *Glyph) inkAt(column, row int) uint32 {
+	if g.ink == nil || row < 0 || row >= g.Height {
+		return 0xFFFFFF
+	}
+	source := column
+	if column < 0 || column >= g.Width || g.coverage[row*g.Width+column] == 0 {
+		source = column - 1
+	}
+	if source < 0 || source >= g.Width {
+		return 0xFFFFFF
+	}
+	if value := g.ink[row*g.Width+source]; value != 0 {
+		return value
+	}
+	return 0xFFFFFF
+}
+
+// modulate multiplies the colour of one glyph pixel into the text colour, which is how the client
+// draws a sheet that ships colours of its own: a white pixel takes the text colour as it is, and a
+// coloured one keeps its hue at the brightness the text colour allows.
+func modulate(texel uint32, foreground color.RGBA) color.RGBA {
+	if texel == 0xFFFFFF {
+		return foreground
+	}
+	foreground.R = uint8(uint32(foreground.R) * (texel >> 16 & 0xFF) / 255)
+	foreground.G = uint8(uint32(foreground.G) * (texel >> 8 & 0xFF) / 255)
+	foreground.B = uint8(uint32(foreground.B) * (texel & 0xFF) / 255)
+	return foreground
+}
+
 // drawTexels resamples the native texel grid at the drawn resolution: every device pixel answers the
-// share of its own area that lit texels cover. At scale == texelScale each texel lands on exactly one
-// pixel, so the glyph is the bitmap the font ships; a scale between two texel multiples is averaged
-// once, at the resolution it is painted at, instead of magnifying the average taken at font pixel
-// resolution.
+// share of its own area that lit texels cover, and — when the glyph carries colours of its own — the
+// colour of that share as well. At scale == texelScale each texel lands on exactly one pixel, so the
+// glyph is the bitmap the font ships; a scale between two texel multiples is averaged once, at the
+// resolution it is painted at, instead of magnifying the average taken at font pixel resolution.
 func (g *Glyph) drawTexels(dst *image.RGBA, x, top, scale int, foreground color.RGBA) {
 	span := g.texelScale / float64(scale)
 	area := span * span
+	tinted := g.ink != nil
 	bounds := dst.Bounds()
 	width, height := g.Width*scale, g.Height*scale
 	for row := 0; row < height; row++ {
@@ -161,6 +204,7 @@ func (g *Glyph) drawTexels(dst *image.RGBA, x, top, scale int, foreground color.
 			columnLow := float64(column) * span
 			columnHigh := columnLow + span
 			lit := 0.0
+			var red, green, blue float64
 			for texelRow := max(0, int(math.Floor(rowLow))); texelRow < min(g.texelHeight, int(math.Ceil(rowHigh))); texelRow++ {
 				rowWeight := math.Min(rowHigh, float64(texelRow+1)) - math.Max(rowLow, float64(texelRow))
 				if rowWeight <= 0 {
@@ -172,8 +216,16 @@ func (g *Glyph) drawTexels(dst *image.RGBA, x, top, scale int, foreground color.
 					if columnWeight <= 0 {
 						continue
 					}
-					if ink := g.texels[base+texelColumn] >> 24; ink != 0 {
-						lit += columnWeight * rowWeight * float64(ink) / 255
+					texel := g.texels[base+texelColumn]
+					weight := columnWeight * rowWeight * float64(texel>>24) / 255
+					if weight <= 0 {
+						continue
+					}
+					lit += weight
+					if tinted {
+						red += weight * float64(texel>>16&0xFF)
+						green += weight * float64(texel>>8&0xFF)
+						blue += weight * float64(texel&0xFF)
 					}
 				}
 			}
@@ -185,6 +237,10 @@ func (g *Glyph) drawTexels(dst *image.RGBA, x, top, scale int, foreground color.
 				alpha = 255
 			}
 			ink := foreground
+			if tinted {
+				texel := uint32(math.Round(red/lit))<<16 | uint32(math.Round(green/lit))<<8 | uint32(math.Round(blue/lit))
+				ink = modulate(texel, foreground)
+			}
 			ink.A = uint8(int(foreground.A) * alpha / 255)
 			rect := image.Rect(x+column, top+row, x+column+1, top+row+1).Intersect(bounds)
 			if rect.Empty() {
@@ -541,14 +597,28 @@ func (p *bitmapProviderData) read(r rune, originX, originY int) *Glyph {
 	}
 	if p.scale == 1 {
 		coverage := make([]uint8, trimmed*p.cellHeight)
+		ink := make([]uint32, trimmed*p.cellHeight)
+		tinted := false
 		for row := 0; row < p.cellHeight; row++ {
 			for column := 0; column < trimmed; column++ {
-				if p.pixel(originX+column, originY+row) {
-					coverage[row*trimmed+column] = 4
+				texel := p.texel(originX+column, originY+row)
+				if texel == 0 {
+					continue
+				}
+				coverage[row*trimmed+column] = 4
+				ink[row*trimmed+column] = texel & 0xFFFFFF
+				if texel&0xFFFFFF != 0xFFFFFF {
+					tinted = true
 				}
 			}
 		}
-		return &Glyph{Advance: p.advance(r, trimmed), Ascent: p.ascent, Width: trimmed, Height: p.cellHeight, coverage: coverage}
+		if !tinted {
+			// A white sheet is drawn in the text colour, which is every vanilla sheet: the glyph keeps
+			// no colour table at all then.
+			ink = nil
+		}
+		return &Glyph{Advance: p.advance(r, trimmed), Ascent: p.ascent, Width: trimmed, Height: p.cellHeight,
+			coverage: coverage, ink: ink}
 	}
 	texels := make([]uint32, trimmed*p.cellHeight)
 	for row := 0; row < p.cellHeight; row++ {
@@ -557,17 +627,20 @@ func (p *bitmapProviderData) read(r rune, originX, originY int) *Glyph {
 		}
 	}
 	width := int(math.Ceil(float64(trimmed) / p.scale))
-	coverage := resampleTexels(texels, trimmed, p.cellHeight, width, p.height, p.scale)
-	return &Glyph{Advance: p.advance(r, width), Ascent: p.ascent, Width: width, Height: p.height, coverage: coverage,
-		texels: texels, texelWidth: trimmed, texelHeight: p.cellHeight, texelScale: p.scale}
+	coverage, ink := resampleTexels(texels, trimmed, p.cellHeight, width, p.height, p.scale)
+	return &Glyph{Advance: p.advance(r, width), Ascent: p.ascent, Width: width, Height: p.height,
+		coverage: coverage, ink: ink, texels: texels, texelWidth: trimmed, texelHeight: p.cellHeight, texelScale: p.scale}
 }
 
 // resampleTexels box filters a texel cell into the coverage of one font pixel per box pixel, in
 // quarters: a box pixel answers the share of its own area that inked texels cover, and the part of
 // the box that reaches past the trimmed cell counts as empty. At a scale of two a two by two texel
-// block therefore lands exactly on one pixel of the halved glyph.
-func resampleTexels(texels []uint32, texelWidth, texelHeight, width, height int, scale float64) []uint8 {
+// block therefore lands exactly on one pixel of the halved glyph. The colour of each box pixel is the
+// inked share's average, or nil for the whole glyph when the cell is pure white.
+func resampleTexels(texels []uint32, texelWidth, texelHeight, width, height int, scale float64) ([]uint8, []uint32) {
 	coverage := make([]uint8, width*height)
+	ink := make([]uint32, width*height)
+	tinted := false
 	area := scale * scale
 	for row := 0; row < height; row++ {
 		rowLow := float64(row) * scale
@@ -576,6 +649,7 @@ func resampleTexels(texels []uint32, texelWidth, texelHeight, width, height int,
 			columnLow := float64(column) * scale
 			columnHigh := columnLow + scale
 			lit := 0.0
+			var red, green, blue float64
 			for texelRow := max(0, int(math.Floor(rowLow))); texelRow < min(texelHeight, int(math.Ceil(rowHigh))); texelRow++ {
 				rowWeight := math.Min(rowHigh, float64(texelRow+1)) - math.Max(rowLow, float64(texelRow))
 				if rowWeight <= 0 {
@@ -584,17 +658,35 @@ func resampleTexels(texels []uint32, texelWidth, texelHeight, width, height int,
 				base := texelRow * texelWidth
 				for texelColumn := max(0, int(math.Floor(columnLow))); texelColumn < min(texelWidth, int(math.Ceil(columnHigh))); texelColumn++ {
 					columnWeight := math.Min(columnHigh, float64(texelColumn+1)) - math.Max(columnLow, float64(texelColumn))
-					if columnWeight > 0 && texels[base+texelColumn]>>24 != 0 {
-						lit += columnWeight * rowWeight
+					if columnWeight <= 0 {
+						continue
 					}
+					texel := texels[base+texelColumn]
+					weight := columnWeight * rowWeight * float64(texel>>24) / 255
+					if weight <= 0 {
+						continue
+					}
+					lit += weight
+					red += weight * float64(texel>>16&0xFF)
+					green += weight * float64(texel>>8&0xFF)
+					blue += weight * float64(texel&0xFF)
 				}
 			}
-			if lit > 0 {
-				coverage[row*width+column] = uint8(math.Min(4, math.Round(lit/area*4)))
+			if lit <= 0 {
+				continue
+			}
+			coverage[row*width+column] = uint8(math.Min(4, math.Round(lit/area*4)))
+			colour := uint32(math.Round(red/lit))<<16 | uint32(math.Round(green/lit))<<8 | uint32(math.Round(blue/lit))
+			ink[row*width+column] = colour
+			if colour != 0xFFFFFF {
+				tinted = true
 			}
 		}
 	}
-	return coverage
+	if !tinted {
+		ink = nil
+	}
+	return coverage, ink
 }
 
 func (p *bitmapProviderData) advance(r rune, width int) int {

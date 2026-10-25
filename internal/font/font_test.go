@@ -519,3 +519,87 @@ func TestScaledBitmapGlyphDrawsAtItsDeclaredSize(t *testing.T) {
 		t.Fatalf("the four times glyph paints past its box")
 	}
 }
+
+// A sheet that ships colours of its own keeps them: every drawn pixel is its colour times the text
+// colour, which is what the client's texture modulation does. White pixels therefore take the text
+// colour and a red button stays red instead of becoming a flat block.
+func TestBitmapGlyphKeepsItsOwnColours(t *testing.T) {
+	paint := func(x, y int) color.RGBA {
+		if x < 4 {
+			return color.RGBA{244, 64, 64, 255}
+		}
+		return color.RGBA{255, 255, 255, 255}
+	}
+	glyph := Load([]string{scaledRoot(t, 8, 8, map[string]any{}, paint)}).Glyph(scaledRune)
+	if glyph.ink == nil {
+		t.Fatal("the coloured sheet lost its colour table")
+	}
+	canvas := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	glyph.Draw(canvas, 0, 0, 2, color.RGBA{255, 255, 255, 255})
+	if red, green, blue, _ := canvas.At(2, 2).RGBA(); red>>8 != 244 || green>>8 != 64 || blue>>8 != 64 {
+		t.Fatalf("the red half drew %d,%d,%d under a white text colour", red>>8, green>>8, blue>>8)
+	}
+	if red, green, blue, _ := canvas.At(12, 2).RGBA(); red>>8 != 255 || green>>8 != 255 || blue>>8 != 255 {
+		t.Fatalf("the white half drew %d,%d,%d under a white text colour", red>>8, green>>8, blue>>8)
+	}
+}
+
+// The text colour scales the glyph colour: a red label darkens the white half to red and keeps the
+// red half red, never a second flat colour.
+func TestBitmapGlyphColourFollowsTheTextColour(t *testing.T) {
+	paint := func(x, y int) color.RGBA {
+		if x < 4 {
+			return color.RGBA{244, 64, 64, 255}
+		}
+		return color.RGBA{255, 255, 255, 255}
+	}
+	glyph := Load([]string{scaledRoot(t, 8, 8, map[string]any{}, paint)}).Glyph(scaledRune)
+	canvas := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	glyph.Draw(canvas, 0, 0, 2, color.RGBA{255, 0, 0, 255})
+	if red, green, blue, _ := canvas.At(2, 2).RGBA(); red>>8 != 244 || green>>8 != 0 || blue>>8 != 0 {
+		t.Fatalf("the red half under a red text colour drew %d,%d,%d", red>>8, green>>8, blue>>8)
+	}
+	if red, green, blue, _ := canvas.At(12, 2).RGBA(); red>>8 != 255 || green>>8 != 0 || blue>>8 != 0 {
+		t.Fatalf("the white half under a red text colour drew %d,%d,%d", red>>8, green>>8, blue>>8)
+	}
+}
+
+// A pure white sheet keeps no colour table, so the whole glyph stays the text colour — the vanilla
+// sheets and every label of the game.
+func TestWhiteBitmapGlyphUsesTheTextColour(t *testing.T) {
+	glyph := Load([]string{scaledRoot(t, 8, 8, map[string]any{}, nil)}).Glyph(scaledRune)
+	if glyph.ink != nil {
+		t.Fatal("a white sheet allocated a colour table")
+	}
+	canvas := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	glyph.Draw(canvas, 0, 0, 1, color.RGBA{0, 255, 0, 255})
+	if red, green, blue, _ := canvas.At(0, 0).RGBA(); red>>8 != 0 || green>>8 != 255 || blue>>8 != 0 {
+		t.Fatalf("the white glyph drew %d,%d,%d instead of the text colour", red>>8, green>>8, blue>>8)
+	}
+}
+
+// A halved coloured glyph averages the colour of the texels behind each box pixel, so the two times
+// resolution icon of an ItemsAdder pack keeps its red button at half its cell size.
+func TestScaledBitmapGlyphKeepsItsColours(t *testing.T) {
+	paint := func(x, y int) color.RGBA {
+		if x < 8 {
+			return color.RGBA{244, 64, 64, 255}
+		}
+		return color.RGBA{255, 255, 255, 255}
+	}
+	glyph := Load([]string{scaledRoot(t, 16, 16, map[string]any{"height": 8}, paint)}).Glyph(scaledRune)
+	if glyph.Width != 8 || glyph.Height != 8 {
+		t.Fatalf("glyph = %+v, want the halved eight pixel box", glyph)
+	}
+	if glyph.ink == nil {
+		t.Fatal("the halved coloured glyph lost its colour table")
+	}
+	canvas := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	glyph.Draw(canvas, 0, 0, 1, color.RGBA{255, 255, 255, 255})
+	if red, green, blue, _ := canvas.At(0, 0).RGBA(); red>>8 != 244 || green>>8 != 64 || blue>>8 != 64 {
+		t.Fatalf("the halved red half drew %d,%d,%d", red>>8, green>>8, blue>>8)
+	}
+	if red, green, blue, _ := canvas.At(7, 0).RGBA(); red>>8 != 255 || green>>8 != 255 || blue>>8 != 255 {
+		t.Fatalf("the halved white half drew %d,%d,%d", red>>8, green>>8, blue>>8)
+	}
+}

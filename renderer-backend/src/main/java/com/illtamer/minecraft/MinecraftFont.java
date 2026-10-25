@@ -46,6 +46,10 @@ import java.util.zip.ZipInputStream;
  * the half scale of the {@code unihex} provider leaves most CJK edges covering only one or two of
  * their four texels, and keeping those as greys is what stops Chinese labels from turning into blocks
  * of solid ink.</p>
+ *
+ * <p>The colour of each pixel is kept as well. Every drawn pixel is the colour of the sheet times the
+ * text colour, the modulation the client's font shader does: the vanilla sheets are pure white and
+ * answer the text colour, while an icon a resource pack ships with colours of its own keeps them.</p>
  */
 final class MinecraftFont {
     /** The line ascent every provider aligns to, {@code fwq.a} in the client. */
@@ -505,37 +509,51 @@ final class MinecraftFont {
             }
             if (scale == 1.0) {
                 byte[] coverage = new byte[trimmed * cellHeight];
+                int[] ink = new int[trimmed * cellHeight];
+                boolean tinted = false;
                 for (int row = 0; row < cellHeight; row++) {
                     for (int column = 0; column < trimmed; column++) {
-                        if (pixel(originX + column, originY + row)) {
-                            coverage[row * trimmed + column] = 4;
+                        int texel = texel(originX + column, originY + row);
+                        if (texel == 0) {
+                            continue;
                         }
+                        coverage[row * trimmed + column] = 4;
+                        ink[row * trimmed + column] = texel & 0xFFFFFF;
+                        tinted |= (texel & 0xFFFFFF) != 0xFFFFFF;
                     }
                 }
-                return new Glyph(advanceOf(codePoint, trimmed), ascent, trimmed, cellHeight, coverage);
+                // A white sheet is drawn in the text colour, which is every vanilla sheet: such a
+                // glyph keeps no colour table at all.
+                return new Glyph(advanceOf(codePoint, trimmed), ascent, trimmed, cellHeight, coverage,
+                        tinted ? ink : null);
             }
             int[] texels = new int[trimmed * cellHeight];
             for (int row = 0; row < cellHeight; row++) {
                 for (int column = 0; column < trimmed; column++) {
-                    if (pixel(originX + column, originY + row)) {
-                        texels[row * trimmed + column] = sheet.getRGB(originX + column, originY + row);
-                    }
+                    texels[row * trimmed + column] = texel(originX + column, originY + row);
                 }
             }
             int width = (int) Math.ceil(trimmed / scale);
-            byte[] coverage = resample(texels, trimmed, cellHeight, width, glyphHeight, scale);
-            return new Glyph(advanceOf(codePoint, width), ascent, width, glyphHeight, coverage,
-                    texels, trimmed, cellHeight, scale);
+            Resampled resampled = resample(texels, trimmed, cellHeight, width, glyphHeight, scale);
+            return new Glyph(advanceOf(codePoint, width), ascent, width, glyphHeight, resampled.coverage(),
+                    resampled.ink(), texels, trimmed, cellHeight, scale);
         }
+
+        /** The coverage and colour of a resampled glyph box. */
+        private record Resampled(byte[] coverage, int[] ink) {}
 
         /**
          * Box filters the texel cell into the coverage of one font pixel per box pixel, in quarters:
          * a box pixel answers the share of its own area that inked texels cover, and the part of the
          * box that reaches past the trimmed cell counts as empty. At a scale of two a two by two texel
-         * block therefore lands exactly on one pixel of the halved glyph.
+         * block therefore lands exactly on one pixel of the halved glyph. The colour of each box pixel
+         * is the inked share's average, and the colour table is dropped entirely when the cell is
+         * pure white.
          */
-        private static byte[] resample(int[] texels, int texelWidth, int texelHeight, int width, int height, double scale) {
+        private static Resampled resample(int[] texels, int texelWidth, int texelHeight, int width, int height, double scale) {
             byte[] coverage = new byte[width * height];
+            int[] ink = new int[width * height];
+            boolean tinted = false;
             double area = scale * scale;
             for (int row = 0; row < height; row++) {
                 double rowLow = row * scale;
@@ -548,6 +566,9 @@ final class MinecraftFont {
                     int firstColumn = Math.max(0, (int) Math.floor(columnLow));
                     int lastColumn = Math.min(texelWidth, (int) Math.ceil(columnHigh));
                     double lit = 0;
+                    double red = 0;
+                    double green = 0;
+                    double blue = 0;
                     for (int texelRow = firstRow; texelRow < lastRow; texelRow++) {
                         double rowWeight = Math.min(rowHigh, texelRow + 1) - Math.max(rowLow, texelRow);
                         if (rowWeight <= 0) {
@@ -555,17 +576,32 @@ final class MinecraftFont {
                         }
                         for (int texelColumn = firstColumn; texelColumn < lastColumn; texelColumn++) {
                             double columnWeight = Math.min(columnHigh, texelColumn + 1) - Math.max(columnLow, texelColumn);
-                            if (columnWeight > 0 && (texels[texelRow * texelWidth + texelColumn] >>> 24) != 0) {
-                                lit += columnWeight * rowWeight;
+                            if (columnWeight <= 0) {
+                                continue;
                             }
+                            int texel = texels[texelRow * texelWidth + texelColumn];
+                            double weight = columnWeight * rowWeight * (texel >>> 24) / 255.0;
+                            if (weight <= 0) {
+                                continue;
+                            }
+                            lit += weight;
+                            red += weight * (texel >> 16 & 0xFF);
+                            green += weight * (texel >> 8 & 0xFF);
+                            blue += weight * (texel & 0xFF);
                         }
                     }
-                    if (lit > 0) {
-                        coverage[row * width + column] = (byte) Math.min(4, Math.round(lit / area * 4));
+                    if (lit <= 0) {
+                        continue;
                     }
+                    coverage[row * width + column] = (byte) Math.min(4, Math.round(lit / area * 4));
+                    int colour = (int) Math.round(red / lit) << 16
+                            | (int) Math.round(green / lit) << 8
+                            | (int) Math.round(blue / lit);
+                    ink[row * width + column] = colour;
+                    tinted |= colour != 0xFFFFFF;
                 }
             }
-            return coverage;
+            return new Resampled(coverage, tinted ? ink : null);
         }
 
         private int advanceOf(int codePoint, int width) {
@@ -574,10 +610,20 @@ final class MinecraftFont {
         }
 
         private boolean pixel(int x, int y) {
+            return texel(x, y) != 0;
+        }
+
+        /**
+         * One texel of the sheet as straight (un premultiplied) {@code 0xAARRGGBB}, zero when it is
+         * blank: the colour table of a glyph is built from these, so a sheet that ships colours of its
+         * own keeps them.
+         */
+        private int texel(int x, int y) {
             if (x < 0 || y < 0 || x >= sheet.getWidth() || y >= sheet.getHeight()) {
-                return false;
+                return 0;
             }
-            return (sheet.getRGB(x, y) >>> 24) != 0;
+            int argb = sheet.getRGB(x, y);
+            return (argb >>> 24) == 0 ? 0 : argb;
         }
     }
 
@@ -670,7 +716,7 @@ final class MinecraftFont {
                     }
                 }
             }
-            return new Glyph(texels / 2 + 1, ASCENT, width, CELL, coverage, grid, texels, rows, 2);
+            return new Glyph(texels / 2 + 1, ASCENT, width, CELL, coverage, null, grid, texels, rows, 2);
         }
 
         private int[] overrideOf(int codePoint) {
@@ -701,6 +747,14 @@ final class MinecraftFont {
          */
         private final byte[] coverage;
         /**
+         * The colour of each font pixel as {@code 0xRRGGBB}, or null when the glyph paints its whole
+         * box white — every vanilla sheet and every {@code unihex} glyph. A drawn pixel is that colour
+         * times the text colour, which is how the client draws a sheet that ships colours of its own:
+         * a white pixel takes the text colour as it is, and a coloured one keeps its hue at the
+         * brightness that colour allows.
+         */
+        private final int[] ink;
+        /**
          * The native texel rows of the glyph as {@code 0xAARRGGBB}, or null when the glyph has no
          * resolution above its own pixels. A {@code unihex} glyph is two texels per font pixel and a
          * {@code bitmap} glyph whose sheet cell is taller than its declared height can be anything
@@ -716,16 +770,21 @@ final class MinecraftFont {
         private final double texelScale;
 
         Glyph(int advance, int ascent, int width, int height, byte[] coverage) {
-            this(advance, ascent, width, height, coverage, null, 0, 0, 0);
+            this(advance, ascent, width, height, coverage, null);
         }
 
-        Glyph(int advance, int ascent, int width, int height, byte[] coverage,
+        Glyph(int advance, int ascent, int width, int height, byte[] coverage, int[] ink) {
+            this(advance, ascent, width, height, coverage, ink, null, 0, 0, 0);
+        }
+
+        Glyph(int advance, int ascent, int width, int height, byte[] coverage, int[] ink,
               int[] texels, int texelWidth, int texelHeight, double texelScale) {
             this.advance = advance;
             this.ascent = ascent;
             this.width = width;
             this.height = height;
             this.coverage = coverage;
+            this.ink = ink;
             this.texels = texels;
             this.texelWidth = texelWidth;
             this.texelHeight = texelHeight;
@@ -800,7 +859,9 @@ final class MinecraftFont {
         /**
          * The half scale look: one averaged pixel per font pixel, run length merged, an italic glyph
          * sheared a quarter pixel per pixel of height and a partly covered pixel composited with a
-         * matching alpha.
+         * matching alpha. A glyph that carries colours of its own is painted pixel by pixel instead,
+         * each one that colour times the text colour, because two neighbours of the same coverage can
+         * still differ in hue.
          */
         private void drawCoverage(Graphics2D graphics, int x, int top, int scale, int rgb, boolean italic, boolean bold) {
             Color[] palette = new Color[5];
@@ -812,6 +873,17 @@ final class MinecraftFont {
             int columns = width + (bold ? 1 : 0);
             for (int row = 0; row < height; row++) {
                 int shear = italic ? Math.round((ascent - row) * 0.25F * scale) : 0;
+                if (ink != null) {
+                    for (int column = 0; column < columns; column++) {
+                        int coverage = level(column, row, bold);
+                        if (coverage == 0) {
+                            continue;
+                        }
+                        graphics.setColor(new Color(modulate(inkAt(column, row), rgb) | coverage * 255 / 4 << 24, true));
+                        graphics.fillRect(x + column * scale + shear, top + row * scale, scale, scale);
+                    }
+                    continue;
+                }
                 int column = 0;
                 while (column < columns) {
                     int coverage = level(column, row, bold);
@@ -828,6 +900,41 @@ final class MinecraftFont {
                     column = run;
                 }
             }
+        }
+
+        /**
+         * The colour this pixel carries, {@code 0xFFFFFF} when the glyph paints none: a blank pixel and
+         * the column a bold glyph widens past its own box both fall back to the text colour, the wide
+         * column taking the hue of the pixel it repeats.
+         */
+        private int inkAt(int column, int row) {
+            if (ink == null || row < 0 || row >= height) {
+                return 0xFFFFFF;
+            }
+            int source = column;
+            if (column < 0 || column >= width || coverage(column, row) == 0) {
+                source = column - 1;
+            }
+            if (source < 0 || source >= width) {
+                return 0xFFFFFF;
+            }
+            int value = ink[row * width + source];
+            return value == 0 ? 0xFFFFFF : value;
+        }
+
+        /**
+         * Multiplies the colour of one glyph pixel into the text colour, which is how the client draws
+         * a sheet that ships colours of its own: a white pixel takes the text colour as it is, and a
+         * coloured one keeps its hue at the brightness the text colour allows.
+         */
+        static int modulate(int texel, int rgb) {
+            if (texel == 0xFFFFFF) {
+                return rgb;
+            }
+            int red = ((rgb >> 16 & 0xFF) * (texel >> 16 & 0xFF)) / 255;
+            int green = ((rgb >> 8 & 0xFF) * (texel >> 8 & 0xFF)) / 255;
+            int blue = ((rgb & 0xFF) * (texel & 0xFF)) / 255;
+            return red << 16 | green << 8 | blue;
         }
 
         /**
@@ -859,13 +966,22 @@ final class MinecraftFont {
             double span = texelScale / deviceScale;
             double step = (double) layoutScale / deviceScale;
             double area = span * span;
-            double[] ink = new double[deviceWidth];
+            boolean tinted = ink != null;
+            double[] weights = new double[deviceWidth];
+            double[] reds = tinted ? new double[deviceWidth] : null;
+            double[] greens = tinted ? new double[deviceWidth] : null;
+            double[] blues = tinted ? new double[deviceWidth] : null;
             int[] alphas = new int[deviceWidth];
             Color[] palette = new Color[256];
             for (int row = 0; row < deviceHeight; row++) {
                 double rowLow = row * span;
                 double rowHigh = rowLow + span;
-                java.util.Arrays.fill(ink, 0);
+                java.util.Arrays.fill(weights, 0);
+                if (tinted) {
+                    java.util.Arrays.fill(reds, 0);
+                    java.util.Arrays.fill(greens, 0);
+                    java.util.Arrays.fill(blues, 0);
+                }
                 int firstRow = Math.max(0, (int) Math.floor(rowLow));
                 int lastRow = Math.min(texelHeight, (int) Math.ceil(rowHigh));
                 for (int texelRow = firstRow; texelRow < lastRow; texelRow++) {
@@ -878,6 +994,9 @@ final class MinecraftFont {
                         double columnLow = column * span;
                         double columnHigh = columnLow + span;
                         double lit = 0;
+                        double red = 0;
+                        double green = 0;
+                        double blue = 0;
                         int firstColumn = Math.max(0, (int) Math.floor(columnLow));
                         int lastColumn = Math.min(texelWidth, (int) Math.ceil(columnHigh));
                         for (int texelColumn = firstColumn; texelColumn < lastColumn; texelColumn++) {
@@ -885,18 +1004,30 @@ final class MinecraftFont {
                             if (columnWeight <= 0) {
                                 continue;
                             }
-                            int alpha = texels[base + texelColumn] >>> 24;
-                            if (alpha != 0) {
-                                lit += columnWeight * alpha / 255.0;
+                            int texel = texels[base + texelColumn];
+                            double weight = columnWeight * (texel >>> 24) / 255.0;
+                            if (weight <= 0) {
+                                continue;
+                            }
+                            lit += weight;
+                            if (tinted) {
+                                red += weight * (texel >> 16 & 0xFF);
+                                green += weight * (texel >> 8 & 0xFF);
+                                blue += weight * (texel & 0xFF);
                             }
                         }
                         if (lit > 0) {
-                            ink[column] += lit * rowWeight;
+                            weights[column] += lit * rowWeight;
+                            if (tinted) {
+                                reds[column] += red * rowWeight;
+                                greens[column] += green * rowWeight;
+                                blues[column] += blue * rowWeight;
+                            }
                         }
                     }
                 }
                 for (int column = 0; column < deviceWidth; column++) {
-                    alphas[column] = ink[column] <= 0 ? 0 : (int) Math.min(255, Math.round(ink[column] / area * 255));
+                    alphas[column] = weights[column] <= 0 ? 0 : (int) Math.min(255, Math.round(weights[column] / area * 255));
                 }
                 if (bold) {
                     // Grow the ink one font pixel to the right on the device grid, exactly like the
@@ -907,6 +1038,27 @@ final class MinecraftFont {
                     }
                 }
                 double shear = italic ? Math.round((ascent * deviceScale - row) * 0.25F) * step : 0;
+                if (tinted) {
+                    // Two neighbours of the same coverage can differ in hue, so a coloured glyph is
+                    // painted pixel by pixel, its colour the inked share's average.
+                    for (int column = 0; column < deviceWidth; column++) {
+                        int alpha = alphas[column];
+                        if (alpha == 0) {
+                            continue;
+                        }
+                        int source = weights[column] > 0 ? column : column - 1;
+                        double total = source < 0 ? 0 : weights[source];
+                        if (total <= 0) {
+                            continue;
+                        }
+                        int texel = (int) Math.round(reds[source] / total) << 16
+                                | (int) Math.round(greens[source] / total) << 8
+                                | (int) Math.round(blues[source] / total);
+                        graphics.setColor(new Color(modulate(texel, rgb) | alpha << 24, true));
+                        graphics.fill(new Rectangle2D.Double(x + column * step + shear, top + row * step, step, step));
+                    }
+                    continue;
+                }
                 int column = 0;
                 while (column < deviceWidth) {
                     int alpha = alphas[column];
