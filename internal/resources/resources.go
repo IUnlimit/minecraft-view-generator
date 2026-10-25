@@ -869,68 +869,6 @@ func pathWithin(root, target string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// validatePackMetadata reads pack.mcmeta and answers the pack format it declares. A pack whose
-// declared formats are outside the range this renderer understands is refused, which keeps an
-// incompatible archive from silently replacing part of the vanilla tree.
-func validatePackMetadata(root string) (int, error) {
-	metadataPath := filepath.Join(root, "pack.mcmeta")
-	data, err := os.ReadFile(metadataPath)
-	if err != nil {
-		return 0, fmt.Errorf("pack.mcmeta is required: %w", err)
-	}
-	var metadata struct {
-		Pack struct {
-			PackFormat      *int            `json:"pack_format"`
-			MaxFormat       *int            `json:"max_format"`
-			MinFormat       json.RawMessage `json:"min_format"`
-			SupportedFormat *struct {
-				Min int `json:"min_inclusive"`
-				Max int `json:"max_inclusive"`
-			} `json:"supported_formats"`
-		} `json:"pack"`
-	}
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		return 0, fmt.Errorf("invalid pack.mcmeta: %w", err)
-	}
-	format := 0
-	if metadata.Pack.PackFormat != nil {
-		if *metadata.Pack.PackFormat < 1 || *metadata.Pack.PackFormat > 100 {
-			return 0, fmt.Errorf("pack_format %d is incompatible with Minecraft 1.21.11", *metadata.Pack.PackFormat)
-		}
-		format = *metadata.Pack.PackFormat
-	}
-	if metadata.Pack.MaxFormat != nil {
-		if *metadata.Pack.MaxFormat < 1 || *metadata.Pack.MaxFormat > 100 {
-			return 0, fmt.Errorf("max_format %d is incompatible with Minecraft 1.21.11", *metadata.Pack.MaxFormat)
-		}
-		if format == 0 {
-			format = *metadata.Pack.MaxFormat
-		}
-	}
-	if len(metadata.Pack.MinFormat) > 0 {
-		var min int
-		if json.Unmarshal(metadata.Pack.MinFormat, &min) != nil {
-			var tuple []int
-			if err := json.Unmarshal(metadata.Pack.MinFormat, &tuple); err != nil || len(tuple) == 0 {
-				return 0, fmt.Errorf("min_format is incompatible with Minecraft 1.21.11")
-			}
-			min = tuple[0]
-		}
-		if min < 1 || min > 100 {
-			return 0, fmt.Errorf("min_format %d is incompatible with Minecraft 1.21.11", min)
-		}
-	}
-	if supported := metadata.Pack.SupportedFormat; supported != nil {
-		if supported.Min < 1 || supported.Max < supported.Min || supported.Min > 100 {
-			return 0, fmt.Errorf("supported_formats is incompatible with Minecraft 1.21.11")
-		}
-		if format == 0 {
-			format = supported.Max
-		}
-	}
-	return format, nil
-}
-
 // Version manifest and asset metadata mirror Mojang's public JSON formats.
 type VersionManifest struct {
 	Versions []VersionEntry `json:"versions"`

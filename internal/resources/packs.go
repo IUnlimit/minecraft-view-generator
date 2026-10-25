@@ -431,17 +431,23 @@ func (s *packStore) prepare(name, path string, addedAt time.Time) packEntry {
 		entry.err = countErr.Error()
 		return entry
 	}
-	format, formatErr := validatePackMetadata(root)
-	if formatErr != nil {
+	metadata, metadataErr := readPackMetadata(root)
+	if metadataErr != nil {
 		// A pack the client would refuse is left out of the stack; its unzipped tree is removed so the
 		// next scan starts from the archive again.
-		entry.err = formatErr.Error()
+		entry.err = metadataErr.Error()
+		_ = os.RemoveAll(root)
+		return entry
+	}
+	if !metadata.compatible() {
+		min, max := metadata.formatRange()
+		entry.err = fmt.Sprintf("pack format %d-%d is incompatible with Minecraft 1.21.11 (format %d)", min, max, clientPackFormat)
 		_ = os.RemoveAll(root)
 		return entry
 	}
 	entry.root = root
 	entry.files = files
-	entry.format = format
+	entry.format = metadata.packFormat()
 	entry.status = PackLoaded
 	return entry
 }
