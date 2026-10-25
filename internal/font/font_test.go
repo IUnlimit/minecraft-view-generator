@@ -317,15 +317,25 @@ func TestReferenceInlinesAnotherDefinition(t *testing.T) {
 	}
 }
 
-// A later root overrides an earlier one, so a resource pack may ship its own default definition.
-func TestLaterRootOverridesTheDefinition(t *testing.T) {
+// A later root wins over an earlier one, and a definition is merged across the stack instead of
+// being replaced by the winning copy: a pack that ships only its own providers keeps the ascii
+// sheet and the reference chain of the base tree below it, which is what makes an ItemsAdder font
+// pack — a default.json of its own bitmap providers, no includes at all — keep drawing.
+func TestLaterRootMergesTheDefinition(t *testing.T) {
 	base := fixtureRoot(t)
 	pack := t.TempDir()
 	writeJSON(t, filepath.Join(pack, "assets/minecraft/font/default.json"), map[string]any{
 		"providers": []any{map[string]any{"type": "space", "advances": map[string]any{" ": 7}}},
 	})
-	if width := Load([]string{base, pack}).Width(" "); width != 7 {
+	stacked := Load([]string{base, pack})
+	if width := stacked.Width(" "); width != 7 {
 		t.Fatalf("width of the packed space = %d, want 7", width)
+	}
+	if glyph := stacked.Glyph('A'); glyph.Width != 6 || glyph.Advance != 7 {
+		t.Fatalf("glyph = %+v, want the 6x8 cell of the base sheet", glyph)
+	}
+	if width := stacked.Width("\u2007"); width != 5 {
+		t.Fatalf("width of the referenced space = %d, want the base reference chain", width)
 	}
 	if width := Load([]string{base}).Width(" "); width != 4 {
 		t.Fatalf("width of the vanilla space = %d, want 4", width)

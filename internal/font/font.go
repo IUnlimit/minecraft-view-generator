@@ -190,15 +190,22 @@ type Font struct {
 }
 
 // Load reads the default font of a resource context. Roots follow the pack order of the renderer:
-// a later root overrides an earlier one, so resource packs win over the vanilla tree.
+// a later root wins over an earlier one.
+//
+// The definition itself is merged across the stack, like the client merges it: every root that
+// ships assets/minecraft/font/default.json contributes its providers, the highest priority root
+// first and the base tree last. A pack that replaces the definition with a provider list of its own
+// therefore adds glyphs instead of having to copy the vanilla includes.
 func Load(roots []string) *Font {
 	font := &Font{glyphs: map[rune]*Glyph{}, missing: map[rune]bool{}}
-	data, ok := readFile(roots, definitionPath)
-	if !ok {
+	copies := readFiles(roots, definitionPath)
+	if len(copies) == 0 {
 		report("missing %s, every glyph falls back to the missing glyph", definitionPath)
 		return font
 	}
-	font.providers = readProviders(roots, definitionPath, data, 0)
+	for _, data := range copies {
+		font.providers = append(font.providers, readProviders(roots, definitionPath, data, 0)...)
+	}
 	return font
 }
 
@@ -305,12 +312,16 @@ func readProviders(roots []string, definition string, data []byte, depth int) []
 				report("font definition %s references itself, skipping it", definition)
 				continue
 			}
-			nestedData, ok := readFile(roots, nested)
-			if !ok {
+			nestedCopies := readFiles(roots, nested)
+			if len(nestedCopies) == 0 {
 				report("missing font definition %s, skipping it", nested)
 				continue
 			}
-			providers = append(providers, readProviders(roots, nested, nestedData, depth+1)...)
+			// A reference walks the stack like the definition it comes from, so a pack can include
+			// its own definition and still inherit the one underneath.
+			for _, nestedData := range nestedCopies {
+				providers = append(providers, readProviders(roots, nested, nestedData, depth+1)...)
+			}
 		case "space":
 			providers = append(providers, spaceProvider(entry))
 		case "bitmap":
@@ -720,10 +731,22 @@ func trailingZeros(value int32) int {
 // readFile reads a resource relative path from the pack roots, the last root winning the way the
 // renderer's own stack resolves overlaps.
 func readFile(roots []string, relative string) ([]byte, bool) {
-	if relative == "" || strings.HasPrefix(relative, "/") || strings.Contains(relative, "..") {
+	copies := readFiles(roots, relative)
+	if len(copies) == 0 {
 		return nil, false
 	}
+	return copies[0], true
+}
+
+// readFiles reads every copy of one relative path, the highest priority root first. A few resource
+// formats are cumulative on the client — the provider list of a font definition is the one this
+// package reads that way — so they have to see the whole stack instead of only the winning file.
+func readFiles(roots []string, relative string) [][]byte {
+	if relative == "" || strings.HasPrefix(relative, "/") || strings.Contains(relative, "..") {
+		return nil
+	}
 	clean := path.Clean(relative)
+	var files [][]byte
 	for index := len(roots) - 1; index >= 0; index-- {
 		if roots[index] == "" {
 			continue
@@ -737,9 +760,9 @@ func readFile(roots []string, relative string) ([]byte, bool) {
 		if err != nil {
 			continue
 		}
-		return data, true
+		files = append(files, data)
 	}
-	return nil, false
+	return files
 }
 
 // reported deduplicates the diagnostics so a broken pack is mentioned once per reason.

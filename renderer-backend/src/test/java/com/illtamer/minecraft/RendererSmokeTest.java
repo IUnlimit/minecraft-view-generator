@@ -50,6 +50,7 @@ public final class RendererSmokeTest {
         testCustomArt(renderer, root);
         testPackOverride(renderer, root);
         testModelPathWithoutPrefix(renderer, root);
+        testFontProviderStackMerge(root);
         testHdTextures(renderer, root);
         testAnimatedSprite(renderer, root);
         testFaceRotation(renderer, root);
@@ -58,7 +59,7 @@ public final class RendererSmokeTest {
         testBrokenPNGTexture(renderer, root);
         testAtlasSpriteAlias(renderer, root);
         testMissingResources(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/pack/model/resources/atlas paths passed");
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/pack/model/font/resources/atlas paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -683,6 +684,84 @@ public final class RendererSmokeTest {
         require(hasPixels(legacy), "a model under the legacy item/ prefix drew nothing");
         require(countColor(legacy, ColorKind.MISSING_MAGENTA) == 0,
                 "a model under the legacy item/ prefix fell back to the missing model");
+    }
+
+    /**
+     * The client merges a font definition across the pack stack. A pack that replaces {@code
+     * font/default.json} with nothing but its own providers — the shape an ItemsAdder pack has — still
+     * draws ASCII and CJK through the copies of the same definition below it, because every copy
+     * contributes its provider list in priority order instead of the top one replacing the rest.
+     * Reading the winning copy alone is what answered every label with the missing glyph.
+     */
+    private static void testFontProviderStackMerge(Path root) throws Exception {
+        Path pack = Files.createTempDirectory("renderer-font-merge");
+        PrintStream originalError = System.err;
+        ByteArrayOutputStream diagnostics = new ByteArrayOutputStream();
+        try {
+            writePrivateUseFontPack(pack);
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("operation", "tooltip");
+            request.put("resourceRoot", root.toString());
+            request.put("packRoots", List.of(pack.toString()));
+            request.put("tooltip", Map.of("title", "A\uE000\u4E2D"));
+            BufferedImage tooltip;
+            try {
+                System.setErr(new PrintStream(diagnostics, true, StandardCharsets.UTF_8));
+                // The font of a renderer belongs to the resource context it was loaded from, so a
+                // render with its own pack roots needs its own renderer, exactly like a request does.
+                tooltip = new Renderer().render(request);
+            } finally {
+                System.setErr(originalError);
+            }
+            String log = diagnostics.toString(StandardCharsets.UTF_8);
+            require(!log.contains("no font provider covers"),
+                    "the pack provider list replaced the copies below it instead of merging: " + log.trim());
+            // Six for the ASCII A from the ascii sheet, nine for the eight pixel cell of the pack and
+            // nine for the full width CJK cell of the unihex sheet, plus the twelve pixel padding on
+            // both sides of the tooltip.
+            require(tooltip.getWidth() == 6 + 9 + 9 + 24,
+                    "the merged provider chain measured the label differently: " + tooltip.getWidth());
+            require(countBright(tooltip, 0xFFFFFF) > 20, "the merged provider chain drew no ink");
+
+            Map<String, Object> stack = new LinkedHashMap<>();
+            stack.put("packRoots", List.of(pack.toString()));
+            MinecraftFont font = MinecraftFont.load(Renderer.ResourceStack.from(stack, root.toString()));
+            require(font.advance('A') == 6, "ASCII no longer comes from the copy below the pack: " + font.advance('A'));
+            require(font.advance('\u4E2D') == 9, "CJK no longer comes from the copy below the pack: " + font.advance('\u4E2D'));
+            MinecraftFont.Glyph privateUse = font.glyph('\uE000');
+            require(privateUse.width() == 8 && privateUse.height() == 8 && privateUse.ascent() == 7,
+                    "the private use glyph of the pack is not its own bitmap cell: "
+                            + privateUse.width() + "x" + privateUse.height() + " at " + privateUse.ascent());
+            require(font.advance('\uE000') == 9, "the private use glyph is not the one the pack declares");
+            require(privateUse.inked(0, 0) && privateUse.inked(7, 7),
+                    "the private use glyph does not carry the ink of its sheet cell");
+        } finally {
+            System.setErr(originalError);
+            deleteTree(pack);
+        }
+    }
+
+    /**
+     * Writes a pack whose {@code font/default.json} is one bitmap provider of its own and nothing
+     * else, the way an ItemsAdder pack replaces the vanilla definition without copying its includes.
+     * The sheet covers U+E000 only: ASCII and CJK have to keep coming from the stack below it.
+     */
+    private static void writePrivateUseFontPack(Path packRoot) throws Exception {
+        Path sheet = packRoot.resolve("assets/fixturepack/textures/font/private_use.png");
+        Files.createDirectories(sheet.getParent());
+        BufferedImage image = new BufferedImage(16, 8, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                image.setRGB(x, y, 0xFFFFFFFF);
+            }
+        }
+        ImageIO.write(image, "png", sheet.toFile());
+        Path definition = packRoot.resolve("assets/minecraft/font/default.json");
+        Files.createDirectories(definition.getParent());
+        Files.writeString(definition, "{\"providers\":[{\"type\":\"bitmap\","
+                + "\"file\":\"fixturepack:font/private_use.png\",\"ascent\":7,"
+                + "\"chars\":[\"\\uE000\"]}]}");
+        Files.writeString(packRoot.resolve("pack.mcmeta"), "{\"pack\":{\"pack_format\":46}}");
     }
 
     /** Whether two images of the same size differ in at least one opaque pixel. */

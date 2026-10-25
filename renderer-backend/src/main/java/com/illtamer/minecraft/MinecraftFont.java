@@ -27,6 +27,11 @@ import java.util.zip.ZipInputStream;
  * declaration order and the first hit wins, exactly like the client, so a Chinese character can
  * never fall through to a Latin sheet.</p>
  *
+ * <p>A definition is merged across the pack stack, again like the client: every copy the packs ship
+ * contributes its providers, the highest pack first and the vanilla jar last. A pack that replaces
+ * {@code default.json} with its own provider list therefore adds glyphs instead of having to copy
+ * the vanilla includes, which is what ItemsAdder packs rely on.</p>
+ *
  * <p>Metrics follow the client as well. Every provider sits on the seven pixel ascent the {@code
  * fwq} interface defines, bitmap glyphs are eight (or, for the accented sheet, twelve) pixels tall
  * starting at their own ascent, and a {@code unihex} glyph is sixteen texels drawn at half scale, so
@@ -127,9 +132,22 @@ final class MinecraftFont {
     // of its `chars` grid and a unihex provider reads a zipped Unifont .hex file.
     // -------------------------------------------------------------------------------------------
 
+    /**
+     * Every provider the stack declares for one font definition, highest priority pack first.
+     *
+     * <p>The client merges a definition across the pack stack instead of letting the winning pack
+     * replace it: each copy contributes its {@code providers} in turn, the highest pack first and the
+     * vanilla jar last. That is what makes a pack able to replace {@code default.json} with nothing
+     * but its own bitmap providers — an ItemsAdder pack does exactly that — while ASCII and CJK keep
+     * coming from the {@code include/default} and {@code include/unifont} references of the copies
+     * below it. Reading only the winning copy is what turned every label into empty boxes.</p>
+     *
+     * <p>{@code reference} recursion walks the stack the same way, so a pack can include its own
+     * definition and still inherit the vanilla one underneath.</p>
+     */
     private static List<Provider> readProviders(Renderer.ResourceStack resources, String definition, Set<String> options, int depth) throws IOException {
-        byte[] data = resources.bytes(definition);
-        if (data == null) {
+        List<byte[]> copies = resources.copies(definition);
+        if (copies.isEmpty()) {
             System.err.println("missing font definition " + definition + ", skipping it");
             return List.of();
         }
@@ -137,16 +155,32 @@ final class MinecraftFont {
             System.err.println("font definition " + definition + " nests too deep, skipping it");
             return List.of();
         }
+        List<Provider> providers = new ArrayList<>();
+        for (byte[] data : copies) {
+            appendProviders(resources, definition, data, options, depth, providers);
+        }
+        return providers;
+    }
+
+    /**
+     * Appends the providers of one copy of a definition to {@code providers}, keeping the order the
+     * client keeps: the first declaration of a code point wins.
+     *
+     * <p>A copy that does not parse only loses its own providers. One pack with a broken {@code
+     * default.json} must not take the labels of the whole picture down with it, so the failure is a
+     * warning naming the file and the rest of the stack still draws.</p>
+     */
+    private static void appendProviders(Renderer.ResourceStack resources, String definition, byte[] data, Set<String> options, int depth, List<Provider> providers) throws IOException {
         Map<String, Object> root;
         try {
             root = Json.object(Json.parse(new String(data, StandardCharsets.UTF_8)), definition);
         } catch (IllegalArgumentException error) {
-            throw new IOException("invalid font definition " + definition + ": " + error.getMessage(), error);
+            System.err.println("invalid font definition " + definition + " in one pack, skipping that copy: " + error.getMessage());
+            return;
         }
         if (!(root.get("providers") instanceof List<?> entries)) {
-            return List.of();
+            return;
         }
-        List<Provider> providers = new ArrayList<>();
         for (Object entry : entries) {
             if (!(entry instanceof Map<?, ?> raw)) {
                 continue;
@@ -163,7 +197,6 @@ final class MinecraftFont {
                 default -> System.err.println("unsupported font provider type " + Json.string(provider, "type", "") + " in " + definition);
             }
         }
-        return providers;
     }
 
     /**
