@@ -16,12 +16,14 @@ import java.awt.image.DataBufferInt;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -38,6 +40,8 @@ final class Renderer {
     private static final String MISSING_TEXTURE = "minecraft:missing";
 
     private final Map<String, Model> models = new HashMap<>();
+    /** Model ids already reported for resolving through the legacy {@code item/} prefix once. */
+    private final Set<String> legacyModelWarnings = new HashSet<>();
     /**
      * The models of the custom items this request names, under a synthetic id so that every call site
      * resolves them exactly like a vanilla model. They come from the packs of the user content
@@ -1128,6 +1132,15 @@ final class Renderer {
         }
         Map<String, Object> raw = resources.json(modelPath(id));
         if (raw == null) {
+            String legacy = legacyModelPath(id);
+            if (legacy != null) {
+                raw = resources.json(legacy);
+                if (raw != null && legacyModelWarnings.add(id)) {
+                    System.err.println("model " + id + " resolved through the legacy item/ prefix");
+                }
+            }
+        }
+        if (raw == null) {
             throw new IOException("missing item model " + id);
         }
         Model own = Model.from(id, raw);
@@ -1143,14 +1156,33 @@ final class Renderer {
         return merged;
     }
 
+    /**
+     * The model file of an id, exactly the literal path the client reads: {@code
+     * assets/<namespace>/models/<path>.json}. A pack decides where it puts its models, so an
+     * ItemsAdder pack keeps {@code assets/<pack>/models/greatsword.json} next to a vanilla
+     * {@code assets/minecraft/models/item/diamond.json} and neither is rewritten here.
+     */
     private String modelPath(String id) {
         int separator = id.indexOf(':');
         String namespace = separator < 0 ? "minecraft" : id.substring(0, separator);
         String path = separator < 0 ? id : id.substring(separator + 1);
-        if (!path.startsWith("item/") && !path.startsWith("block/") && !path.startsWith("builtin/")) {
-            path = "item/" + path;
-        }
         return "assets/" + namespace + "/models/" + path + ".json";
+    }
+
+    /**
+     * The pre-literal fallback of earlier versions, which prefixed any id that started with neither
+     * {@code item/} nor {@code block/} nor {@code builtin/} with {@code item/}. The client does no
+     * such thing, so this only answers after the literal file turned out to be absent, which keeps a
+     * pack that relied on the prefix working while the real path always wins.
+     */
+    private String legacyModelPath(String id) {
+        int separator = id.indexOf(':');
+        String path = separator < 0 ? id : id.substring(separator + 1);
+        if (path.startsWith("item/") || path.startsWith("block/") || path.startsWith("builtin/")) {
+            return null;
+        }
+        String prefix = separator < 0 ? "" : id.substring(0, separator + 1);
+        return modelPath(prefix + "item/" + path);
     }
 
     /**
@@ -3963,6 +3995,15 @@ final class Renderer {
         private final Map<String, Map<String, Object>> inlineMetadata = new HashMap<>();
         /** The framed sprite of every texture this request has already resolved, keyed like the cache above. */
         private final Map<String, BufferedImage> spriteCache = new HashMap<>();
+        /**
+         * Sprite names an atlas renames, mapped to the texture they point at: {@code ia:1789} to
+         * {@code minecraft:item/diamond_sword}. ItemsAdder registers every sprite of its packs that
+         * way, so a model names a sprite the atlas declares instead of a file and the direct path
+         * misses even though the texture sits right there under its original name.
+         *
+         * <p>Built lazily, once per request: see {@link #atlasSprites()}.</p>
+         */
+        private Map<String, String> atlasSprites;
         private final Set<String> missingWarnings = java.util.Collections.newSetFromMap(new HashMap<>());
         private BufferedImage missingTexture;
         private Map<String, Object> language;
@@ -4006,6 +4047,9 @@ final class Renderer {
          * Reads a texture, falling back to the generated missing texture. A missing sprite degrades
          * that single layer of the picture instead of failing the whole render; the reason is written
          * to stderr once per texture so a broken pack stays diagnosable.
+         *
+         * <p>A miss only counts once the atlas of the stack has been asked too: a pack can rename a
+         * sprite, and the name a model spells then is the sprite, not the file.</p>
          */
         BufferedImage texture(String textureID) throws IOException {
             if (MISSING_TEXTURE.equals(textureID)) {
@@ -4022,12 +4066,28 @@ final class Renderer {
             }
             byte[] data = bytes(relative);
             if (data == null) {
+                String resolved = resolveTexturePath(textureID);
+                if (!resolved.equals(relative)) {
+                    // Keep caching under the name the model used: that is the key every later face of
+                    // the same sprite looks up, and it keeps the miss warning readable.
+                    data = bytes(resolved);
+                }
+            }
+            if (data == null) {
                 if (missingWarnings.add(relative)) {
                     System.err.println("missing texture " + textureID + ", drawing the missing texture instead");
                 }
                 return missingTexture();
             }
-            BufferedImage image = ImageIO.read(new ByteArrayInputStream(data));
+            BufferedImage image = null;
+            try {
+                image = ImageIO.read(new ByteArrayInputStream(data));
+            } catch (IOException error) {
+                // A file ImageIO cannot decode (wrong chunk CRCs or a wrong zlib wrapper, which is how
+                // ItemsAdder's generator writes them) makes the reader throw instead of answering
+                // null. Both mean the same thing here: this one sprite degrades, the picture stays.
+                image = null;
+            }
             if (image == null) {
                 if (missingWarnings.add(relative)) {
                     System.err.println("invalid PNG texture " + textureID + ", drawing the missing texture instead");
@@ -4054,9 +4114,11 @@ final class Renderer {
             if (cached != null) {
                 return cached;
             }
+            // A renamed sprite keeps its metadata next to the file the atlas points at, not next to
+            // the name, so the frame height has to be read from the same path the image comes from.
             // A model references the same sprite from hundreds of faces, and resolving the metadata
             // of each of them would stat the pack once per face.
-            BufferedImage sprite = firstFrame(texture(textureID), spriteMetadata(relative));
+            BufferedImage sprite = firstFrame(texture(textureID), spriteMetadata(resolveTexturePath(textureID)));
             spriteCache.put(relative, sprite);
             return sprite;
         }
@@ -4110,7 +4172,7 @@ final class Renderer {
                 return true;
             }
             String relative = texturePath(textureID);
-            return inlineTextures.containsKey(relative) || bytes(relative) != null;
+            return inlineTextures.containsKey(relative) || exists(relative);
         }
 
         /**
@@ -4220,18 +4282,160 @@ final class Renderer {
         }
 
         /**
+         * The sprite name an atlas would register for a texture reference: the inverse of
+         * {@link #texturePath}, so that {@code minecraft:item/diamond_sword},
+         * {@code minecraft:textures/item/diamond_sword} and {@code minecraft:item/diamond_sword.png}
+         * all spell {@code minecraft:item/diamond_sword}.
+         */
+        private static String spriteName(String textureID) {
+            String normalized = textureID == null ? "" : textureID.trim();
+            if (normalized.startsWith("#")) {
+                normalized = normalized.substring(1);
+            }
+            int separator = normalized.indexOf(':');
+            String namespace = separator < 0 ? "minecraft" : normalized.substring(0, separator);
+            String path = separator < 0 ? normalized : normalized.substring(separator + 1);
+            path = path.replaceFirst("^textures/", "");
+            if (path.endsWith(".png")) {
+                path = path.substring(0, path.length() - ".png".length());
+            }
+            return namespace + ":" + path;
+        }
+
+        /**
+         * The relative path a texture reference really reads: the file the reference spells, or — when
+         * that file is absent — the texture the atlas of the stack declares for that sprite name. A
+         * name no atlas resolves comes back unchanged, so the caller still reports the miss.
+         */
+        private String resolveTexturePath(String textureID) throws IOException {
+            String relative = texturePath(textureID);
+            if (exists(relative)) {
+                return relative;
+            }
+            String resource = atlasSprites().get(spriteName(textureID));
+            if (resource != null) {
+                String resolved = texturePath(resource);
+                if (exists(resolved)) {
+                    return resolved;
+                }
+            }
+            return relative;
+        }
+
+        /**
+         * The sprite aliases of the stack, built the first time a direct path misses so that a request
+         * which never meets a renamed sprite pays nothing for them.
+         *
+         * <p>Precedence follows the client: a pack replaces a whole document, so only the highest pack
+         * that ships {@code assets/<namespace>/atlases/<name>.json} is read, and inside one document a
+         * later source replaces the sprite an earlier one declared.</p>
+         *
+         * <p>Known gap: only {@code single} sources are resolved. {@code directory} (a whole folder
+         * registered at once), {@code paletted_permutations} (the dyed variants), {@code filter} and
+         * {@code unstitch} register sprites too and are still ignored, so a name they declare keeps
+         * degrading to the missing texture.</p>
+         */
+        private Map<String, String> atlasSprites() {
+            if (atlasSprites != null) {
+                return atlasSprites;
+            }
+            Map<String, String> sprites = new HashMap<>();
+            Set<String> documents = new HashSet<>();
+            for (int i = roots.size() - 1; i >= 0; i--) {
+                for (Path document : atlasDocuments(roots.get(i))) {
+                    String namespace = document.getParent().getParent().getFileName().toString();
+                    if (!documents.add(namespace + "/" + document.getFileName())) {
+                        continue;
+                    }
+                    readAtlas(document, sprites);
+                }
+            }
+            atlasSprites = sprites;
+            return atlasSprites;
+        }
+
+        /** Every {@code assets/<namespace>/atlases/*.json} of one root; a root without them is normal. */
+        private static List<Path> atlasDocuments(Path root) {
+            List<Path> documents = new ArrayList<>();
+            try (DirectoryStream<Path> namespaces = Files.newDirectoryStream(root.resolve("assets"))) {
+                for (Path namespace : namespaces) {
+                    Path atlases = namespace.resolve("atlases");
+                    if (!Files.isDirectory(atlases)) {
+                        continue;
+                    }
+                    try (DirectoryStream<Path> files = Files.newDirectoryStream(atlases, "*.json")) {
+                        for (Path document : files) {
+                            if (Files.isRegularFile(document)) {
+                                documents.add(document);
+                            }
+                        }
+                    }
+                }
+            } catch (IOException error) {
+                // A root without assets/ is the normal case for the pack the service synthesises.
+                // Whatever is unreadable simply registers no sprite, and the names it would have
+                // declared keep degrading to the missing texture like any unknown one.
+            }
+            // A file system does not promise an order, but a render must not depend on it either.
+            documents.sort(Comparator.comparing(Path::toString));
+            return documents;
+        }
+
+        /**
+         * Merges the {@code single} sources of one atlas document into {@code sprites}. A source
+         * without an explicit {@code sprite} registers under its own resource location.
+         */
+        private static void readAtlas(Path document, Map<String, String> sprites) {
+            Map<String, Object> atlas;
+            try {
+                atlas = Json.object(Json.parse(Files.readString(document, StandardCharsets.UTF_8)), "atlas " + document);
+            } catch (IOException | IllegalArgumentException error) {
+                System.err.println("atlas " + document.getFileName() + " is unreadable, ignoring its sprites: " + error.getMessage());
+                return;
+            }
+            if (!(atlas.get("sources") instanceof List<?> sources)) {
+                return;
+            }
+            for (Object value : sources) {
+                if (!(value instanceof Map<?, ?> raw)) {
+                    continue;
+                }
+                Map<String, Object> source = castMap(raw);
+                if (!"single".equals(Json.string(source, "type", ""))) {
+                    continue;
+                }
+                String resource = Json.string(source, "resource", "");
+                if (resource.isBlank()) {
+                    continue;
+                }
+                String sprite = Json.string(source, "sprite", resource);
+                if (!sprite.isBlank()) {
+                    sprites.put(spriteName(sprite), resource);
+                }
+            }
+        }
+
+        /**
          * Reads one image of the stack without the missing texture fallback, for the files a font
-         * provider slices itself. A sheet that is absent answers null so the font can skip it.
+         * provider slices itself. A sheet that is absent or undecodable answers null so the font can
+         * skip it.
          */
         BufferedImage image(String relative) throws IOException {
             byte[] data = bytes(relative);
             if (data == null) {
                 return null;
             }
-            return ImageIO.read(new ByteArrayInputStream(data));
+            try {
+                return ImageIO.read(new ByteArrayInputStream(data));
+            } catch (IOException error) {
+                // The same degradation as texture(): a sheet that cannot be decoded is treated like an
+                // absent one, which every caller already handles by skipping the sheet.
+                return null;
+            }
         }
 
-        byte[] bytes(String relative) throws IOException {
+        /** Whether a relative path exists in the stack, without reading the file. */
+        boolean exists(String relative) throws IOException {
             if (relative.startsWith("/") || relative.contains("..") || relative.indexOf('\0') >= 0) {
                 throw new IOException("unsafe resource path " + relative);
             }
@@ -4241,6 +4445,20 @@ final class Renderer {
                 if (!candidate.startsWith(root)) {
                     throw new IOException("resource path escapes pack root");
                 }
+                if (Files.isRegularFile(candidate)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        byte[] bytes(String relative) throws IOException {
+            if (!exists(relative)) {
+                return null;
+            }
+            for (int i = roots.size() - 1; i >= 0; i--) {
+                Path root = roots.get(i);
+                Path candidate = root.resolve(relative).normalize();
                 if (Files.isRegularFile(candidate)) {
                     return Files.readAllBytes(candidate);
                 }

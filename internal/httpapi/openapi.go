@@ -81,15 +81,16 @@ func resourcePackSchema() map[string]any {
 		"type":     "object",
 		"required": []string{"file", "priority", "status"},
 		"properties": map[string]any{
-			"file":       field("string", "目录内的压缩包文件名，也是设置优先级时使用的标识。", nil),
-			"priority":   field("integer", "加载顺序序号，从 1 开始；数值越大越晚加载，因此覆盖越多的包。status=failed 的条目该值无实际意义。", map[string]any{"minimum": 1}),
-			"addedAt":    field("string", "本服务首次发现该包的时间（RFC 3339）。", map[string]any{"format": "date-time"}),
-			"root":       field("string", "传给渲染器的解包目录绝对路径；status=failed 时为空。", nil),
-			"overlays":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "按叠加顺序生效的 overlay 目录名（相对 root）。pack.mcmeta 的 overlays.entries 中覆盖当前渲染版本格式（1.21.11 → 75）的条目才出现，它们依次覆盖包根；目录不存在或指到包外的条目被忽略。未声明 overlays 时该字段不出现。"},
-			"files":      field("integer", "压缩包内的条目数。", nil),
-			"packFormat": field("integer", "pack.mcmeta 声明的 pack_format；只声明 min_format/max_format 时取其下界。支持多种写法：数字、[major, minor] 数组，supported_formats 的对象或 [min, max] 数组。", nil),
-			"status":     field("string", "loaded 表示参与渲染；failed 表示包损坏或格式不兼容，原因见 error，不影响其余包。", map[string]any{"enum": []string{"loaded", "failed"}}),
-			"error":      field("string", "该包被拒绝的原因，仅 status=failed 时出现。", nil),
+			"file":           field("string", "目录内的压缩包文件名，也是设置优先级时使用的标识。", nil),
+			"priority":       field("integer", "加载顺序序号，从 1 开始；数值越大越晚加载，因此覆盖越多的包。status=failed 的条目该值无实际意义。", map[string]any{"minimum": 1}),
+			"addedAt":        field("string", "本服务首次发现该包的时间（RFC 3339）。", map[string]any{"format": "date-time"}),
+			"root":           field("string", "传给渲染器的解包目录绝对路径；status=failed 时为空。", nil),
+			"overlays":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "按叠加顺序生效的 overlay 目录名（相对 root）。pack.mcmeta 的 overlays.entries 中覆盖当前渲染版本格式（1.21.11 → 75）的条目才出现，它们依次覆盖包根；目录不存在或指到包外的条目被忽略。未声明 overlays 时该字段不出现。"},
+			"files":          field("integer", "压缩包内的条目数。", nil),
+			"packFormat":     field("integer", "pack.mcmeta 声明的 pack_format；只声明 min_format/max_format 时取其下界。支持多种写法：数字、[major, minor] 数组，supported_formats 的对象或 [min, max] 数组。", nil),
+			"repairedImages": field("integer", "本次扫描在解包缓存里改写了多少张 PNG 的校验值：chunk CRC 或 zlib 头/adler32 不对（ItemsAdder 生成包的常见形态）。像素数据、私有 chunk 与原始 zip 都不变；修正幂等，已修好的包重启后既不写盘也不再出现该字段。", map[string]any{"minimum": 0}),
+			"status":         field("string", "loaded 表示参与渲染；failed 表示包损坏或格式不兼容，原因见 error，不影响其余包。", map[string]any{"enum": []string{"loaded", "failed"}}),
+			"error":          field("string", "该包被拒绝的原因，仅 status=failed 时出现。", nil),
 		},
 	}
 }
@@ -398,7 +399,7 @@ func resourcePacksOperation() map[string]any {
 	return map[string]any{
 		"get": map[string]any{
 			"summary":     "List the resource packs and their priority",
-			"description": "返回 RESOURCE_PACK_ROOT（默认 <DATA_DIR>/resourcepacks）中的压缩包与加载顺序。packs 的数组顺序就是加载顺序：第 1 个最先加载、被后面的覆盖，所以最后一项优先级最高（vanilla → addon → 包 1 → 包 2 …）。每个包在包根之上再叠加 pack.mcmeta 中覆盖当前渲染版本格式（75）的 overlays（见 packs[].overlays），因此包内版本专属的物品定义与贴图会生效；一个包的 overlay 不会越过下一个包。默认顺序在首次发现时按文件修改时间升序、再按文件名升序确定，并持久化到 <DATA_DIR>/states/resource-packs.json；之后新放入的包一律追加到末尾，不会改变已有包的覆盖关系。损坏、元数据无法解析或格式不兼容的包以 status=failed 列出且不参与渲染；压缩包声明的大小/CRC 与数据不符（例如 ItemsAdder 生成包把两者写成占位值）不影响加载，CRC 声明为非 0 时仍校验。目录被监听（RESOURCE_PACK_WATCH_INTERVAL，默认 1s），放入、替换或删除压缩包都会自动重载，无需重启。",
+			"description": "返回 RESOURCE_PACK_ROOT（默认 <DATA_DIR>/resourcepacks）中的压缩包与加载顺序。packs 的数组顺序就是加载顺序：第 1 个最先加载、被后面的覆盖，所以最后一项优先级最高（vanilla → addon → 包 1 → 包 2 …）。每个包在包根之上再叠加 pack.mcmeta 中覆盖当前渲染版本格式（75）的 overlays（见 packs[].overlays），因此包内版本专属的物品定义与贴图会生效；一个包的 overlay 不会越过下一个包。默认顺序在首次发现时按文件修改时间升序、再按文件名升序确定，并持久化到 <DATA_DIR>/states/resource-packs.json；之后新放入的包一律追加到末尾，不会改变已有包的覆盖关系。损坏、元数据无法解析或格式不兼容的包以 status=failed 列出且不参与渲染；压缩包声明的大小/CRC 与数据不符（例如 ItemsAdder 生成包把两者写成占位值）不影响加载，CRC 声明为非 0 时仍校验。包内 PNG 的 chunk CRC 与 zlib 校验值错误（ItemsAdder 生成包的常见形态）会在解包后自动修正，像素数据与原始 zip 不变，改写数量见 packs[].repairedImages；无法安全修正的贴图保持原样并记入 warnings，渲染时降级为缺失贴图而不是失败。渲染器还会按包内 assets/<namespace>/atlases/*.json 的 single 源解析精灵名：模型写 ia:1789 这类被包重命名过的名字时，路径缺失会回退到图集声明的 resource 文件；其它 source 类型暂不支持，解析不到仍降级为缺失贴图。（详见接口文档「材质包（resource packs）」一节）。目录被监听（RESOURCE_PACK_WATCH_INTERVAL，默认 1s），放入、替换或删除压缩包都会自动重载，无需重启。",
 			"responses":   map[string]any{"200": map[string]any{"description": "The resource pack stack"}},
 		},
 		"put": map[string]any{

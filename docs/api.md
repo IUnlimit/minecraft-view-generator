@@ -24,7 +24,7 @@ curl http://localhost:4666/api/v1/versions
 
 ## 材质包（resource packs）
 
-把材质包压缩包放进 `data/resourcepacks/`（启动时自动创建，目录可用 `RESOURCE_PACK_ROOT` 改），服务启动时自动解压并作为资源栈的最后一层参与渲染：贴图、模型、`items/` 定义、语言文件与字体（`assets/minecraft/font/…`）都按同一规则覆盖 vanilla 与 addon。
+把材质包压缩包放进 `data/resourcepacks/`（启动时自动创建，目录可用 `RESOURCE_PACK_ROOT` 改），服务启动时自动解压并作为资源栈的最后一层参与渲染：贴图、模型、`items/` 定义、语言文件与字体（`assets/minecraft/font/…`）都从同一个优先级顺序里取，越靠后的包越优先（模型 id 的字面查找与字体 provider 的栈合并见下面两条）。
 
 ```sh
 cp MyPack.zip data/resourcepacks/                # 放包；服务运行中也会自动重载（默认 1s 轮询）
@@ -48,7 +48,7 @@ curl -X PUT http://localhost:4666/api/v1/resources/packs \
     {"file": "MyPack.zip", "priority": 2, "addedAt": "2026-01-02T00:00:00Z",
      "root": "/app/data/resources/.packs/pack-8899aabbccddeeff",
      "overlays": ["ia_overlay_1_21_6_plus", "ia_overlay_modern_atlas"],
-     "files": 6773, "packFormat": 75, "status": "loaded"}
+     "files": 6773, "packFormat": 75, "repairedImages": 2927, "status": "loaded"}
   ],
   "updatedAt": "2026-01-02T00:00:01Z"
 }
@@ -62,9 +62,11 @@ curl -X PUT http://localhost:4666/api/v1/resources/packs \
 - 只读取目录下的 `*.zip`（扩展名大小写不敏感）；点开头的条目与其它文件被忽略并记入 `warnings`。目录形式的包（未压缩）不再支持，请打包成 zip。
 - 坏包（缺 `pack.mcmeta`、`pack.mcmeta` 无法解析、整段格式声明都高于 100、zip 数据损坏、超 `MAX_ARCHIVE_FILES`/`MAX_ARCHIVE_BYTES`）以 `status: "failed"` + `error` 列出且**不参与渲染**，其余包裹照常；替换或修好后自动恢复，不会让服务起不来。
 - 解包只信 deflate 流本身：中央目录声明的大小不可信时按实际字节解出（ItemsAdder 生成包把每条的未压缩大小写成 1337、CRC 写成 0，仍能完整解包）；CRC 声明为非 0 时仍然校验，不符即整包 `failed`。大小上限按**实际写入**的字节数统计，zip 炸弹依旧被挡住。
+- 包内 PNG 的校验值错误（chunk CRC、zlib 头与 adler32 都不对，ItemsAdder 生成包的常见形态）在解包后自动修正：deflate 载荷、像素数据与 `iaPR` 这类私有 chunk 原样保留，只重算校验值，原始 zip 一个字节都不动；`packs[].repairedImages` 报告本次扫描改写了多少张。修正幂等，已修好的包重启既不再写盘也不再报告该数字。交错（Adam7）的 PNG 与 inflate 结果和 IHDR 推导长度不符（数据真的坏了）的文件保持原样并记入 `warnings`，这种贴图在渲染时降级为缺失贴图，不会让整次渲染失败。
 - zip 解包到 `data/resources/.packs/pack-<sha1>/`，按内容寻址：重启只算一次哈希，不会重复解包；不再被引用的旧缓存目录在启动时清理，整个 `.packs` 目录任何时候都可以删。
 - 目录被轮询监听（`RESOURCE_PACK_WATCH_INTERVAL`，默认 `1s`，设为 `0` 关闭）；写入、替换或删除压缩包后最多约 2 个周期自动重载，不需要重启，也不需要重新 `PUT /api/v1/resources/<version>`。
 - 材质包是全局的（当前只支持 1.21.11），与版本树无关：调整优先级或重载包都不需要重新准备资源。`RESOURCE_PACK_ROOT` 只表示一个材质包目录；`data/resourcepack`（旧名字）不再被读取，需要手动改名为 `data/resourcepacks`。
+- 模型里的贴图引用先按路径读 `assets/<namespace>/textures/<path>.png`，路径不存在时再按包的 `assets/<namespace>/atlases/*.json` 解析**精灵名**：ItemsAdder 生成包把每个精灵改名成 `ia:0`、`ia:1`…（本仓库里的包是 2383 个），只有图集的 `single` 源能说明 `ia:1789` 其实是 `minecraft:item/diamond_sword`，所以这种引用照样能出图。同名的图集文件以优先级最高的包为准（整文件覆盖，不合并），同一文档里靠后的 source 覆盖靠前的；`directory` / `paletted_permutations` / `filter` / `unstitch` 暂不支持，解析不到的名字（包括 atlas 里根本没声明的）照旧降级为缺失贴图，不会让整次渲染失败。
 - 已知限制：字体 provider 只支持 `space` / `bitmap` / `unihex` / `reference`（与渲染器一致），只带 `ttf` provider 的字体包会退化成缺字框。
 
 ## 统一渲染请求
@@ -396,7 +398,7 @@ curl -X POST http://localhost:4666/api/v1/render \
 
 ## 字体
 
-文本完全走原版 `FontManager` 的 provider 管线：`assets/minecraft/font/default.json` 依次声明 `space` → `bitmap` → `reference`（`include/unifont`）→ `unihex`，Java renderer 与 Go 简化后端（`internal/font`）解析同一份资源、执行同一套规则。渲染器不再内嵌任何 TTF，服务运行时不联网下载字体。
+文本完全走原版 `FontManager` 的 provider 管线：`assets/minecraft/font/default.json` 依次声明 `space` → `bitmap` → `reference`（`include/unifont`）→ `unihex`，Java renderer 与 Go 简化后端（`internal/font`）解析同一份资源、执行同一套规则。渲染器不再内嵌任何 TTF，服务运行时不联网下载字体。材质包里的同名定义按资源栈从高到低拼接 provider（规则见「材质包（resource packs）」一节），因此包只追加 provider 时，下面这张表描述的原版链路仍然生效。
 
 | provider | 资产 | 行为 |
 | --- | --- | --- |

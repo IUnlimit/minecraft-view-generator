@@ -3,6 +3,10 @@ package com.illtamer.minecraft;
 import javax.imageio.ImageIO;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -50,8 +54,10 @@ public final class RendererSmokeTest {
         testFaceRotation(renderer, root);
         testFractionalUv(renderer, root);
         testElementRotation(renderer, root);
+        testBrokenPNGTexture(renderer, root);
+        testAtlasSpriteAlias(renderer, root);
         testMissingResources(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/pack/resources paths passed");
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/pack/resources/atlas paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -1808,6 +1814,65 @@ public final class RendererSmokeTest {
             return;
         }
         require(false, what + " must not load a font");
+    }
+
+    /**
+     * A PNG whose checksums are wrong is how ItemsAdder's generated packs ship their images: the Go
+     * loader repairs them on the way in, but a file it cannot repair safely still reaches the
+     * renderer. One such sprite must degrade to the missing texture instead of failing the request,
+     * which is what a decoder that throws rather than answering null used to do.
+     */
+    private static void testBrokenPNGTexture(Renderer renderer, Path root) throws Exception {
+        Path broken = root.resolve("assets/minecraft/textures/item/fixture_bad_crc.png");
+        boolean undecodable;
+        try {
+            undecodable = ImageIO.read(broken.toFile()) == null;
+        } catch (IOException error) {
+            undecodable = true;
+        }
+        require(undecodable, "the fixture_bad_crc.png fixture decodes, so it no longer reproduces a broken PNG");
+
+        BufferedImage icon = renderItem(renderer, root, "minecraft:fixture_bad_crc", Map.of());
+        require(icon.getWidth() == 64 && icon.getHeight() == 64, "a broken texture changed the icon dimensions");
+        require(countColor(icon, ColorKind.MISSING_MAGENTA) > 40,
+                "a broken PNG texture does not degrade to the magenta of the missing texture");
+        require(countColor(icon, ColorKind.DECORATION_BLACK) > 40,
+                "a broken PNG texture does not degrade to the checkerboard of the missing texture");
+    }
+
+    /**
+     * A pack may rename every sprite it ships, and then a model names the sprite of an atlas document
+     * instead of a file: ItemsAdder registers its whole pack as {@code ia:0}, {@code ia:1}… and maps
+     * the names back through {@code assets/minecraft/atlases/blocks.json}. The fixture does the same
+     * with {@code ia:fixture} to {@code minecraft:block/fixture_cube}, so the icon keeps the colours
+     * of that file only when a failed direct path asks the atlas before reporting a miss.
+     */
+    private static void testAtlasSpriteAlias(Renderer renderer, Path root) throws Exception {
+        ByteArrayOutputStream diagnostics = new ByteArrayOutputStream();
+        PrintStream original = System.err;
+        BufferedImage icon;
+        try {
+            System.setErr(new PrintStream(diagnostics, true, StandardCharsets.UTF_8));
+            icon = renderItem(renderer, root, "minecraft:fixture_atlas_sprite", Map.of());
+        } finally {
+            System.setErr(original);
+        }
+        require(!diagnostics.toString(StandardCharsets.UTF_8).contains("missing texture ia:fixture"),
+                "a renamed sprite the atlas resolves is still reported as missing");
+        require(icon.getWidth() == 64 && icon.getHeight() == 64, "a renamed sprite changed the icon dimensions");
+        // The four quadrants of block/fixture_cube.png, scaled 16 px to 64 px without interpolation.
+        for (int colour : new int[]{0x30E030, 0xE03030, 0x3030E0, 0xFFFF30}) {
+            require(countExact(icon, colour) > 0,
+                    "the atlas alias ia:fixture did not read the file it declares: " + Integer.toHexString(colour));
+        }
+        require(countColor(icon, ColorKind.MISSING_MAGENTA) == 0,
+                "a renamed sprite the atlas resolves fell back to the missing texture");
+
+        // An alias lookup must not invent a texture: a name no atlas declares degrades exactly like
+        // before, which is what keeps a genuinely broken pack diagnosable.
+        BufferedImage unmapped = renderItem(renderer, root, "minecraft:fixture_atlas_unmapped", Map.of());
+        require(countColor(unmapped, ColorKind.MISSING_MAGENTA) > 40,
+                "a sprite no atlas declares stopped degrading to the missing texture");
     }
 
     private static void testMissingResources(Renderer renderer, Path root) throws Exception {

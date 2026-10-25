@@ -70,8 +70,13 @@ type Pack struct {
 	Overlays   []string `json:"overlays,omitempty"`
 	Files      int      `json:"files,omitempty"`
 	PackFormat int      `json:"packFormat,omitempty"`
-	Status     string   `json:"status"`
-	Error      string   `json:"error,omitempty"`
+	// RepairedImages is how many PNG files of this pack were rewritten in the unpacked cache because
+	// their chunk checksums or zlib wrapper were invalid. The pixels and the archive are untouched.
+	// The count belongs to the scan that produced the report, so an already repaired pack reports
+	// nothing and a restart writes nothing.
+	RepairedImages int    `json:"repairedImages,omitempty"`
+	Status         string `json:"status"`
+	Error          string `json:"error,omitempty"`
 }
 
 // PackReport is the body of GET /api/v1/resources/packs and the resourcePacks segment of the sources
@@ -101,6 +106,10 @@ type packEntry struct {
 	format   int
 	status   string
 	err      string
+	// repaired counts the PNG files of the unpacked tree this scan had to rewrite, and skipped names
+	// those it could not repair safely, so the report can explain both.
+	repaired int
+	skipped  []string
 }
 
 type packManifest struct {
@@ -414,7 +423,11 @@ func (s *packStore) scan(prune bool) ([]packEntry, []string, error) {
 	}
 	entries := make([]packEntry, 0, len(ordered))
 	for _, value := range ordered {
-		entries = append(entries, s.prepare(value.name, value.path, addedAt[value.name]))
+		entry := s.prepare(value.name, value.path, addedAt[value.name])
+		for _, skipped := range entry.skipped {
+			warn("resource pack %q left a PNG unmodified: %s", value.name, skipped)
+		}
+		entries = append(entries, entry)
 	}
 	if prune {
 		s.prune(entries, warn)
@@ -466,6 +479,11 @@ func (s *packStore) prepare(name, path string, addedAt time.Time) packEntry {
 	}
 	entry.files = files
 	entry.format = metadata.packFormat()
+	// The archive passed every check, so its tree is the one renders read: fix what the generator
+	// left wrong in the images before any of them is decoded. The archive itself stays read-only.
+	repair := repairPackPNGChecksums(root)
+	entry.repaired = repair.Repaired
+	entry.skipped = repair.Skipped
 	entry.status = PackLoaded
 	return entry
 }
@@ -577,15 +595,16 @@ func (s *packStore) buildReportLocked(warnings []string) PackReport {
 	}
 	for index, entry := range s.entries {
 		report.Packs = append(report.Packs, Pack{
-			File:       entry.file,
-			Priority:   index + 1,
-			AddedAt:    entry.addedAt,
-			Root:       entry.root,
-			Overlays:   append([]string(nil), entry.overlays...),
-			Files:      entry.files,
-			PackFormat: entry.format,
-			Status:     entry.status,
-			Error:      entry.err,
+			File:           entry.file,
+			Priority:       index + 1,
+			AddedAt:        entry.addedAt,
+			Root:           entry.root,
+			Overlays:       append([]string(nil), entry.overlays...),
+			Files:          entry.files,
+			PackFormat:     entry.format,
+			RepairedImages: entry.repaired,
+			Status:         entry.status,
+			Error:          entry.err,
 		})
 	}
 	return report
