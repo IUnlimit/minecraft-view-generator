@@ -379,3 +379,143 @@ func TestDrawPaintsScaledPixels(t *testing.T) {
 		t.Fatalf("the pixel past the glyph is painted")
 	}
 }
+
+// ---------------------------------------------------------------------------------------------
+// A bitmap provider draws its glyphs at the height it declares, not at the size of the sheet cell.
+// ---------------------------------------------------------------------------------------------
+
+// scaledRune is the code point of the scaled fixture sheet, one that no other fixture covers.
+const scaledRune = '\uE139'
+
+// scaledRoot writes a resource tree whose default font is one bitmap provider over a single cell of
+// the given texel size. A nil paint fills the cell with opaque white.
+func scaledRoot(t *testing.T, cellWidth, cellHeight int, provider map[string]any, paint func(x, y int) color.RGBA) string {
+	t.Helper()
+	root := t.TempDir()
+	sheet := image.NewRGBA(image.Rect(0, 0, cellWidth, cellHeight))
+	for y := 0; y < cellHeight; y++ {
+		for x := 0; x < cellWidth; x++ {
+			if paint == nil {
+				sheet.Set(x, y, color.RGBA{255, 255, 255, 255})
+				continue
+			}
+			sheet.Set(x, y, paint(x, y))
+		}
+	}
+	path := filepath.Join(root, "assets/minecraft/textures/font/scaled.png")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buffer bytes.Buffer
+	if err := png.Encode(&buffer, sheet); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buffer.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider["type"] = "bitmap"
+	provider["file"] = "minecraft:font/scaled.png"
+	provider["chars"] = []any{string(scaledRune)}
+	writeJSON(t, filepath.Join(root, "assets/minecraft/font/default.json"), map[string]any{
+		"providers": []any{provider},
+	})
+	return root
+}
+
+// A sixteen texel cell that declares height eight is one glyph box of eight pixels, the sheet halves
+// to it, and the advance follows the halved ink width instead of the cell width. This is the shape
+// every ItemsAdder font pack has: a two times resolution icon declared at half the cell height.
+func TestBitmapProviderHeightScalesTheDeclaredCell(t *testing.T) {
+	font := Load([]string{scaledRoot(t, 16, 16, map[string]any{"height": 8}, nil)})
+	glyph := font.Glyph(scaledRune)
+	if glyph.Width != 8 || glyph.Height != 8 || glyph.Ascent != 7 || glyph.Advance != 9 {
+		t.Fatalf("glyph = %+v, want an 8x8 box with ascent 7 and advance 9", glyph)
+	}
+	if glyph.texelWidth != 16 || glyph.texelHeight != 16 || glyph.texelScale != 2 {
+		t.Fatalf("glyph keeps no two texel per pixel grid: %dx%d at %v",
+			glyph.texelWidth, glyph.texelHeight, glyph.texelScale)
+	}
+	for row := 0; row < glyph.Height; row++ {
+		for column := 0; column < glyph.Width; column++ {
+			if coverage := glyph.Coverage(column, row); coverage != 4 {
+				t.Fatalf("coverage at %d,%d = %d, want a solid block of half scale texels", column, row, coverage)
+			}
+		}
+	}
+}
+
+// Without a declared height the client draws eight pixels whatever the sheet resolution is, so a
+// sixteen texel cell halves as well; a cell that is already eight texels tall is untouched.
+func TestBitmapProviderHeightDefaultsToEight(t *testing.T) {
+	halved := Load([]string{scaledRoot(t, 16, 16, map[string]any{}, nil)}).Glyph(scaledRune)
+	if halved.Width != 8 || halved.Height != 8 || halved.Ascent != 7 || halved.Advance != 9 {
+		t.Fatalf("glyph = %+v, want the default height of 8", halved)
+	}
+	plain := Load([]string{scaledRoot(t, 8, 8, map[string]any{}, nil)}).Glyph(scaledRune)
+	if plain.Width != 8 || plain.Height != 8 || plain.Ascent != 7 || plain.Advance != 9 {
+		t.Fatalf("glyph = %+v, want the unchanged eight texel cell", plain)
+	}
+	if len(plain.texels) != 0 {
+		t.Fatalf("an unscaled cell keeps a texel grid, want the plain coverage glyph")
+	}
+}
+
+// An ItemsAdder lore icon: eleven by fourteen texels declared at height seven, so the box is six by
+// seven pixels on the seven pixel ascent and the step is that width plus the one pixel gap.
+func TestBitmapProviderHalfScaleIconMatchesItemsAdder(t *testing.T) {
+	font := Load([]string{scaledRoot(t, 11, 14, map[string]any{"height": 7, "ascent": 7}, nil)})
+	glyph := font.Glyph(scaledRune)
+	if glyph.Width != 6 || glyph.Height != 7 || glyph.Ascent != 7 || glyph.Advance != 7 {
+		t.Fatalf("glyph = %+v, want a 6x7 icon on the ascent with advance 7", glyph)
+	}
+}
+
+// The halved box only covers the texels that carry ink, so a sheet painted on its left half keeps
+// four inked columns and four empty ones.
+func TestBitmapProviderHalfScaleKeepsTheInkColumns(t *testing.T) {
+	paint := func(x, y int) color.RGBA {
+		if x < 8 {
+			return color.RGBA{255, 255, 255, 255}
+		}
+		return color.RGBA{}
+	}
+	glyph := Load([]string{scaledRoot(t, 16, 16, map[string]any{"height": 8}, paint)}).Glyph(scaledRune)
+	for row := 0; row < glyph.Height; row++ {
+		for column := 0; column < 4; column++ {
+			if !glyph.Inked(column, row) {
+				t.Fatalf("pixel %d,%d of the inked half is empty", column, row)
+			}
+		}
+		for column := 4; column < glyph.Width; column++ {
+			if glyph.Inked(column, row) {
+				t.Fatalf("pixel %d,%d of the blank half is painted", column, row)
+			}
+		}
+	}
+}
+
+// Drawing the halved glyph fills exactly its eight pixel box, and at four times the size one device
+// pixel covers half a texel, so the box is the sixteen texel sheet again with hard edges.
+func TestScaledBitmapGlyphDrawsAtItsDeclaredSize(t *testing.T) {
+	font := Load([]string{scaledRoot(t, 16, 16, map[string]any{"height": 8}, nil)})
+	glyph := font.Glyph(scaledRune)
+	canvas := image.NewRGBA(image.Rect(0, 0, 48, 48))
+	glyph.Draw(canvas, 4, 2, 1, color.RGBA{255, 255, 255, 255})
+	if _, _, _, alpha := canvas.At(4+7, 2+7).RGBA(); alpha != 0xFFFF {
+		t.Fatalf("the last pixel of the eight pixel box is not solid: %d", alpha)
+	}
+	if _, _, _, alpha := canvas.At(4+8, 2).RGBA(); alpha != 0 {
+		t.Fatalf("the halved glyph paints a ninth column")
+	}
+	if _, _, _, alpha := canvas.At(4, 2+8).RGBA(); alpha != 0 {
+		t.Fatalf("the halved glyph paints a ninth row")
+	}
+	scaled := image.NewRGBA(image.Rect(0, 0, 48, 48))
+	glyph.Draw(scaled, 0, 0, 4, color.RGBA{255, 255, 255, 255})
+	if _, _, _, alpha := scaled.At(31, 31).RGBA(); alpha != 0xFFFF {
+		t.Fatalf("the four times glyph is not thirty two pixels of the sheet: %d", alpha)
+	}
+	if _, _, _, alpha := scaled.At(32, 0).RGBA(); alpha != 0 {
+		t.Fatalf("the four times glyph paints past its box")
+	}
+}

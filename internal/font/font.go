@@ -48,16 +48,22 @@ const (
 	unihexCell         = 8
 	unihexDefaultLeft  = 0
 	unihexDefaultRight = 15
+	// defaultGlyphHeight is the height the client draws a bitmap provider at when the definition
+	// declares none, whatever resolution the sheet has. An HD font pack therefore has to spell its
+	// own height out to stay sharp, and a pack that ships two texels per font pixel declares half
+	// the cell height here.
+	defaultGlyphHeight = 8
 )
 
 // Glyph is one drawable glyph: its advance, the baseline offset of its top edge and its per pixel
 // coverage. Coverage is measured in quarters, from 0 (empty) to 4 (fully inked). The bitmap sheets
-// of the vanilla font only ever answer 0 or 4, while a unihex glyph is sixteen texels tall and is
-// painted at half scale by the client: a pixel that only covers one or two of its four texels is
+// of the vanilla font only ever answer 0 or 4, while a glyph drawn from a native texel grid — a
+// sixteen texel Unifont bitmap at half scale, or a bitmap sheet that ships more texels than its
+// declared height — is resampled: a pixel that only covers one or two of its four texels is
 // therefore semi transparent, which is the soft edge the game has at GUI scale one.
 //
-// A unihex glyph also keeps its native texel grid. The averaged cell is what the client shows at
-// half scale, but flattening sixteen texels into eight pixels throws away half the resolution, and
+// Such a glyph also keeps its native texel grid. The averaged cell is what the client shows at half
+// scale, but flattening sixteen texels into eight pixels throws away half the resolution, and
 // magnifying that average is what turned Chinese drawn at twice the size into blocks of grey.
 // Drawing from the grid instead puts one texel on one device pixel at scale two.
 type Glyph struct {
@@ -66,11 +72,15 @@ type Glyph struct {
 	Width    int
 	Height   int
 	coverage []uint8
-	texels   []uint32
-	// texelColumns is how many texels each row of texels describes, left aligned at bit 31.
-	texelColumns int
-	// texelScale is texels per font pixel: 2 for a unihex bitmap, 0 when there is no grid.
-	texelScale int
+	// texels is the native texel grid as 0xAARRGGBB, row major, or nil when the glyph has no
+	// resolution above its own pixels.
+	texels []uint32
+	// texelWidth and texelHeight describe that grid.
+	texelWidth  int
+	texelHeight int
+	// texelScale is texels per font pixel: 2 for a unihex bitmap, cellHeight/height for a bitmap
+	// sheet whose cell is not as tall as the height it declares, 0 when there is no grid.
+	texelScale float64
 }
 
 // Coverage is how much of the pixel at column, row is inked, in quarters from 0 to 4.
@@ -110,7 +120,7 @@ func (g *Glyph) Draw(dst *image.RGBA, x, top, scale int, foreground color.RGBA) 
 	if scale < 1 {
 		scale = 1
 	}
-	if len(g.texels) > 0 && scale >= g.texelScale {
+	if len(g.texels) > 0 && float64(scale) >= g.texelScale {
 		g.drawTexels(dst, x, top, scale, foreground)
 		return
 	}
@@ -137,9 +147,10 @@ func (g *Glyph) Draw(dst *image.RGBA, x, top, scale int, foreground color.RGBA) 
 // drawTexels resamples the native texel grid at the drawn resolution: every device pixel answers the
 // share of its own area that lit texels cover. At scale == texelScale each texel lands on exactly one
 // pixel, so the glyph is the bitmap the font ships; a scale between two texel multiples is averaged
-// once, at the resolution it is painted at, instead of magnifying the average taken at half scale.
+// once, at the resolution it is painted at, instead of magnifying the average taken at font pixel
+// resolution.
 func (g *Glyph) drawTexels(dst *image.RGBA, x, top, scale int, foreground color.RGBA) {
-	span := float64(g.texelScale) / float64(scale)
+	span := g.texelScale / float64(scale)
 	area := span * span
 	bounds := dst.Bounds()
 	width, height := g.Width*scale, g.Height*scale
@@ -150,16 +161,19 @@ func (g *Glyph) drawTexels(dst *image.RGBA, x, top, scale int, foreground color.
 			columnLow := float64(column) * span
 			columnHigh := columnLow + span
 			lit := 0.0
-			for texelRow := max(0, int(math.Floor(rowLow))); texelRow < min(len(g.texels), int(math.Ceil(rowHigh))); texelRow++ {
+			for texelRow := max(0, int(math.Floor(rowLow))); texelRow < min(g.texelHeight, int(math.Ceil(rowHigh))); texelRow++ {
 				rowWeight := math.Min(rowHigh, float64(texelRow+1)) - math.Max(rowLow, float64(texelRow))
 				if rowWeight <= 0 {
 					continue
 				}
-				bits := g.texels[texelRow]
-				for texelColumn := max(0, int(math.Floor(columnLow))); texelColumn < min(g.texelColumns, int(math.Ceil(columnHigh))); texelColumn++ {
+				base := texelRow * g.texelWidth
+				for texelColumn := max(0, int(math.Floor(columnLow))); texelColumn < min(g.texelWidth, int(math.Ceil(columnHigh))); texelColumn++ {
 					columnWeight := math.Min(columnHigh, float64(texelColumn+1)) - math.Max(columnLow, float64(texelColumn))
-					if columnWeight > 0 && bits>>uint(31-texelColumn)&1 != 0 {
-						lit += columnWeight * rowWeight
+					if columnWeight <= 0 {
+						continue
+					}
+					if ink := g.texels[base+texelColumn] >> 24; ink != 0 {
+						lit += columnWeight * rowWeight * float64(ink) / 255
 					}
 				}
 			}
@@ -425,10 +439,15 @@ type bitmapProviderData struct {
 	sheet      image.Image
 	cellWidth  int
 	cellHeight int
-	ascent     int
-	advances   map[rune]int
-	cells      map[rune][2]int
-	glyphs     map[rune]*Glyph
+	// height is the font pixel height the glyphs are drawn at: the declared height, or the client's
+	// default of eight. A cell taller than this is resampled into the smaller box.
+	height int
+	// scale is texels per font pixel, cellHeight/height.
+	scale    float64
+	ascent   int
+	advances map[rune]int
+	cells    map[rune][2]int
+	glyphs   map[rune]*Glyph
 }
 
 func bitmapProvider(roots []string, entry providerDefinition) provider {
@@ -455,7 +474,14 @@ func bitmapProvider(roots []string, entry providerDefinition) provider {
 		cells:      map[rune][2]int{},
 		glyphs:     map[rune]*Glyph{},
 	}
-	provider.ascent = provider.cellHeight - 1
+	provider.height = defaultGlyphHeight
+	if entry.Height != nil && *entry.Height > 0 {
+		provider.height = *entry.Height
+	}
+	provider.scale = float64(provider.cellHeight) / float64(provider.height)
+	// The ascent is the distance from the glyph top to the baseline, so it follows the height the
+	// client draws the glyph at rather than the texel rows of the sheet.
+	provider.ascent = provider.height - 1
 	if entry.Ascent != nil {
 		provider.ascent = *entry.Ascent
 	}
@@ -492,8 +518,14 @@ func (p *bitmapProviderData) glyph(r rune) *Glyph {
 // right, so a glyph keeps its left bearing; the advance is that width plus the one pixel gap, unless
 // the provider declares an explicit advance. A sheet is painted, not sampled, so every inked texel is
 // a fully covered pixel.
+//
+// A cell whose texel size differs from the declared height becomes one glyph box of font pixels
+// instead: height pixels tall and ceil(trimmed/scale) wide, its coverage the share of inked texels
+// per box pixel, and the native texel grid travels with it so a device scale of scale or more draws
+// the sheet itself. A cell that is already height tall keeps the plain one texel per pixel glyph,
+// which is every vanilla sheet.
 func (p *bitmapProviderData) read(r rune, originX, originY int) *Glyph {
-	width := 0
+	trimmed := 0
 	for column := p.cellWidth - 1; column >= 0; column-- {
 		inked := false
 		for row := 0; row < p.cellHeight; row++ {
@@ -503,32 +535,91 @@ func (p *bitmapProviderData) read(r rune, originX, originY int) *Glyph {
 			}
 		}
 		if inked {
-			width = column + 1
+			trimmed = column + 1
 			break
 		}
 	}
-	coverage := make([]uint8, width*p.cellHeight)
+	if p.scale == 1 {
+		coverage := make([]uint8, trimmed*p.cellHeight)
+		for row := 0; row < p.cellHeight; row++ {
+			for column := 0; column < trimmed; column++ {
+				if p.pixel(originX+column, originY+row) {
+					coverage[row*trimmed+column] = 4
+				}
+			}
+		}
+		return &Glyph{Advance: p.advance(r, trimmed), Ascent: p.ascent, Width: trimmed, Height: p.cellHeight, coverage: coverage}
+	}
+	texels := make([]uint32, trimmed*p.cellHeight)
 	for row := 0; row < p.cellHeight; row++ {
+		for column := 0; column < trimmed; column++ {
+			texels[row*trimmed+column] = p.texel(originX+column, originY+row)
+		}
+	}
+	width := int(math.Ceil(float64(trimmed) / p.scale))
+	coverage := resampleTexels(texels, trimmed, p.cellHeight, width, p.height, p.scale)
+	return &Glyph{Advance: p.advance(r, width), Ascent: p.ascent, Width: width, Height: p.height, coverage: coverage,
+		texels: texels, texelWidth: trimmed, texelHeight: p.cellHeight, texelScale: p.scale}
+}
+
+// resampleTexels box filters a texel cell into the coverage of one font pixel per box pixel, in
+// quarters: a box pixel answers the share of its own area that inked texels cover, and the part of
+// the box that reaches past the trimmed cell counts as empty. At a scale of two a two by two texel
+// block therefore lands exactly on one pixel of the halved glyph.
+func resampleTexels(texels []uint32, texelWidth, texelHeight, width, height int, scale float64) []uint8 {
+	coverage := make([]uint8, width*height)
+	area := scale * scale
+	for row := 0; row < height; row++ {
+		rowLow := float64(row) * scale
+		rowHigh := rowLow + scale
 		for column := 0; column < width; column++ {
-			if p.pixel(originX+column, originY+row) {
-				coverage[row*width+column] = 4
+			columnLow := float64(column) * scale
+			columnHigh := columnLow + scale
+			lit := 0.0
+			for texelRow := max(0, int(math.Floor(rowLow))); texelRow < min(texelHeight, int(math.Ceil(rowHigh))); texelRow++ {
+				rowWeight := math.Min(rowHigh, float64(texelRow+1)) - math.Max(rowLow, float64(texelRow))
+				if rowWeight <= 0 {
+					continue
+				}
+				base := texelRow * texelWidth
+				for texelColumn := max(0, int(math.Floor(columnLow))); texelColumn < min(texelWidth, int(math.Ceil(columnHigh))); texelColumn++ {
+					columnWeight := math.Min(columnHigh, float64(texelColumn+1)) - math.Max(columnLow, float64(texelColumn))
+					if columnWeight > 0 && texels[base+texelColumn]>>24 != 0 {
+						lit += columnWeight * rowWeight
+					}
+				}
+			}
+			if lit > 0 {
+				coverage[row*width+column] = uint8(math.Min(4, math.Round(lit/area*4)))
 			}
 		}
 	}
-	advance, ok := p.advances[r]
-	if !ok {
-		advance = width + 1
+	return coverage
+}
+
+func (p *bitmapProviderData) advance(r rune, width int) int {
+	if advance, ok := p.advances[r]; ok {
+		return advance
 	}
-	return &Glyph{Advance: advance, Ascent: p.ascent, Width: width, Height: p.cellHeight, coverage: coverage}
+	return width + 1
 }
 
 func (p *bitmapProviderData) pixel(x, y int) bool {
+	return p.texel(x, y)>>24 != 0
+}
+
+// texel answers one texel of the sheet as straight (un premultiplied) 0xAARRGGBB, which is the form
+// a glyph keeps so that a sheet with colours of its own draws them.
+func (p *bitmapProviderData) texel(x, y int) uint32 {
 	bounds := p.sheet.Bounds()
 	if x < 0 || y < 0 || x >= bounds.Dx() || y >= bounds.Dy() {
-		return false
+		return 0
 	}
-	_, _, _, alpha := p.sheet.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
-	return alpha != 0
+	value := color.NRGBAModel.Convert(p.sheet.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+	if value.A == 0 {
+		return 0
+	}
+	return uint32(value.A)<<24 | uint32(value.R)<<16 | uint32(value.G)<<8 | uint32(value.B)
 }
 
 // unihexProvider renders the Unifont bitmap of a code point. The bitmap is sixteen texels tall and
@@ -679,14 +770,18 @@ func (p *unihexProviderData) read(r rune) *Glyph {
 			}
 		}
 	}
-	// The native grid travels with the glyph: left aligned in the same window as the coverage
-	// columns, so drawing at twice the size can put one texel on one device pixel.
-	grid := make([]uint32, unifhexRows)
-	for row, value := range bitmap {
-		grid[row] = uint32(value) << uint(left)
+	// The native grid travels with the glyph: one texel per cell of the same window as the coverage,
+	// so drawing at twice the size can put one texel on one device pixel.
+	grid := make([]uint32, unifhexRows*texels)
+	for row := 0; row < unifhexRows; row++ {
+		for column := 0; column < texels; column++ {
+			if bitmap[row]>>uint(31-(left+column))&1 != 0 {
+				grid[row*texels+column] = 0xFFFFFFFF
+			}
+		}
 	}
 	return &Glyph{Advance: texels/2 + 1, Ascent: Ascent, Width: width, Height: unihexCell, coverage: coverage,
-		texels: grid, texelColumns: texels, texelScale: 2}
+		texels: grid, texelWidth: texels, texelHeight: unifhexRows, texelScale: 2}
 }
 
 func (p *unihexProviderData) overrideOf(r rune) (sizeOverride, bool) {

@@ -52,6 +52,7 @@ public final class RendererSmokeTest {
         testModelPathWithoutPrefix(renderer, root);
         testCustomModelDataSpellings(renderer, root);
         testFontProviderStackMerge(root);
+        testBitmapGlyphHeight(root);
         testHdTextures(renderer, root);
         testAnimatedSprite(renderer, root);
         testFaceRotation(renderer, root);
@@ -790,6 +791,86 @@ public final class RendererSmokeTest {
         Files.writeString(definition, "{\"providers\":[{\"type\":\"bitmap\","
                 + "\"file\":\"fixturepack:font/private_use.png\",\"ascent\":7,"
                 + "\"chars\":[\"\\uE000\"]}]}");
+        Files.writeString(packRoot.resolve("pack.mcmeta"), "{\"pack\":{\"pack_format\":46}}");
+    }
+
+    /**
+     * A bitmap provider draws its glyphs at the height it declares, not at the size of its sheet
+     * cell, and the client's default when the field is absent is eight pixels whatever resolution the
+     * texture has. An ItemsAdder font pack ships two times resolution icons and declares half the
+     * cell height, so this is the shape every added glyph of such a pack has.
+     */
+    private static void testBitmapGlyphHeight(Path root) throws Exception {
+        requireGlyphBox(root, 16, "\"height\":8,\"ascent\":7", 8, 8, 7, 9);
+        requireGlyphBox(root, 16, "", 8, 8, 7, 9);
+        requireGlyphBox(root, 16, "\"height\":12", 12, 12, 11, 13);
+        requireGlyphBox(root, 8, "", 8, 8, 7, 9);
+
+        // The halved glyph drives the layout as well: a one glyph title is the twelve pixel padding on
+        // both sides plus the nine pixel advance of the glyph.
+        Path pack = Files.createTempDirectory("renderer-font-height");
+        try {
+            writeScaledFontPack(pack, 16, "\"height\":8,\"ascent\":7");
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("operation", "tooltip");
+            request.put("resourceRoot", root.toString());
+            request.put("packRoots", List.of(pack.toString()));
+            request.put("tooltip", Map.of("title", "\uE139"));
+            BufferedImage tooltip = new Renderer().render(request);
+            require(tooltip.getWidth() == 24 + 9,
+                    "the halved glyph did not reach the layout: " + tooltip.getWidth());
+        } finally {
+            deleteTree(pack);
+        }
+    }
+
+    /** Asserts the glyph box one pack's single provider produces. */
+    private static void requireGlyphBox(Path root, int cell, String fields, int width, int height, int ascent, int advance) throws Exception {
+        Path pack = Files.createTempDirectory("renderer-font-height");
+        try {
+            writeScaledFontPack(pack, cell, fields);
+            Map<String, Object> stack = new LinkedHashMap<>();
+            stack.put("packRoots", List.of(pack.toString()));
+            MinecraftFont font = MinecraftFont.load(Renderer.ResourceStack.from(stack, root.toString()));
+            MinecraftFont.Glyph glyph = font.glyph(0xE139);
+            require(glyph.width() == width && glyph.height() == height && glyph.ascent() == ascent,
+                    "a " + cell + " texel cell declared " + (fields.isEmpty() ? "without a height" : fields)
+                            + " is not a " + width + "x" + height + " box at " + ascent + ": "
+                            + glyph.width() + "x" + glyph.height() + " at " + glyph.ascent());
+            require(font.advance(0xE139) == advance, "the advance of that glyph is " + font.advance(0xE139)
+                    + " instead of the " + advance + " of its box plus one");
+            for (int row = 0; row < height; row++) {
+                for (int column = 0; column < width; column++) {
+                    require(glyph.inked(column, row), "the glyph box lost ink at " + column + "," + row);
+                }
+            }
+        } finally {
+            deleteTree(pack);
+        }
+    }
+
+    /**
+     * Writes a pack whose {@code font/default.json} is one bitmap provider over a solid square cell,
+     * so the glyph has to be resampled into its font pixel box unless the cell is already eight
+     * texels tall. {@code fields} is spliced into the provider object, which is how a case declares a
+     * height, an ascent, or neither.
+     */
+    private static void writeScaledFontPack(Path packRoot, int cell, String fields) throws Exception {
+        Path sheet = packRoot.resolve("assets/fixturepack/textures/font/scaled.png");
+        Files.createDirectories(sheet.getParent());
+        BufferedImage image = new BufferedImage(cell, cell, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < cell; y++) {
+            for (int x = 0; x < cell; x++) {
+                image.setRGB(x, y, 0xFFFFFFFF);
+            }
+        }
+        ImageIO.write(image, "png", sheet.toFile());
+        Path definition = packRoot.resolve("assets/minecraft/font/default.json");
+        Files.createDirectories(definition.getParent());
+        Files.writeString(definition, "{\"providers\":[{\"type\":\"bitmap\","
+                + "\"file\":\"fixturepack:font/scaled.png\","
+                + (fields.isEmpty() ? "" : fields + ",")
+                + "\"chars\":[\"\\uE139\"]}]}");
         Files.writeString(packRoot.resolve("pack.mcmeta"), "{\"pack\":{\"pack_format\":46}}");
     }
 

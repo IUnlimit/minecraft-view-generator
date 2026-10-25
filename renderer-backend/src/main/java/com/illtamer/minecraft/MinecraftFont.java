@@ -35,9 +35,12 @@ import java.util.zip.ZipInputStream;
  * <p>Metrics follow the client as well. Every provider sits on the seven pixel ascent the {@code
  * fwq} interface defines, bitmap glyphs are eight (or, for the accented sheet, twelve) pixels tall
  * starting at their own ascent, and a {@code unihex} glyph is sixteen texels drawn at half scale, so
- * it occupies eight pixels of the eight pixel cell with its top on the ascent line. Advances are the
- * per glyph values the client computes: the last inked column plus one for a bitmap glyph and half
- * the inked column count plus one for a {@code unihex} glyph.</p>
+ * it occupies eight pixels of the eight pixel cell with its top on the ascent line. A {@code bitmap}
+ * provider that declares a {@code height} other than its sheet cell size is drawn at that height
+ * instead — the client's default when the field is absent is eight pixels — so the glyph box is
+ * {@code height} tall and the sheet is resampled into it. Advances are the per glyph values the
+ * client computes: the last inked column plus one for a bitmap glyph and half the inked column count
+ * plus one for a {@code unihex} glyph.</p>
  *
  * <p>A glyph is stored as per pixel coverage rather than as a bitmask. Sheets paint full pixels, but
  * the half scale of the {@code unihex} provider leaves most CJK edges covering only one or two of
@@ -52,6 +55,12 @@ final class MinecraftFont {
 
     private static final String DEFAULT_DEFINITION = "assets/minecraft/font/default.json";
     private static final int MAX_REFERENCE_DEPTH = 8;
+    /**
+     * The height a {@code bitmap} provider draws its glyphs at when it declares none. The client
+     * defaults to the eight pixel text cell whatever resolution the sheet has, which is why an HD
+     * font pack has to declare its own height to stay sharp.
+     */
+    private static final int DEFAULT_GLYPH_HEIGHT = 8;
     /** The advance and shape of a code point no provider covers, a visible five by seven box. */
     private static final Glyph MISSING = Glyph.box(6, 7);
 
@@ -284,7 +293,14 @@ final class MinecraftFont {
         }
         int cellWidth = Math.max(1, sheet.getWidth() / columns);
         int cellHeight = Math.max(1, sheet.getHeight() / Math.max(1, rows.size()));
-        int ascent = Json.integer(provider, "ascent", cellHeight - 1);
+        // The height is the size of the resulting glyph in font pixels, not the size of the sheet
+        // cell: a definition that leaves it out means the client's default of eight however large
+        // the texture is, so a pack ships a two times resolution sheet by declaring half the cell.
+        int height = Json.integer(provider, "height", 0);
+        if (height <= 0) {
+            height = DEFAULT_GLYPH_HEIGHT;
+        }
+        int ascent = Json.integer(provider, "ascent", height - 1);
         Map<Integer, Integer> advances = new HashMap<>();
         if (provider.get("advances") instanceof Map<?, ?> values) {
             for (Map.Entry<?, ?> entry : values.entrySet()) {
@@ -294,7 +310,7 @@ final class MinecraftFont {
                 }
             }
         }
-        return new BitmapProvider(sheet, rows, cellWidth, cellHeight, ascent, advances);
+        return new BitmapProvider(sheet, rows, cellWidth, cellHeight, height, ascent, advances);
     }
 
     private static Provider unihexProvider(Renderer.ResourceStack resources, Map<String, Object> provider) throws IOException {
@@ -416,16 +432,27 @@ final class MinecraftFont {
         private final BufferedImage sheet;
         private final int cellWidth;
         private final int cellHeight;
+        /**
+         * The height the glyph is drawn at, in font pixels: the {@code height} of the definition or
+         * the client's default of eight. A sheet whose cell is taller than this is resampled into the
+         * smaller box, which is how a pack ships a two times resolution glyph at half its cell size.
+         */
+        private final int glyphHeight;
         private final int ascent;
+        /** Texels per font pixel: {@code cellHeight / glyphHeight}. */
+        private final double scale;
         private final Map<Integer, Integer> advances;
         private final Map<Integer, int[]> cells = new HashMap<>();
         private final Map<Integer, Glyph> glyphs = new HashMap<>();
 
-        BitmapProvider(BufferedImage sheet, List<String> rows, int cellWidth, int cellHeight, int ascent, Map<Integer, Integer> advances) {
+        BitmapProvider(BufferedImage sheet, List<String> rows, int cellWidth, int cellHeight, int glyphHeight,
+                       int ascent, Map<Integer, Integer> advances) {
             this.sheet = sheet;
             this.cellWidth = cellWidth;
             this.cellHeight = cellHeight;
+            this.glyphHeight = glyphHeight;
             this.ascent = ascent;
+            this.scale = (double) cellHeight / glyphHeight;
             this.advances = advances;
             for (int row = 0; row < rows.size(); row++) {
                 String line = rows.get(row);
@@ -453,9 +480,16 @@ final class MinecraftFont {
          * Slices one cell. The client keeps the cell origin and trims only the empty columns on the
          * right, so a glyph keeps its left bearing; the advance is that width plus the one pixel gap,
          * unless the provider declares an explicit advance.
+         *
+         * <p>A cell whose texel size differs from the declared {@code height} becomes one glyph box of
+         * font pixels: {@code height} tall and {@code ceil(trimmed / scale)} wide, its coverage the
+         * share of inked texels per box pixel. The native texel grid travels with that glyph, so a
+         * device scale of {@code scale} or more draws the sheet itself instead of the average taken
+         * for the eight pixel text cell. A cell that is already {@code height} tall keeps the plain
+         * one pixel per texel glyph, which is every vanilla sheet.</p>
          */
         private Glyph read(int codePoint, int originX, int originY) {
-            int width = 0;
+            int trimmed = 0;
             for (int column = cellWidth - 1; column >= 0; column--) {
                 boolean inked = false;
                 for (int row = 0; row < cellHeight; row++) {
@@ -465,20 +499,75 @@ final class MinecraftFont {
                     }
                 }
                 if (inked) {
-                    width = column + 1;
+                    trimmed = column + 1;
                     break;
                 }
             }
-            byte[] coverage = new byte[width * cellHeight];
+            if (scale == 1.0) {
+                byte[] coverage = new byte[trimmed * cellHeight];
+                for (int row = 0; row < cellHeight; row++) {
+                    for (int column = 0; column < trimmed; column++) {
+                        if (pixel(originX + column, originY + row)) {
+                            coverage[row * trimmed + column] = 4;
+                        }
+                    }
+                }
+                return new Glyph(advanceOf(codePoint, trimmed), ascent, trimmed, cellHeight, coverage);
+            }
+            int[] texels = new int[trimmed * cellHeight];
             for (int row = 0; row < cellHeight; row++) {
-                for (int column = 0; column < width; column++) {
+                for (int column = 0; column < trimmed; column++) {
                     if (pixel(originX + column, originY + row)) {
-                        coverage[row * width + column] = 4;
+                        texels[row * trimmed + column] = sheet.getRGB(originX + column, originY + row);
                     }
                 }
             }
-            return new Glyph(advanceOf(codePoint, width), ascent, width, cellHeight, coverage);
+            int width = (int) Math.ceil(trimmed / scale);
+            byte[] coverage = resample(texels, trimmed, cellHeight, width, glyphHeight, scale);
+            return new Glyph(advanceOf(codePoint, width), ascent, width, glyphHeight, coverage,
+                    texels, trimmed, cellHeight, scale);
         }
+
+        /**
+         * Box filters the texel cell into the coverage of one font pixel per box pixel, in quarters:
+         * a box pixel answers the share of its own area that inked texels cover, and the part of the
+         * box that reaches past the trimmed cell counts as empty. At a scale of two a two by two texel
+         * block therefore lands exactly on one pixel of the halved glyph.
+         */
+        private static byte[] resample(int[] texels, int texelWidth, int texelHeight, int width, int height, double scale) {
+            byte[] coverage = new byte[width * height];
+            double area = scale * scale;
+            for (int row = 0; row < height; row++) {
+                double rowLow = row * scale;
+                double rowHigh = rowLow + scale;
+                int firstRow = Math.max(0, (int) Math.floor(rowLow));
+                int lastRow = Math.min(texelHeight, (int) Math.ceil(rowHigh));
+                for (int column = 0; column < width; column++) {
+                    double columnLow = column * scale;
+                    double columnHigh = columnLow + scale;
+                    int firstColumn = Math.max(0, (int) Math.floor(columnLow));
+                    int lastColumn = Math.min(texelWidth, (int) Math.ceil(columnHigh));
+                    double lit = 0;
+                    for (int texelRow = firstRow; texelRow < lastRow; texelRow++) {
+                        double rowWeight = Math.min(rowHigh, texelRow + 1) - Math.max(rowLow, texelRow);
+                        if (rowWeight <= 0) {
+                            continue;
+                        }
+                        for (int texelColumn = firstColumn; texelColumn < lastColumn; texelColumn++) {
+                            double columnWeight = Math.min(columnHigh, texelColumn + 1) - Math.max(columnLow, texelColumn);
+                            if (columnWeight > 0 && (texels[texelRow * texelWidth + texelColumn] >>> 24) != 0) {
+                                lit += columnWeight * rowWeight;
+                            }
+                        }
+                    }
+                    if (lit > 0) {
+                        coverage[row * width + column] = (byte) Math.min(4, Math.round(lit / area * 4));
+                    }
+                }
+            }
+            return coverage;
+        }
+
         private int advanceOf(int codePoint, int width) {
             Integer advance = advances.get(codePoint);
             return advance == null ? width + 1 : advance;
@@ -570,13 +659,18 @@ final class MinecraftFont {
             }
             // The texel grid is kept alongside the averaged cell: a half scale glyph loses half its
             // resolution when it is flattened to eight pixels, and magnifying that average is what
-            // turned Chinese at twice the size into blocks of grey. The rows below hold the same
-            // window, left aligned, so a device pixel can be covered by exactly one texel.
-            int[] grid = new int[16];
-            for (int row = 0; row < 16; row++) {
-                grid[row] = bitmap[row] << left;
+            // turned Chinese at twice the size into blocks of grey. It holds the same window as the
+            // coverage, one texel per cell, so a device pixel can be covered by exactly one texel.
+            int rows = bitmap.length;
+            int[] grid = new int[rows * texels];
+            for (int row = 0; row < rows; row++) {
+                for (int column = 0; column < texels; column++) {
+                    if ((bitmap[row] >> (31 - (left + column)) & 1) != 0) {
+                        grid[row * texels + column] = 0xFFFFFFFF;
+                    }
+                }
             }
-            return new Glyph(texels / 2 + 1, ASCENT, width, CELL, coverage, grid, texels, 2);
+            return new Glyph(texels / 2 + 1, ASCENT, width, CELL, coverage, grid, texels, rows, 2);
         }
 
         private int[] overrideOf(int codePoint) {
@@ -607,28 +701,34 @@ final class MinecraftFont {
          */
         private final byte[] coverage;
         /**
-         * The native texel rows of the glyph, or null when the provider paints whole pixels. A
-         * {@code unihex} glyph is two texels per font pixel, so drawing it at twice the size can
-         * reach the sixteen texel bitmap instead of magnifying the eight pixel average.
+         * The native texel rows of the glyph as {@code 0xAARRGGBB}, or null when the glyph has no
+         * resolution above its own pixels. A {@code unihex} glyph is two texels per font pixel and a
+         * {@code bitmap} glyph whose sheet cell is taller than its declared height can be anything
+         * from half to many texels per pixel, so drawing at a large enough device scale resamples
+         * this grid instead of magnifying the coverage taken for the eight pixel cell.
          */
         private final int[] texels;
-        /** How many texels {@link #texels} describes, left aligned at bit 31. */
-        private final int texelColumns;
-        /** Texels per font pixel: 2 for a {@code unihex} bitmap, 0 when there is no texel grid. */
-        private final int texelScale;
+        /** How many texels each row of {@link #texels} holds. */
+        private final int texelWidth;
+        /** How many rows {@link #texels} holds. */
+        private final int texelHeight;
+        /** Texels per font pixel, and the device scale from which the grid is drawn directly. */
+        private final double texelScale;
 
         Glyph(int advance, int ascent, int width, int height, byte[] coverage) {
-            this(advance, ascent, width, height, coverage, null, 0, 0);
+            this(advance, ascent, width, height, coverage, null, 0, 0, 0);
         }
 
-        Glyph(int advance, int ascent, int width, int height, byte[] coverage, int[] texels, int texelColumns, int texelScale) {
+        Glyph(int advance, int ascent, int width, int height, byte[] coverage,
+              int[] texels, int texelWidth, int texelHeight, double texelScale) {
             this.advance = advance;
             this.ascent = ascent;
             this.width = width;
             this.height = height;
             this.coverage = coverage;
             this.texels = texels;
-            this.texelColumns = texelColumns;
+            this.texelWidth = texelWidth;
+            this.texelHeight = texelHeight;
             this.texelScale = texelScale;
         }
 
@@ -756,7 +856,7 @@ final class MinecraftFont {
         private void drawTexels(Graphics2D graphics, int x, int top, int layoutScale, int deviceScale, int rgb, boolean italic, boolean bold) {
             int deviceWidth = (width + (bold ? 1 : 0)) * deviceScale;
             int deviceHeight = height * deviceScale;
-            double span = (double) texelScale / deviceScale;
+            double span = texelScale / deviceScale;
             double step = (double) layoutScale / deviceScale;
             double area = span * span;
             double[] ink = new double[deviceWidth];
@@ -767,23 +867,27 @@ final class MinecraftFont {
                 double rowHigh = rowLow + span;
                 java.util.Arrays.fill(ink, 0);
                 int firstRow = Math.max(0, (int) Math.floor(rowLow));
-                int lastRow = Math.min(texels.length, (int) Math.ceil(rowHigh));
+                int lastRow = Math.min(texelHeight, (int) Math.ceil(rowHigh));
                 for (int texelRow = firstRow; texelRow < lastRow; texelRow++) {
                     double rowWeight = Math.min(rowHigh, texelRow + 1) - Math.max(rowLow, texelRow);
                     if (rowWeight <= 0) {
                         continue;
                     }
-                    int bits = texels[texelRow];
+                    int base = texelRow * texelWidth;
                     for (int column = 0; column < deviceWidth; column++) {
                         double columnLow = column * span;
                         double columnHigh = columnLow + span;
                         double lit = 0;
                         int firstColumn = Math.max(0, (int) Math.floor(columnLow));
-                        int lastColumn = Math.min(texelColumns, (int) Math.ceil(columnHigh));
+                        int lastColumn = Math.min(texelWidth, (int) Math.ceil(columnHigh));
                         for (int texelColumn = firstColumn; texelColumn < lastColumn; texelColumn++) {
                             double columnWeight = Math.min(columnHigh, texelColumn + 1) - Math.max(columnLow, texelColumn);
-                            if (columnWeight > 0 && (bits >>> (31 - texelColumn) & 1) != 0) {
-                                lit += columnWeight;
+                            if (columnWeight <= 0) {
+                                continue;
+                            }
+                            int alpha = texels[base + texelColumn] >>> 24;
+                            if (alpha != 0) {
+                                lit += columnWeight * alpha / 255.0;
                             }
                         }
                         if (lit > 0) {

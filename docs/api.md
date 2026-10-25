@@ -405,13 +405,13 @@ curl -X POST http://localhost:4666/api/v1/render \
 | provider | 资产 | 行为 |
 | --- | --- | --- |
 | `space` | `default.json` 内联 | 空格步进 4px，不产生像素 |
-| `bitmap` | `textures/font/ascii.png`（ascent 7）、`accented.png`（ascent 10、高 12）、`nonlatin_european.png` | 拉丁与重音字形；保留左空距，只裁掉右侧空列，步进 = 墨迹宽 + 1 |
+| `bitmap` | `textures/font/ascii.png`（ascent 7）、`accented.png`（ascent 10、高 12）、`nonlatin_european.png` | 拉丁与重音字形；保留左空距，只裁掉右侧空列，步进 = 缩放后墨迹宽 + 1。`height` 是字形的字体像素高度（缺省 **8**，与贴图 cell 尺寸无关），`ascent` 缺省 `height - 1`：材质包把 2 倍分辨率的贴图声明成一半高度就能得到正常大小的图标，渲染器按面积覆盖把 cell 降采样进 `height` 高的字形盒 |
 | `reference` | `font/include/unifont.json` | 内联 Unifont 子定义（含 `size_overrides`），可继续嵌套 |
 | `unihex` | `font/unifont.zip` | 16×16 Unifont 点阵按 2×2 覆盖度降到 8×8，每个像素保留 0/1/2/3/4 五档覆盖度（半透明灰阶）；`size_overrides` 把 CJK 块固定为全角，步进 9 |
 
 `filter`（`uniform` / `jp`）按原版语义求值：默认字体不启用任何选项，因此 `uniform: false` 的 bitmap 组保留、`jp: true` 的日文 Unifont 变体被跳过。中文保留原始 Unicode 码点，不做拼音化、转写或替换，字形来自 `unifont.zip` 的点阵而非矢量字体。
 
-度量与原版一致：传入坐标就是 `GuiGraphics.drawString` 的行顶坐标（基线 = 行顶 + 7），空格 4、普通字形「墨迹宽 + 1」、CJK 全角 9，tooltip 行高 10。`bitmap` 贴图是绘制好的位图，像素只有「有墨 / 无墨」两态；`unihex` 的 16×16 点阵同时保留原始网格与 2×2 归并后的 8×8 视图：1 倍时用 8×8 的 5 档覆盖度（`0`–`4` 四分之一）绘制，1 档与 2 档半透明，就是原版 GUI scale 1 的柔边；**2 倍及以上改用原始 16×16 网格重采样**，2 倍时一个 texel 正好落在 1 个设备像素上（笔画是实色，不再是灰块），3 倍等非整数倍按面积覆盖做一次正确的抗锯齿。上述字体资产由 `prepare` 阶段从官方 asset index 物化到 `data/resources/<version>/vanilla/assets/minecraft/font/`，与其它原版资源一同按 SHA-1 缓存，并在资源根目录写一份 `font-overlay.json` 记录本次物化的文件清单。
+度量与原版一致：传入坐标就是 `GuiGraphics.drawString` 的行顶坐标（基线 = 行顶 + 7），空格 4、普通字形「墨迹宽 + 1」、CJK 全角 9，tooltip 行高 10。`bitmap` 字形的高度由 `height` 决定而不是贴图 cell：cell 与声明的 `height` 不一致时（例如 ItemsAdder 包 11×14 的图标声明 `height: 7`），字形盒是 `height` 高的字体像素盒，宽度为 `ceil(墨迹 texel 宽 / scale)`，`scale = cellHeight / height`，盒内每个像素的覆盖度取该处 texel 的面积占比，步进按缩放后的墨迹宽 + 1 计算；渲染倍率不小于 `scale` 时直接按原始 texel 重采样，2 倍分辨率的图标在 2 倍画布上就是一个 texel 一个设备像素。`bitmap` 贴图的 alpha 只有「有墨 / 无墨」两态（贴图自带透明度不参与覆盖度）；`unihex` 的 16×16 点阵同时保留原始网格与 2×2 归并后的 8×8 视图：1 倍时用 8×8 的 5 档覆盖度（`0`–`4` 四分之一）绘制，1 档与 2 档半透明，就是原版 GUI scale 1 的柔边；**2 倍及以上改用原始 16×16 网格重采样**，2 倍时一个 texel 正好落在 1 个设备像素上（笔画是实色，不再是灰块），3 倍等非整数倍按面积覆盖做一次正确的抗锯齿。上述字体资产由 `prepare` 阶段从官方 asset index 物化到 `data/resources/<version>/vanilla/assets/minecraft/font/`，与其它原版资源一同按 SHA-1 缓存，并在资源根目录写一份 `font-overlay.json` 记录本次物化的文件清单。
 
 客户端 jar 自带的 `font/default.json` 和 `include/{default,space}.json` 只是占位，真正的 Unifont 定义与压缩包只存在于 asset index。因此：
 
