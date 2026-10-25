@@ -44,13 +44,14 @@ public final class RendererSmokeTest {
         testSpecialHeldItems(renderer, root);
         testSpecialItemList(renderer, root);
         testCustomArt(renderer, root);
+        testPackOverride(renderer, root);
         testHdTextures(renderer, root);
         testAnimatedSprite(renderer, root);
         testFaceRotation(renderer, root);
         testFractionalUv(renderer, root);
         testElementRotation(renderer, root);
         testMissingResources(renderer, root);
-        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/resources paths passed");
+        System.out.println("renderer smoke: item/skin/armour/map/playerlist/container/inventory/scale/achievement/tooltip/hand/text/special/custom/pack/resources paths passed");
     }
 
     private static void testItem(Renderer renderer, Path root) throws Exception {
@@ -613,6 +614,89 @@ public final class RendererSmokeTest {
      * renderer has to draw that model — as a flat sprite, as geometry, in a hand, and inside a tooltip —
      * while a value that was not resolved keeps the vanilla item.
      */
+    /**
+     * The pack stack is what the service's priority API promises: a pack root overrides the tree below
+     * it and a later pack root overrides an earlier one. Both are asserted on the pixel colour of an
+     * icon whose texture every pack replaces.
+     */
+    private static void testPackOverride(Renderer renderer, Path root) throws Exception {
+        Path base = Files.createTempDirectory("renderer-pack-base");
+        Path overlay = Files.createTempDirectory("renderer-pack-overlay");
+        try {
+            writeSolidItemTexture(base, 0x00FF0000);
+            writeSolidItemTexture(overlay, 0x000000FF);
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("operation", "item");
+            request.put("resourceRoot", root.toString());
+            request.put("width", 64);
+            request.put("item", Map.of("id", "minecraft:diamond"));
+
+            request.put("packRoots", List.of(base.toString()));
+            BufferedImage packed = renderer.render(request);
+            require(countTint(packed, 1, 0, 0) > 200, "a pack root did not override the vanilla texture");
+
+            request.put("packRoots", List.of(base.toString(), overlay.toString()));
+            BufferedImage stacked = renderer.render(request);
+            require(countTint(stacked, 0, 0, 1) > 200, "the later pack root did not override the earlier one");
+
+            request.put("packRoots", List.of(overlay.toString(), base.toString()));
+            BufferedImage reversed = renderer.render(request);
+            require(countTint(reversed, 1, 0, 0) > 200, "the pack order was not applied");
+        } finally {
+            deleteTree(base);
+            deleteTree(overlay);
+        }
+    }
+
+    /** Writes a pack that replaces the diamond icon with one solid colour. */
+    private static void writeSolidItemTexture(Path packRoot, int rgb) throws Exception {
+        Path texture = packRoot.resolve("assets/minecraft/textures/item/diamond.png");
+        Files.createDirectories(texture.getParent());
+        BufferedImage image = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                image.setRGB(x, y, 0xFF000000 | rgb);
+            }
+        }
+        ImageIO.write(image, "png", texture.toFile());
+        Files.writeString(packRoot.resolve("pack.mcmeta"), "{\"pack\":{\"pack_format\":46}}");
+    }
+
+    /**
+     * Counts the opaque pixels of one colour, normalised by the brightest channel like the fixture
+     * comparisons: the renderer shades an icon by the light of its faces.
+     */
+    private static int countTint(BufferedImage image, double red, double green, double blue) {
+        int count = 0;
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int pixel = image.getRGB(x, y);
+                if ((pixel >>> 24) <= 200) {
+                    continue;
+                }
+                double r = (pixel >> 16) & 0xFF;
+                double g = (pixel >> 8) & 0xFF;
+                double b = pixel & 0xFF;
+                double max = Math.max(r, Math.max(g, b));
+                if (max <= 0) {
+                    continue;
+                }
+                if (Math.abs(r / max - red) <= 0.1 && Math.abs(g / max - green) <= 0.1 && Math.abs(b / max - blue) <= 0.1) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    private static void deleteTree(Path root) throws Exception {
+        try (var paths = Files.walk(root)) {
+            for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(path);
+            }
+        }
+    }
+
     private static void testCustomArt(Renderer renderer, Path root) throws Exception {
         int starfish = 0xFF3FA7C8;
         int crate = 0xFFC8A13F;
