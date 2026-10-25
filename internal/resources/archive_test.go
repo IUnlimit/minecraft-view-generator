@@ -38,47 +38,19 @@ func TestExtractZipEntriesWritesFiles(t *testing.T) {
 	}
 }
 
-func TestPrepareCustomPacksLayersVersionDirectory(t *testing.T) {
-	cfg := testConfig(t)
-	packRoot := t.TempDir()
-	cfg.ResourcePackRoot = packRoot
-	versionRoot := filepath.Join(packRoot, "1.21.4")
-	if err := os.MkdirAll(versionRoot, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	archivePath := filepath.Join(versionRoot, "01-custom.zip")
-	if err := writeZip(archivePath, map[string]string{"pack.mcmeta": `{"pack":{"pack_format":46}}`, "assets/minecraft/models/item/test.json": "{}"}); err != nil {
-		t.Fatal(err)
-	}
-	manager, err := NewManager(cfg, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	roots, err := manager.prepareCustomPacks("1.21.4", filepath.Join(t.TempDir(), "packs"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(roots) != 1 {
-		t.Fatalf("got %d pack roots", len(roots))
-	}
-	if _, err := os.Stat(filepath.Join(roots[0], "assets", "minecraft", "models", "item", "test.json")); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestValidatePackMetadataRejectsMalformedAndOutOfRangeFormats(t *testing.T) {
 	root := t.TempDir()
 	metadata := filepath.Join(root, "pack.mcmeta")
 	if err := os.WriteFile(metadata, []byte(`{"pack":{"pack_format":0}}`), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePackMetadata(root); err == nil {
+	if _, err := validatePackMetadata(root); err == nil {
 		t.Fatal("expected incompatible pack format error")
 	}
 	if err := os.WriteFile(metadata, []byte(`{"pack":`), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePackMetadata(root); err == nil {
+	if _, err := validatePackMetadata(root); err == nil {
 		t.Fatal("expected malformed pack metadata error")
 	}
 }
@@ -88,8 +60,12 @@ func TestValidatePackMetadataAcceptsModernFormatRange(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "pack.mcmeta"), []byte(`{"pack":{"min_format":[46,1],"max_format":46}}`), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePackMetadata(root); err != nil {
+	format, err := validatePackMetadata(root)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if format != 46 {
+		t.Fatalf("pack format = %d, want 46", format)
 	}
 }
 

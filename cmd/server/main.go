@@ -73,6 +73,9 @@ func main() {
 	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: server.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: cfg.HTTPTimeout, WriteTimeout: cfg.HTTPTimeout, IdleTimeout: 60 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// The pack directory is user content: an archive dropped in while the service runs is picked up
+	// without a restart, which is the only way an operator can fix a pack without downtime.
+	go resourceManager.WatchPacks(ctx, cfg.ResourcePackWatchInterval)
 	go func() {
 		logger.Info("HTTP server listening", "addr", cfg.ListenAddr, "renderer", adapter.Backend())
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

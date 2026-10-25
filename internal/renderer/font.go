@@ -3,6 +3,7 @@ package renderer
 import (
 	"image"
 	"image/color"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,7 +24,9 @@ var (
 // fontFor returns the Minecraft font of a resource context, loaded once per set of pack roots.
 func fontFor(resource resources.Context) *font.Font {
 	roots := fontRoots(resource)
-	key := strings.Join(roots, "\x00")
+	// The revision is part of the key because a pack replaced under the same file name keeps its
+	// extracted path: the roots alone would answer with the glyphs of the previous archive.
+	key := strings.Join(roots, "\x00") + "\x01" + strconv.FormatInt(resource.PackRevision, 10)
 	fontMu.Lock()
 	defer fontMu.Unlock()
 	if cached, ok := fontCache[key]; ok {

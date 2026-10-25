@@ -33,20 +33,19 @@ const (
 )
 
 type VersionState struct {
-	Version       string    `json:"version"`
-	Status        Status    `json:"status"`
-	Stage         string    `json:"stage,omitempty"`
-	Progress      float64   `json:"progress"`
-	OfficialID    string    `json:"officialId,omitempty"`
-	AssetIndex    string    `json:"assetIndex,omitempty"`
-	OfficialHash  string    `json:"officialHash,omitempty"`
-	AddonHash     string    `json:"addonHash,omitempty"`
-	ResourceRoot  string    `json:"resourceRoot,omitempty"`
-	ResourcePacks []string  `json:"resourcePacks,omitempty"`
-	Warnings      []string  `json:"warnings,omitempty"`
-	Error         string    `json:"error,omitempty"`
-	StartedAt     time.Time `json:"startedAt,omitempty"`
-	FinishedAt    time.Time `json:"finishedAt,omitempty"`
+	Version      string    `json:"version"`
+	Status       Status    `json:"status"`
+	Stage        string    `json:"stage,omitempty"`
+	Progress     float64   `json:"progress"`
+	OfficialID   string    `json:"officialId,omitempty"`
+	AssetIndex   string    `json:"assetIndex,omitempty"`
+	OfficialHash string    `json:"officialHash,omitempty"`
+	AddonHash    string    `json:"addonHash,omitempty"`
+	ResourceRoot string    `json:"resourceRoot,omitempty"`
+	Warnings     []string  `json:"warnings,omitempty"`
+	Error        string    `json:"error,omitempty"`
+	StartedAt    time.Time `json:"startedAt,omitempty"`
+	FinishedAt   time.Time `json:"finishedAt,omitempty"`
 }
 
 type VersionInfo struct {
@@ -66,6 +65,10 @@ type Context struct {
 	OfficialRoot string
 	AddonRoot    string
 	PackRoots    []string
+	// PackRevision changes whenever the resource pack stack is reloaded or reordered. The fallback
+	// renderer caches its font per context, and a pack replaced under the same name keeps its path,
+	// so the roots alone cannot say whether the cached glyphs are still the ones on disk.
+	PackRevision int64
 	Warnings     []string
 	// CustomArt holds the drawing instructions of the custom items one request references, keyed by
 	// model.CustomArtKey. It is request scoped, so the same version can serve different user content
@@ -76,6 +79,7 @@ type Context struct {
 type Manager struct {
 	cfg    config.Config
 	client *http.Client
+	packs  *packStore
 
 	mu     sync.RWMutex
 	states map[string]*VersionState
@@ -96,14 +100,20 @@ func NewManager(cfg config.Config, client *http.Client) (*Manager, error) {
 		filepath.Join(cfg.DataDir, "states"),
 		filepath.Join(cfg.DataDir, "objects"),
 		filepath.Join(cfg.DataDir, "resources"),
+		cfg.PackDir(),
 	} {
 		if err := os.MkdirAll(dir, 0o750); err != nil {
 			return nil, fmt.Errorf("create resource directory %s: %w", dir, err)
 		}
 	}
-	m := &Manager{cfg: cfg, client: client, states: make(map[string]*VersionState), jobs: make(map[string]struct{})}
+	m := &Manager{cfg: cfg, client: client, packs: newPackStore(cfg), states: make(map[string]*VersionState), jobs: make(map[string]struct{})}
 	if err := m.loadStates(); err != nil {
 		return nil, err
+	}
+	// The pack stack is user content: an archive that cannot be read is reported and skipped, never
+	// an error that keeps the service from starting.
+	if _, err := m.packs.Reload(true); err != nil {
+		slog.Warn("initial resource pack load failed", "directory", cfg.PackDir(), "error", err)
 	}
 	return m, nil
 }
@@ -220,7 +230,6 @@ func (m *Manager) prepare(version string) {
 	var warnings []string
 	var err error
 	var officialID, assetIndexHash, officialHash, addonHash string
-	var packRoots []string
 	state("official-manifest", 0.02)
 	var manifest VersionManifest
 	if err = m.getJSON(ctx, m.cfg.MojangManifestURL, &manifest); err != nil {
@@ -323,13 +332,6 @@ func (m *Manager) prepare(version string) {
 			addonHash = addonMeta.Hash
 		}
 	}
-	state("custom-resource-packs", 0.88)
-	packRoots, err = m.prepareCustomPacks(version, filepath.Join(staging, "packs"))
-	if err != nil {
-		m.fail(version, fmt.Errorf("prepare custom resource packs: %w", err))
-		_ = os.RemoveAll(staging)
-		return
-	}
 	state("publishing", 0.96)
 	if err = publishDirectory(staging, root); err != nil {
 		m.fail(version, fmt.Errorf("publish resource context: %w", err))
@@ -346,10 +348,6 @@ func (m *Manager) prepare(version string) {
 		current.OfficialHash = officialHash
 		current.AddonHash = addonHash
 		current.ResourceRoot = root
-		current.ResourcePacks = make([]string, len(packRoots))
-		for index, packRoot := range packRoots {
-			current.ResourcePacks[index] = filepath.Join(root, "packs", filepath.Base(packRoot))
-		}
 		current.Warnings = append([]string(nil), warnings...)
 		current.Error = ""
 		current.FinishedAt = time.Now().UTC()
@@ -654,7 +652,33 @@ func (m *Manager) Context(version string) (Context, bool) {
 	if !fontAssetsPresent(state.ResourceRoot) {
 		return Context{}, false
 	}
-	return Context{Version: version, Root: state.ResourceRoot, OfficialRoot: filepath.Join(state.ResourceRoot, "vanilla"), AddonRoot: filepath.Join(state.ResourceRoot, "addon"), PackRoots: append([]string(nil), state.ResourcePacks...), Warnings: append([]string(nil), state.Warnings...)}, true
+	context := m.BaseContext(version)
+	context.Root = state.ResourceRoot
+	context.OfficialRoot = filepath.Join(state.ResourceRoot, "vanilla")
+	context.AddonRoot = filepath.Join(state.ResourceRoot, "addon")
+	context.Warnings = append([]string(nil), state.Warnings...)
+	return context, true
+}
+
+// BaseContext is the part of the context that does not depend on a prepared version: the live user
+// resource pack stack. It is what the no-resources fallback hands the renderer, so a pack still
+// contributes its fonts when the vanilla tree is absent.
+func (m *Manager) BaseContext(version string) Context {
+	return Context{Version: version, PackRoots: m.packs.Roots(), PackRevision: m.packs.Revision()}
+}
+
+// PackRoots is the ordered pack stack a render is handed, independent of a prepared version.
+func (m *Manager) PackRoots() []string { return m.packs.Roots() }
+
+// PackReport answers the loaded resource packs and their priority.
+func (m *Manager) PackReport() PackReport { return m.packs.Report() }
+
+// SetPackOrder replaces the pack priority and returns the stack it produced.
+func (m *Manager) SetPackOrder(order []string) (PackReport, error) { return m.packs.SetOrder(order) }
+
+// WatchPacks reloads the stack whenever the pack directory changes. A zero interval disables it.
+func (m *Manager) WatchPacks(ctx context.Context, interval time.Duration) {
+	m.packs.Watch(ctx, interval)
 }
 
 func cloneState(state *VersionState) *VersionState {
@@ -662,7 +686,6 @@ func cloneState(state *VersionState) *VersionState {
 		return nil
 	}
 	clone := *state
-	clone.ResourcePacks = append([]string(nil), state.ResourcePacks...)
 	clone.Warnings = append([]string(nil), state.Warnings...)
 	return &clone
 }
@@ -846,80 +869,14 @@ func pathWithin(root, target string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func (m *Manager) prepareCustomPacks(version, target string) ([]string, error) {
-	root := strings.TrimSpace(m.cfg.ResourcePackRoot)
-	if root == "" {
-		return nil, nil
-	}
-	info, err := os.Stat(root)
-	if err != nil {
-		return nil, err
-	}
-	candidates := make([]string, 0)
-	if !info.IsDir() {
-		candidates = append(candidates, root)
-	} else {
-		candidateRoot := root
-		if versionInfo, versionErr := os.Stat(filepath.Join(root, version)); versionErr == nil && versionInfo.IsDir() {
-			candidateRoot = filepath.Join(root, version)
-		}
-		entries, readErr := os.ReadDir(candidateRoot)
-		if readErr != nil {
-			return nil, readErr
-		}
-		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), ".") {
-				continue
-			}
-			candidate := filepath.Join(candidateRoot, entry.Name())
-			if entry.IsDir() || strings.EqualFold(filepath.Ext(entry.Name()), ".zip") {
-				candidates = append(candidates, candidate)
-			}
-		}
-	}
-	sort.Strings(candidates)
-	if len(candidates) > 32 {
-		return nil, fmt.Errorf("resource pack count %d exceeds limit 32", len(candidates))
-	}
-	if err := os.MkdirAll(target, 0o750); err != nil {
-		return nil, err
-	}
-	roots := make([]string, 0, len(candidates))
-	for index, candidate := range candidates {
-		packTarget := filepath.Join(target, fmt.Sprintf("pack-%03d", index))
-		candidateInfo, statErr := os.Stat(candidate)
-		if statErr != nil {
-			return nil, statErr
-		}
-		if candidateInfo.IsDir() {
-			err = copyPackDirectory(candidate, packTarget, m.cfg.MaxArchiveFiles, m.cfg.MaxArchiveBytes)
-		} else {
-			archive, openErr := zip.OpenReader(candidate)
-			if openErr != nil {
-				return nil, openErr
-			}
-			err = extractZipEntries(archive.File, packTarget, m.cfg.MaxArchiveFiles, m.cfg.MaxArchiveBytes, func(entry *zip.File) (io.ReadCloser, error) { return entry.Open() })
-			closeErr := archive.Close()
-			if err == nil {
-				err = closeErr
-			}
-		}
-		if err == nil {
-			err = validatePackMetadata(packTarget)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Base(candidate), err)
-		}
-		roots = append(roots, packTarget)
-	}
-	return roots, nil
-}
-
-func validatePackMetadata(root string) error {
+// validatePackMetadata reads pack.mcmeta and answers the pack format it declares. A pack whose
+// declared formats are outside the range this renderer understands is refused, which keeps an
+// incompatible archive from silently replacing part of the vanilla tree.
+func validatePackMetadata(root string) (int, error) {
 	metadataPath := filepath.Join(root, "pack.mcmeta")
 	data, err := os.ReadFile(metadataPath)
 	if err != nil {
-		return fmt.Errorf("pack.mcmeta is required: %w", err)
+		return 0, fmt.Errorf("pack.mcmeta is required: %w", err)
 	}
 	var metadata struct {
 		Pack struct {
@@ -933,77 +890,45 @@ func validatePackMetadata(root string) error {
 		} `json:"pack"`
 	}
 	if err := json.Unmarshal(data, &metadata); err != nil {
-		return fmt.Errorf("invalid pack.mcmeta: %w", err)
+		return 0, fmt.Errorf("invalid pack.mcmeta: %w", err)
 	}
-	if metadata.Pack.PackFormat != nil && (*metadata.Pack.PackFormat < 1 || *metadata.Pack.PackFormat > 100) {
-		return fmt.Errorf("pack_format %d is incompatible with Minecraft 1.21.11", *metadata.Pack.PackFormat)
+	format := 0
+	if metadata.Pack.PackFormat != nil {
+		if *metadata.Pack.PackFormat < 1 || *metadata.Pack.PackFormat > 100 {
+			return 0, fmt.Errorf("pack_format %d is incompatible with Minecraft 1.21.11", *metadata.Pack.PackFormat)
+		}
+		format = *metadata.Pack.PackFormat
 	}
-	if metadata.Pack.MaxFormat != nil && (*metadata.Pack.MaxFormat < 1 || *metadata.Pack.MaxFormat > 100) {
-		return fmt.Errorf("max_format %d is incompatible with Minecraft 1.21.11", *metadata.Pack.MaxFormat)
+	if metadata.Pack.MaxFormat != nil {
+		if *metadata.Pack.MaxFormat < 1 || *metadata.Pack.MaxFormat > 100 {
+			return 0, fmt.Errorf("max_format %d is incompatible with Minecraft 1.21.11", *metadata.Pack.MaxFormat)
+		}
+		if format == 0 {
+			format = *metadata.Pack.MaxFormat
+		}
 	}
 	if len(metadata.Pack.MinFormat) > 0 {
 		var min int
 		if json.Unmarshal(metadata.Pack.MinFormat, &min) != nil {
 			var tuple []int
 			if err := json.Unmarshal(metadata.Pack.MinFormat, &tuple); err != nil || len(tuple) == 0 {
-				return fmt.Errorf("min_format is incompatible with Minecraft 1.21.11")
+				return 0, fmt.Errorf("min_format is incompatible with Minecraft 1.21.11")
 			}
 			min = tuple[0]
 		}
 		if min < 1 || min > 100 {
-			return fmt.Errorf("min_format %d is incompatible with Minecraft 1.21.11", min)
+			return 0, fmt.Errorf("min_format %d is incompatible with Minecraft 1.21.11", min)
 		}
 	}
 	if supported := metadata.Pack.SupportedFormat; supported != nil {
 		if supported.Min < 1 || supported.Max < supported.Min || supported.Min > 100 {
-			return fmt.Errorf("supported_formats is incompatible with Minecraft 1.21.11")
+			return 0, fmt.Errorf("supported_formats is incompatible with Minecraft 1.21.11")
+		}
+		if format == 0 {
+			format = supported.Max
 		}
 	}
-	return nil
-}
-
-func copyPackDirectory(source, target string, maxFiles int, maxBytes int64) error {
-	var files int
-	var total int64
-	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		relative, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		if relative == "." {
-			return os.MkdirAll(target, 0o750)
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("resource pack symlink %q is not allowed", relative)
-		}
-		destination := filepath.Join(target, relative)
-		if entry.IsDir() {
-			return os.MkdirAll(destination, 0o750)
-		}
-		if !entry.Type().IsRegular() {
-			return fmt.Errorf("resource pack entry %q is not a regular file", relative)
-		}
-		files++
-		if files > maxFiles {
-			return fmt.Errorf("resource pack contains more than %d files", maxFiles)
-		}
-		fileInfo, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if fileInfo.Size() > maxBytes || total > maxBytes-fileInfo.Size() {
-			return fmt.Errorf("resource pack exceeds uncompressed size limit")
-		}
-		total += fileInfo.Size()
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return writeAtomic(destination, data, 0o640)
-	})
+	return format, nil
 }
 
 // Version manifest and asset metadata mirror Mojang's public JSON formats.

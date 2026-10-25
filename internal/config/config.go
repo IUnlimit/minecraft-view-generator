@@ -12,9 +12,15 @@ import (
 // Config contains process-wide settings. Resource downloads are only allowed
 // against the explicitly configured upstream hosts.
 type Config struct {
-	ListenAddr       string
-	DataDir          string
+	ListenAddr string
+	DataDir    string
+	// ResourcePackRoot overrides the directory the user resource packs are read from. Empty means the
+	// default next to the data directory, which is also what keeps a config built without FromEnv
+	// (tests, embedders) from pointing at the checked in ./data tree.
 	ResourcePackRoot string
+	// ResourcePackWatchInterval is how often the resource pack directory is compared against its last
+	// loaded state. Zero disables the watcher, so new archives are only picked up by a restart.
+	ResourcePackWatchInterval time.Duration
 	// Debug raises the log level to debug, which prints every received request payload.
 	Debug                  bool
 	MaxBodyBytes           int64
@@ -54,32 +60,33 @@ type Config struct {
 
 func Default() Config {
 	return Config{
-		ListenAddr:             ":8080",
-		DataDir:                "./data",
-		ResourcePackRoot:       "",
-		MaxBodyBytes:           2 << 20,
-		MaxImageWidth:          1600,
-		MaxImageHeight:         1200,
-		MaxRenderDuration:      15 * time.Second,
-		MaxConcurrentRenders:   4,
-		HTTPTimeout:            30 * time.Second,
-		CORSAllowedOrigins:     []string{"*"},
-		RequireResources:       true,
-		RendererCommand:        "./renderer-backend/run.sh",
-		RendererMaxOutputBytes: 64 << 20,
-		MojangManifestURL:      "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
-		AddonVersionsURL:       "https://api.loohpjames.com/spigot/plugins/interactivechatdiscordsrvaddon/versions",
-		AddonResourceURL:       "https://api.loohpjames.com/spigot/plugins/interactivechatdiscordsrvaddon/versions",
-		AllowedResourceHosts:   []string{"piston-meta.mojang.com", "piston-data.mojang.com", "resources.download.minecraft.net", "api.loohpjames.com"},
-		AddonEnabled:           true,
-		MaxDownloadBytes:       512 << 20,
-		MaxArchiveFiles:        100_000,
-		MaxArchiveBytes:        2 << 30,
-		CustomContentsDir:      filepath.Join("./data", "contents"),
-		CustomItemsCache:       filepath.Join("./data", "items_ids_cache.yml"),
-		MaxCustomItems:         50_000,
-		MaxCustomTextureBytes:  8 << 20,
-		MaxCustomLayers:        16,
+		ListenAddr:                ":8080",
+		DataDir:                   "./data",
+		ResourcePackRoot:          "",
+		ResourcePackWatchInterval: time.Second,
+		MaxBodyBytes:              2 << 20,
+		MaxImageWidth:             1600,
+		MaxImageHeight:            1200,
+		MaxRenderDuration:         15 * time.Second,
+		MaxConcurrentRenders:      4,
+		HTTPTimeout:               30 * time.Second,
+		CORSAllowedOrigins:        []string{"*"},
+		RequireResources:          true,
+		RendererCommand:           "./renderer-backend/run.sh",
+		RendererMaxOutputBytes:    64 << 20,
+		MojangManifestURL:         "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+		AddonVersionsURL:          "https://api.loohpjames.com/spigot/plugins/interactivechatdiscordsrvaddon/versions",
+		AddonResourceURL:          "https://api.loohpjames.com/spigot/plugins/interactivechatdiscordsrvaddon/versions",
+		AllowedResourceHosts:      []string{"piston-meta.mojang.com", "piston-data.mojang.com", "resources.download.minecraft.net", "api.loohpjames.com"},
+		AddonEnabled:              true,
+		MaxDownloadBytes:          512 << 20,
+		MaxArchiveFiles:           100_000,
+		MaxArchiveBytes:           2 << 30,
+		CustomContentsDir:         filepath.Join("./data", "contents"),
+		CustomItemsCache:          filepath.Join("./data", "items_ids_cache.yml"),
+		MaxCustomItems:            50_000,
+		MaxCustomTextureBytes:     8 << 20,
+		MaxCustomLayers:           16,
 	}
 }
 
@@ -88,6 +95,7 @@ func FromEnv() Config {
 	cfg.ListenAddr = envString("LISTEN_ADDR", cfg.ListenAddr)
 	cfg.DataDir = envString("DATA_DIR", cfg.DataDir)
 	cfg.ResourcePackRoot = envString("RESOURCE_PACK_ROOT", cfg.ResourcePackRoot)
+	cfg.ResourcePackWatchInterval = envDuration("RESOURCE_PACK_WATCH_INTERVAL", cfg.ResourcePackWatchInterval)
 	// The custom content paths default next to the data directory, so a deployment only has to move
 	// DATA_DIR to carry its packs along.
 	cfg.CustomContentsDir = envString("CUSTOM_CONTENTS_DIR", filepath.Join(cfg.DataDir, "contents"))
@@ -119,12 +127,25 @@ func FromEnv() Config {
 	return cfg
 }
 
+// PackDir is the directory the user resource packs are read from. It defaults to resourcepack/ next
+// to the data directory rather than to a literal Default() value, so a config whose DataDir is
+// changed after Default() (tests, embedders) still keeps its packs inside that data directory.
+func (c Config) PackDir() string {
+	if root := strings.TrimSpace(c.ResourcePackRoot); root != "" {
+		return root
+	}
+	return filepath.Join(c.DataDir, "resourcepack")
+}
+
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.ListenAddr) == "" {
 		return fmt.Errorf("listen address is empty")
 	}
 	if strings.TrimSpace(c.DataDir) == "" {
 		return fmt.Errorf("data directory is empty")
+	}
+	if c.ResourcePackWatchInterval < 0 {
+		return fmt.Errorf("resource pack watch interval must not be negative")
 	}
 	if strings.TrimSpace(c.CustomContentsDir) == "" || strings.TrimSpace(c.CustomItemsCache) == "" {
 		return fmt.Errorf("custom content paths must not be empty")
