@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,23 @@ func packFiles(report PackReport) []string {
 		names = append(names, pack.File)
 	}
 	return names
+}
+
+// writePackWithOverlay writes one archive that declares a single overlay covering [min, max] and
+// carries a distinguishable file in both the pack root and that overlay.
+func writePackWithOverlay(t *testing.T, directory, name string, min, max int) string {
+	t.Helper()
+	path := filepath.Join(directory, name)
+	metadata := fmt.Sprintf(`{"pack":{"pack_format":46},"overlays":{"entries":[{"directory":"overlay","formats":[%d,%d]}]}}`, min, max)
+	files := map[string]string{
+		"pack.mcmeta": metadata,
+		"assets/minecraft/textures/item/" + name + ".txt":         name,
+		"overlay/assets/minecraft/textures/item/" + name + ".txt": "overlay of " + name,
+	}
+	if err := writeZip(path, files); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // The first scan follows the client's idea of "creation order": modification time first, then the
@@ -283,4 +301,95 @@ func TestPackStoreWatchPicksUpANewArchive(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("the watcher did not pick up the archive: %+v", store.Report())
+}
+
+// The overlays a pack declares for the renderer's format are stacked on its root, in declaration
+// order. Entries meant for another version are left out, and so are directories that do not exist
+// or that try to point outside the pack.
+func TestPackStoreAppliesTheOverlaysOfTheClientFormat(t *testing.T) {
+	cfg := testConfig(t)
+	directory := packDir(t, cfg)
+	path := filepath.Join(directory, "overlayed.zip")
+	files := map[string]string{
+		"pack.mcmeta": `{"pack":{"pack_format":46},"overlays":{"entries":[
+			{"directory":"overlay-a","formats":[63,75]},
+			{"directory":"for-another-version","formats":[88,9999]},
+			{"directory":"not-in-the-archive","formats":[1,100]},
+			{"directory":"../escape","formats":[1,100]}
+		]}}`,
+		"assets/minecraft/textures/item/base.txt":           "base",
+		"overlay-a/assets/minecraft/textures/item/base.txt": "overlay",
+	}
+	if err := writeZip(path, files); err != nil {
+		t.Fatal(err)
+	}
+	store := newPackStore(cfg)
+	if _, err := store.Reload(true); err != nil {
+		t.Fatal(err)
+	}
+	report := store.Report()
+	if len(report.Packs) != 1 || report.Packs[0].Status != PackLoaded {
+		t.Fatalf("packs = %+v, want one loaded pack", report.Packs)
+	}
+	if got := report.Packs[0].Overlays; len(got) != 1 || got[0] != "overlay-a" {
+		t.Fatalf("overlays = %v, want [overlay-a]", got)
+	}
+	root := report.Packs[0].Root
+	roots := store.Roots()
+	if len(roots) != 2 || roots[0] != root || roots[1] != filepath.Join(root, "overlay-a") {
+		t.Fatalf("roots = %v, want the pack root followed by its overlay", roots)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "overlay-a", "assets", "minecraft", "textures", "item", "base.txt")); err != nil || string(data) != "overlay" {
+		t.Fatalf("overlay file = %q, %v", data, err)
+	}
+}
+
+// Overlays never lift a pack above the next one: the whole contribution of a pack stays together, so
+// a later pack still overrides the overlays of an earlier one.
+func TestPackStoreStacksOverlaysInsideTheirOwnPack(t *testing.T) {
+	cfg := testConfig(t)
+	directory := packDir(t, cfg)
+	writePackWithOverlay(t, directory, "a.zip", 63, 75)
+	writePackWithOverlay(t, directory, "b.zip", 63, 75)
+	writePackWithOverlay(t, directory, "c.zip", 88, 9999)
+
+	store := newPackStore(cfg)
+	if _, err := store.Reload(true); err != nil {
+		t.Fatal(err)
+	}
+	report := store.Report()
+	if len(report.Packs) != 3 {
+		t.Fatalf("packs = %+v, want three", report.Packs)
+	}
+	a, b, c := report.Packs[0], report.Packs[1], report.Packs[2]
+	want := []string{
+		a.Root, filepath.Join(a.Root, "overlay"),
+		b.Root, filepath.Join(b.Root, "overlay"),
+		c.Root,
+	}
+	roots := store.Roots()
+	if len(roots) != len(want) {
+		t.Fatalf("roots = %v, want %v", roots, want)
+	}
+	for index := range want {
+		if roots[index] != want[index] {
+			t.Fatalf("roots = %v, want %v", roots, want)
+		}
+	}
+	if len(c.Overlays) != 0 {
+		t.Fatalf("overlays = %v, want none for a pack of another version", c.Overlays)
+	}
+}
+
+// The pack directory follows Minecraft's own layout: data/resourcepacks, unless RESOURCE_PACK_ROOT
+// overrides it.
+func TestPackDirDefaultsToTheMinecraftLayout(t *testing.T) {
+	if got := config.Default().PackDir(); filepath.Base(got) != "resourcepacks" {
+		t.Fatalf("PackDir() = %q, want a resourcepacks directory", got)
+	}
+	cfg := testConfig(t)
+	cfg.ResourcePackRoot = filepath.Join(cfg.DataDir, "custom-packs")
+	if got := cfg.PackDir(); got != cfg.ResourcePackRoot {
+		t.Fatalf("PackDir() = %q, want the override %q", got, cfg.ResourcePackRoot)
+	}
 }

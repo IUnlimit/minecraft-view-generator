@@ -62,13 +62,16 @@ type Pack struct {
 	File string `json:"file"`
 	// Priority is the position in the load order, starting at one. A higher number is applied later
 	// and therefore overrides the packs before it. It is meaningless for a failed pack.
-	Priority   int       `json:"priority"`
-	AddedAt    time.Time `json:"addedAt"`
-	Root       string    `json:"root,omitempty"`
-	Files      int       `json:"files,omitempty"`
-	PackFormat int       `json:"packFormat,omitempty"`
-	Status     string    `json:"status"`
-	Error      string    `json:"error,omitempty"`
+	Priority int       `json:"priority"`
+	AddedAt  time.Time `json:"addedAt"`
+	Root     string    `json:"root,omitempty"`
+	// Overlays names the overlay directories of the pack that the renderer's format selects, in
+	// stacking order. Each one is applied on top of everything below it, including the pack root.
+	Overlays   []string `json:"overlays,omitempty"`
+	Files      int      `json:"files,omitempty"`
+	PackFormat int      `json:"packFormat,omitempty"`
+	Status     string   `json:"status"`
+	Error      string   `json:"error,omitempty"`
 }
 
 // PackReport is the body of GET /api/v1/resources/packs and the resourcePacks segment of the sources
@@ -89,10 +92,15 @@ type packEntry struct {
 	file    string
 	addedAt time.Time
 	root    string
-	files   int
-	format  int
-	status  string
-	err     string
+	// roots is what this pack contributes to the render stack: the unpacked root followed by the
+	// overlays the renderer's format selects, so an overlay overrides the tree below it while the
+	// packs before this one stay below everything.
+	roots    []string
+	overlays []string
+	files    int
+	format   int
+	status   string
+	err      string
 }
 
 type packManifest struct {
@@ -145,7 +153,8 @@ func (s *packStore) Report() PackReport {
 	return clonePackReport(s.report)
 }
 
-// Roots is the ordered list handed to the renderer. A root whose tree disappeared is skipped instead
+// Roots is the ordered list handed to the renderer: every loaded pack contributes its unpacked root
+// followed by the overlays its pack.mcmeta selects. A root whose tree disappeared is skipped instead
 // of being passed on as a path that answers every lookup with the missing texture.
 func (s *packStore) Roots() []string {
 	s.mu.RLock()
@@ -155,13 +164,15 @@ func (s *packStore) Roots() []string {
 	}
 	roots := make([]string, 0, len(s.entries))
 	for _, entry := range s.entries {
-		if entry.status != PackLoaded || entry.root == "" {
+		if entry.status != PackLoaded {
 			continue
 		}
-		if info, err := os.Stat(entry.root); err != nil || !info.IsDir() {
-			continue
+		for _, root := range entry.roots {
+			if info, err := os.Stat(root); err != nil || !info.IsDir() {
+				continue
+			}
+			roots = append(roots, root)
 		}
-		roots = append(roots, entry.root)
 	}
 	return roots
 }
@@ -412,7 +423,8 @@ func (s *packStore) scan(prune bool) ([]packEntry, []string, error) {
 }
 
 // prepare turns one archive into a stack entry: unzip (or reuse the content addressed cache), read
-// pack.mcmeta and record what the report publishes.
+// pack.mcmeta, select the overlays the renderer's format asks for and record what the report
+// publishes.
 func (s *packStore) prepare(name, path string, addedAt time.Time) packEntry {
 	entry := packEntry{file: name, addedAt: addedAt, status: PackFailed}
 	hash, err := fileSHA1(path)
@@ -446,10 +458,58 @@ func (s *packStore) prepare(name, path string, addedAt time.Time) packEntry {
 		return entry
 	}
 	entry.root = root
+	entry.overlays = overlayDirectories(root, metadata)
+	entry.roots = make([]string, 0, len(entry.overlays)+1)
+	entry.roots = append(entry.roots, root)
+	for _, overlay := range entry.overlays {
+		entry.roots = append(entry.roots, filepath.Join(root, filepath.FromSlash(overlay)))
+	}
 	entry.files = files
 	entry.format = metadata.packFormat()
 	entry.status = PackLoaded
 	return entry
+}
+
+// overlayDirectories selects the overlays the client would stack for the version this renderer
+// targets, in declaration order: the ones whose range contains clientPackFormat and whose directory
+// actually exists inside the pack. The client ignores both a missing directory and an out of range
+// entry, and so does this.
+func overlayDirectories(root string, metadata packMetadata) []string {
+	selected := make([]string, 0, len(metadata.Overlays))
+	for _, overlay := range metadata.Overlays {
+		if clientPackFormat < overlay.Min || clientPackFormat > overlay.Max {
+			continue
+		}
+		directory, ok := packSubdirectory(root, overlay.Directory)
+		if !ok {
+			continue
+		}
+		info, err := os.Stat(directory)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		selected = append(selected, filepath.ToSlash(filepath.Clean(filepath.FromSlash(overlay.Directory))))
+	}
+	return selected
+}
+
+// packSubdirectory resolves an overlay directory name inside the pack, refusing anything that could
+// point outside it. A pack that writes an absolute path or a .. segment there is ignored rather than
+// trusted.
+func packSubdirectory(root, name string) (string, bool) {
+	cleaned := strings.TrimSpace(name)
+	if cleaned == "" || strings.HasPrefix(cleaned, "/") || strings.Contains(cleaned, "\\") || filepath.IsAbs(cleaned) || hasDotDotSegment(cleaned) {
+		return "", false
+	}
+	native := filepath.Clean(filepath.FromSlash(cleaned))
+	if native == "." || native == ".." {
+		return "", false
+	}
+	directory := filepath.Join(root, native)
+	if !pathWithin(root, directory) {
+		return "", false
+	}
+	return directory, true
 }
 
 // extract publishes the archive under its content derived directory. The presence of pack.mcmeta is
@@ -521,6 +581,7 @@ func (s *packStore) buildReportLocked(warnings []string) PackReport {
 			Priority:   index + 1,
 			AddedAt:    entry.addedAt,
 			Root:       entry.root,
+			Overlays:   append([]string(nil), entry.overlays...),
 			Files:      entry.files,
 			PackFormat: entry.format,
 			Status:     entry.status,

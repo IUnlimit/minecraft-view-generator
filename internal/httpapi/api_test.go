@@ -42,6 +42,18 @@ func testServerWithAdapter(t *testing.T) (*Server, *recordingAdapter) {
 // of the arguments instead of whatever the filesystem recorded.
 func testServerWithPacks(t *testing.T, packs ...string) (*Server, *recordingAdapter) {
 	t.Helper()
+	cfg := packTestConfig(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for index, name := range packs {
+		writeResourcePack(t, cfg.PackDir(), name, base.Add(time.Duration(index)*time.Minute))
+	}
+	return newPackTestServer(t, cfg)
+}
+
+// packTestConfig is the config the resource pack tests start from: a temporary data directory whose
+// pack directory already exists, so a test can drop an archive in before the manager runs.
+func packTestConfig(t *testing.T) config.Config {
+	t.Helper()
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
 	cfg.CustomContentsDir = filepath.Join(cfg.DataDir, "contents")
@@ -51,10 +63,12 @@ func testServerWithPacks(t *testing.T, packs ...string) (*Server, *recordingAdap
 	if err := os.MkdirAll(cfg.PackDir(), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for index, name := range packs {
-		writeResourcePack(t, cfg.PackDir(), name, base.Add(time.Duration(index)*time.Minute))
-	}
+	return cfg
+}
+
+// newPackTestServer assembles a server over an already populated config.
+func newPackTestServer(t *testing.T, cfg config.Config) (*Server, *recordingAdapter) {
+	t.Helper()
 	manager, err := resources.NewManager(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -607,6 +621,34 @@ func TestResourcePacksReportsTheLoadOrder(t *testing.T) {
 	}
 }
 
+// The overlays a pack selects for the renderer's format are published and handed to the renderer, so
+// an operator can see why a version specific item resolved the way it did.
+func TestResourcePacksReportsTheSelectedOverlays(t *testing.T) {
+	cfg := packTestConfig(t)
+	writeResourcePackWithOverlay(t, cfg.PackDir(), "modern.zip", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	server, _ := newPackTestServer(t, cfg)
+
+	record := httptest.NewRecorder()
+	server.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodGet, "/api/v1/resources/packs", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", record.Code, record.Body.String())
+	}
+	var report resources.PackReport
+	if err := json.Unmarshal(record.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Packs) != 1 || report.Packs[0].Status != resources.PackLoaded {
+		t.Fatalf("packs = %+v, want one loaded pack", report.Packs)
+	}
+	if got := report.Packs[0].Overlays; len(got) != 1 || got[0] != "modern" {
+		t.Fatalf("overlays = %v, want [modern]", got)
+	}
+	roots := server.resources.PackRoots()
+	if len(roots) != 2 || roots[0] != report.Packs[0].Root || filepath.Base(roots[1]) != "modern" {
+		t.Fatalf("roots = %v, want the pack root and its overlay", roots)
+	}
+}
+
 // The order set by PUT is the one the compositor is handed, so the assertion is made on what the
 // renderer actually receives rather than on the report alone.
 func TestResourcePackOrderChangesTheRenderStack(t *testing.T) {
@@ -828,21 +870,45 @@ items:
 func writeResourcePack(t *testing.T, directory, name string, modTime time.Time) {
 	t.Helper()
 	path := filepath.Join(directory, name)
+	writeArchive(t, path, map[string]string{
+		"pack.mcmeta": `{"pack":{"pack_format":46}}`,
+		"assets/minecraft/textures/item/" + name + ".txt": name,
+	})
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeResourcePackWithOverlay writes an archive whose pack.mcmeta declares an overlay for the
+// renderer's format, which is how a modern pack ships version specific item definitions.
+func writeResourcePackWithOverlay(t *testing.T, directory, name string, modTime time.Time) {
+	t.Helper()
+	path := filepath.Join(directory, name)
+	writeArchive(t, path, map[string]string{
+		"pack.mcmeta": `{"pack":{"pack_format":46},"overlays":{"entries":[{"directory":"modern","formats":[63,75]}]}}`,
+		"assets/minecraft/textures/item/" + name + ".txt": name,
+		"modern/assets/minecraft/items/" + name + ".json": `{"model":{"type":"minecraft:model","model":"minecraft:item/stone"}}`,
+	})
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeArchive writes one zip archive from name → content pairs.
+func writeArchive(t *testing.T, path string, files map[string]string) {
+	t.Helper()
 	file, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	writer := zip.NewWriter(file)
-	for _, entry := range []struct{ name, content string }{
-		{"pack.mcmeta", `{"pack":{"pack_format":46}}`},
-		{"assets/minecraft/textures/item/" + name + ".txt", name},
-	} {
-		handle, createErr := writer.Create(entry.name)
+	for name, content := range files {
+		handle, createErr := writer.Create(name)
 		if createErr != nil {
 			file.Close()
 			t.Fatal(createErr)
 		}
-		if _, writeErr := handle.Write([]byte(entry.content)); writeErr != nil {
+		if _, writeErr := handle.Write([]byte(content)); writeErr != nil {
 			file.Close()
 			t.Fatal(writeErr)
 		}
@@ -852,9 +918,6 @@ func writeResourcePack(t *testing.T, directory, name string, modTime time.Time) 
 		t.Fatal(err)
 	}
 	if err = file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err = os.Chtimes(path, modTime, modTime); err != nil {
 		t.Fatal(err)
 	}
 }
