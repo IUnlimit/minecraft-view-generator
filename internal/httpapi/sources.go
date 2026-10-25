@@ -65,9 +65,13 @@ type versionSource struct {
 // resourceSources is the body of GET /api/v1/resources/sources: every directory and file the service
 // reads to draw a picture, so an operator can tell a missing pack from a missing index.
 type resourceSources struct {
-	DataDir        string          `json:"dataDir"`
-	Versions       []versionSource `json:"versions"`
-	CustomContents custom.Sources  `json:"customContents"`
+	DataDir string `json:"dataDir"`
+	// ResourcePacks is the very report GET /api/v1/resources/packs returns. The pack stack is global,
+	// so it is published once here instead of being repeated per version; the packRoots of each
+	// version are the same ordered roots the renderer is handed.
+	ResourcePacks  resources.PackReport `json:"resourcePacks"`
+	Versions       []versionSource      `json:"versions"`
+	CustomContents custom.Sources       `json:"customContents"`
 }
 
 func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
@@ -78,15 +82,17 @@ func (s *Server) sources(w http.ResponseWriter, r *http.Request) {
 	}
 	report := resourceSources{
 		DataDir:        s.cfg.DataDir,
+		ResourcePacks:  s.resources.PackReport(),
 		Versions:       make([]versionSource, 0, len(versions)),
 		CustomContents: s.customSources(),
 	}
+	packRoots := s.resources.PackRoots()
 	for _, info := range versions {
 		state, ok := s.resources.State(info.Version)
 		if !ok {
 			continue
 		}
-		report.Versions = append(report.Versions, describeVersion(state))
+		report.Versions = append(report.Versions, describeVersion(state, packRoots))
 	}
 	writeJSON(w, http.StatusOK, report)
 }
@@ -110,13 +116,15 @@ func (s *Server) customSources() custom.Sources {
 	return s.custom.Sources()
 }
 
-// describeVersion expands one prepared version into the paths a render actually opens.
-func describeVersion(state resources.VersionState) versionSource {
+// describeVersion expands one prepared version into the paths a render actually opens. packRoots is
+// the live pack stack: it no longer belongs to the version tree, so an operator who reorders packs
+// sees the new order here without preparing the version again.
+func describeVersion(state resources.VersionState, packRoots []string) versionSource {
 	report := versionSource{
 		Version:      state.Version,
 		Status:       string(state.Status),
 		ResourceRoot: state.ResourceRoot,
-		PackRoots:    append([]string(nil), state.ResourcePacks...),
+		PackRoots:    append([]string(nil), packRoots...),
 		Warnings:     append([]string(nil), state.Warnings...),
 		Error:        state.Error,
 	}

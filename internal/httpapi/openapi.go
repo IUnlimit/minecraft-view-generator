@@ -33,6 +33,7 @@ func buildOpenAPIDocument() map[string]any {
 			"/api/v1/versions":                map[string]any{"get": map[string]any{"summary": "List local resource contexts", "description": "存活探针也读这个接口：它不需要 API key，恒返回 200 与版本列表。", "responses": map[string]any{"200": map[string]any{"description": "Version states"}}}},
 			"/api/v1/resources/{version}":     map[string]any{"parameters": []any{map[string]any{"name": "version", "in": "path", "required": true, "schema": map[string]any{"type": "string"}}}, "put": map[string]any{"summary": "Prepare resources", "responses": map[string]any{"202": map[string]any{"description": "Preparation started"}, "200": map[string]any{"description": "Already ready"}}}, "get": map[string]any{"summary": "Read preparation state", "responses": map[string]any{"200": map[string]any{"description": "Resource state"}, "404": map[string]any{"description": "Unknown version"}}}},
 			"/api/v1/resources/sources":       sourcesOperation(),
+			"/api/v1/resources/packs":         resourcePacksOperation(),
 			"/api/v1/resources/custom/reload": reloadOperation(),
 			"/api/v1/render":                  renderOperation(),
 		},
@@ -46,8 +47,64 @@ func buildOpenAPIDocument() map[string]any {
 func componentSchemas() map[string]any {
 	schemas := dataSchemas()
 	schemas["RenderRequest"] = renderRequestSchema()
+	schemas["ResourcePackReport"] = resourcePackReportSchema()
+	schemas["ResourcePack"] = resourcePackSchema()
+	schemas["ResourcePackOrder"] = resourcePackOrderSchema()
 	schemas["Error"] = map[string]any{"type": "object", "required": []string{"error"}, "properties": map[string]any{"error": map[string]any{"type": "object", "required": []string{"code", "message"}, "properties": map[string]any{"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}}}}}
 	return schemas
+}
+
+// resourcePackReportSchema is the body of GET /api/v1/resources/packs and the resourcePacks segment
+// of the sources report. The order of packs is the load order, not a set.
+func resourcePackReportSchema() map[string]any {
+	return map[string]any{
+		"type":     "object",
+		"required": []string{"directory", "status", "packs"},
+		"properties": map[string]any{
+			"directory": field("string", "读取的材质包目录：RESOURCE_PACK_ROOT，缺省为 <DATA_DIR>/resourcepack，启动时不存在会自动创建。", nil),
+			"cacheRoot": field("string", "zip 的解包缓存目录（内容哈希寻址），可整目录删除，服务重启后会按需重建。", nil),
+			"status":    field("string", "ready 表示目录可读；error 表示目录无法创建或读取，原因见 error，此时保留上一份可渲染的包栈。", map[string]any{"enum": []string{"ready", "error"}}),
+			"error":     field("string", "目录级错误，仅 status=error 时出现。", nil),
+			"packs": map[string]any{
+				"type":        "array",
+				"description": "按加载顺序排列：第 1 项最先加载、被后面的覆盖，最后一项优先级最高。",
+				"items":       schemaRef("ResourcePack"),
+			},
+			"warnings":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "被忽略的条目等非致命提示，上限 64 条。"},
+			"updatedAt": field("string", "本次扫描完成的时间（RFC 3339）。", map[string]any{"format": "date-time"}),
+		},
+	}
+}
+
+func resourcePackSchema() map[string]any {
+	return map[string]any{
+		"type":     "object",
+		"required": []string{"file", "priority", "status"},
+		"properties": map[string]any{
+			"file":       field("string", "目录内的压缩包文件名，也是设置优先级时使用的标识。", nil),
+			"priority":   field("integer", "加载顺序序号，从 1 开始；数值越大越晚加载，因此覆盖越多的包。status=failed 的条目该值无实际意义。", map[string]any{"minimum": 1}),
+			"addedAt":    field("string", "本服务首次发现该包的时间（RFC 3339）。", map[string]any{"format": "date-time"}),
+			"root":       field("string", "传给渲染器的解包目录绝对路径；status=failed 时为空。", nil),
+			"files":      field("integer", "压缩包内的条目数。", nil),
+			"packFormat": field("integer", "pack.mcmeta 声明的 pack_format（缺省时取 max_format 或 supported_formats 的上界）。", nil),
+			"status":     field("string", "loaded 表示参与渲染；failed 表示包损坏或格式不兼容，原因见 error，不影响其余包。", map[string]any{"enum": []string{"loaded", "failed"}}),
+			"error":      field("string", "该包被拒绝的原因，仅 status=failed 时出现。", nil),
+		},
+	}
+}
+
+func resourcePackOrderSchema() map[string]any {
+	return map[string]any{
+		"type":     "object",
+		"required": []string{"order"},
+		"properties": map[string]any{
+			"order": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "新的加载顺序：必须恰好包含 GET /api/v1/resources/packs 里每个 file 一次。数组第 1 项最先加载、被后面的覆盖。",
+			},
+		},
+	}
 }
 
 func renderRequestSchema() map[string]any {
@@ -322,16 +379,42 @@ func field(kind, description string, extra map[string]any) map[string]any {
 	return schema
 }
 
-// renderOperation documents POST /api/v1/render together with one prefilled
-// payload per supported type; Scalar offers them through its example switcher.
-// sourcesOperation reports every directory and file a render reads: the prepared Minecraft versions
-// with their font assets, the resource pack stack, and the custom content index of the user packs.
+// sourceOperation reports every directory and file a render reads: the prepared Minecraft versions
+// with their font assets, the custom content index of the user packs and the resource pack stack.
 func sourcesOperation() map[string]any {
 	return map[string]any{
 		"get": map[string]any{
 			"summary":     "List the resource paths this service reads",
-			"description": "返回当前读取的各类资源路径：DATA_DIR、每个已准备版本的 resourceRoot / vanillaRoot / addonRoot / packRoots 与字体文件（default.json、unifont.zip、font-overlay.json）是否存在，以及 data/contents 的目录、items_ids_cache.yml、解析到的 pack 与条目计数。目录不存在时状态为 ready、条目为 0，不会报错。",
+			"description": "返回当前读取的各类资源路径：DATA_DIR、resourcePacks（材质包目录、已加载的包文件与解包路径，与 GET /api/v1/resources/packs 相同）、每个已准备版本的 resourceRoot / vanillaRoot / addonRoot / packRoots 与字体文件（default.json、unifont.zip、font-overlay.json）是否存在，以及 data/contents 的目录、items_ids_cache.yml、解析到的 pack 与条目计数。packRoots 是实时的材质包栈，与版本树无关。目录不存在时状态为 ready、条目为 0，不会报错。",
 			"responses":   map[string]any{"200": map[string]any{"description": "Resource paths and their state"}},
+		},
+	}
+}
+
+// resourcePacksOperation documents the user resource pack stack: the files that are loaded, the order
+// that decides which one overrides which, and the request that replaces that order.
+func resourcePacksOperation() map[string]any {
+	return map[string]any{
+		"get": map[string]any{
+			"summary":     "List the resource packs and their priority",
+			"description": "返回 RESOURCE_PACK_ROOT（默认 <DATA_DIR>/resourcepack）中的压缩包与加载顺序。packs 的数组顺序就是加载顺序：第 1 个最先加载、被后面的覆盖，所以最后一项优先级最高（vanilla → addon → 包 1 → 包 2 …）。默认顺序在首次发现时按文件修改时间升序、再按文件名升序确定，并持久化到 <DATA_DIR>/states/resource-packs.json；之后新放入的包一律追加到末尾，不会改变已有包的覆盖关系。损坏或格式不兼容的包以 status=failed 列出且不参与渲染。目录被监听（RESOURCE_PACK_WATCH_INTERVAL，默认 1s），放入、替换或删除压缩包都会自动重载，无需重启。",
+			"responses":   map[string]any{"200": map[string]any{"description": "The resource pack stack"}},
+		},
+		"put": map[string]any{
+			"summary":     "Set the resource pack priority",
+			"description": "用 body.order 全量替换加载顺序，数组顺序即新的优先级（越靠后越优先），立即对下一次渲染生效并持久化。order 必须恰好包含 GET 返回的 packs 中每个 file 一次；未知、重复、缺失或空文件名返回 400 invalid_pack_order，原顺序保持不变。",
+			"requestBody": map[string]any{
+				"required": true,
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": schemaRef("ResourcePackOrder"),
+						"examples": map[string]any{
+							"load-order": map[string]any{"summary": "base.zip 先加载，overlay.zip 覆盖它", "value": map[string]any{"order": []string{"base.zip", "overlay.zip"}}},
+						},
+					},
+				},
+			},
+			"responses": map[string]any{"200": map[string]any{"description": "The reordered stack"}, "400": map[string]any{"description": "Invalid pack order"}},
 		},
 	}
 }
@@ -346,11 +429,13 @@ func reloadOperation() map[string]any {
 	}
 }
 
+// renderOperation documents POST /api/v1/render together with one prefilled payload per supported
+// type; Scalar offers them through its example switcher.
 func renderOperation() map[string]any {
 	return map[string]any{
 		"post": map[string]any{
 			"summary":     "Render a Minecraft 1.21.11 asset",
-			"description": "requestBody 中的每个示例都是可直接发送的完整报文，覆盖 item、tooltip、inventory、item_container、enderchest、playerInventory、skin、playerlist、map、achievement，以及 player_head 的空头颅皮肤用法。示例统一使用 output=base64，响应会返回 PNG 的 base64 与宽高，便于在文档内查看结果；需要二进制图片时把 output 改成 png。渲染前必须先 PUT /api/v1/resources/1.21.11。物品入参可带 customData 指向 data/contents 的自定义物品；读取了哪些资源见 GET /api/v1/resources/sources。",
+			"description": "requestBody 中的每个示例都是可直接发送的完整报文，覆盖 item、tooltip、inventory、item_container、enderchest、playerInventory、skin、playerlist、map、achievement，以及 player_head 的空头颅皮肤用法。示例统一使用 output=base64，响应会返回 PNG 的 base64 与宽高，便于在文档内查看结果；需要二进制图片时把 output 改成 png。渲染前必须先 PUT /api/v1/resources/1.21.11。物品入参可带 customData 指向 data/contents 的自定义物品；材质包栈（会覆盖 vanilla 与 addon）见 GET /api/v1/resources/packs，读取了哪些资源见 GET /api/v1/resources/sources。",
 			"requestBody": map[string]any{
 				"required": true,
 				"content": map[string]any{

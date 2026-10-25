@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/illtamer/minecraft-view-generator2/internal/config"
 	"github.com/illtamer/minecraft-view-generator2/internal/custom"
@@ -32,12 +34,27 @@ func testServer(t *testing.T) *Server {
 
 func testServerWithAdapter(t *testing.T) (*Server, *recordingAdapter) {
 	t.Helper()
+	return testServerWithPacks(t)
+}
+
+// testServerWithPacks installs the named archives in the resource pack directory before the manager
+// scans it. Their modification times are one minute apart, so the resulting load order is the order
+// of the arguments instead of whatever the filesystem recorded.
+func testServerWithPacks(t *testing.T, packs ...string) (*Server, *recordingAdapter) {
+	t.Helper()
 	cfg := config.Default()
 	cfg.DataDir = t.TempDir()
 	cfg.CustomContentsDir = filepath.Join(cfg.DataDir, "contents")
 	cfg.CustomItemsCache = filepath.Join(cfg.CustomContentsDir, "items_ids_cache.yml")
 	cfg.RequireResources = false
 	cfg.AllowFallbackRenderer = true
+	if err := os.MkdirAll(cfg.PackDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for index, name := range packs {
+		writeResourcePack(t, cfg.PackDir(), name, base.Add(time.Duration(index)*time.Minute))
+	}
 	manager, err := resources.NewManager(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -558,6 +575,121 @@ func TestSourcesReportsEveryResourcePath(t *testing.T) {
 	}
 }
 
+// The pack stack is published in load order: the first archive is loaded first and every later one
+// overrides it, so the last entry of the list is the highest priority.
+func TestResourcePacksReportsTheLoadOrder(t *testing.T) {
+	server, _ := testServerWithPacks(t, "base.zip", "overlay.zip")
+	record := httptest.NewRecorder()
+	server.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodGet, "/api/v1/resources/packs", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", record.Code, record.Body.String())
+	}
+	var report resources.PackReport
+	if err := json.Unmarshal(record.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Directory != server.cfg.PackDir() {
+		t.Fatalf("directory = %q, want %q", report.Directory, server.cfg.PackDir())
+	}
+	if len(report.Packs) != 2 || report.Packs[0].File != "base.zip" || report.Packs[1].File != "overlay.zip" {
+		t.Fatalf("packs = %+v, want base.zip then overlay.zip", report.Packs)
+	}
+	if report.Packs[0].Priority != 1 || report.Packs[1].Priority != 2 {
+		t.Fatalf("priorities = %d,%d, want 1,2", report.Packs[0].Priority, report.Packs[1].Priority)
+	}
+	for _, pack := range report.Packs {
+		if pack.Status != resources.PackLoaded || pack.Root == "" || pack.Files == 0 || pack.Error != "" {
+			t.Fatalf("pack = %+v, want a loaded archive with an extracted tree", pack)
+		}
+		if pack.PackFormat != 46 {
+			t.Fatalf("packFormat = %d, want 46", pack.PackFormat)
+		}
+	}
+}
+
+// The order set by PUT is the one the compositor is handed, so the assertion is made on what the
+// renderer actually receives rather than on the report alone.
+func TestResourcePackOrderChangesTheRenderStack(t *testing.T) {
+	server, adapter := testServerWithPacks(t, "base.zip", "overlay.zip")
+	before := server.resources.PackRoots()
+	if len(before) != 2 {
+		t.Fatalf("roots = %v, want two", before)
+	}
+	record := httptest.NewRecorder()
+	server.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodPut, "/api/v1/resources/packs", strings.NewReader(`{"order":["overlay.zip","base.zip"]}`)))
+	if record.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", record.Code, record.Body.String())
+	}
+	var report resources.PackReport
+	if err := json.Unmarshal(record.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Packs) != 2 || report.Packs[0].File != "overlay.zip" || report.Packs[1].Priority != 2 {
+		t.Fatalf("packs = %+v, want overlay.zip first", report.Packs)
+	}
+	after := server.resources.PackRoots()
+	if len(after) != 2 || after[0] != before[1] || after[1] != before[0] {
+		t.Fatalf("roots = %v, want the previous order reversed (%v)", after, before)
+	}
+
+	render := httptest.NewRecorder()
+	server.Handler().ServeHTTP(render, httptest.NewRequest(http.MethodPost, "/api/v1/render", strings.NewReader(`{"version":"1.21.11","type":"item","output":"base64","data":{"id":"minecraft:stone"}}`)))
+	if render.Code != http.StatusOK {
+		t.Fatalf("render status = %d, body = %s", render.Code, render.Body.String())
+	}
+	if len(adapter.last.PackRoots) != 2 || adapter.last.PackRoots[0] != after[0] {
+		t.Fatalf("renderer roots = %v, want %v", adapter.last.PackRoots, after)
+	}
+}
+
+func TestResourcePackOrderRejectsAnIncompleteList(t *testing.T) {
+	server, _ := testServerWithPacks(t, "base.zip", "overlay.zip")
+	for name, body := range map[string]string{
+		"missing":       `{"order":["base.zip"]}`,
+		"unknown":       `{"order":["base.zip","nope.zip"]}`,
+		"duplicate":     `{"order":["base.zip","base.zip"]}`,
+		"unknown-field": `{"order":["base.zip","overlay.zip"],"priority":1}`,
+	} {
+		record := httptest.NewRecorder()
+		server.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodPut, "/api/v1/resources/packs", strings.NewReader(body)))
+		if record.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, body = %s", name, record.Code, record.Body.String())
+		}
+		if !strings.Contains(record.Body.String(), "invalid_pack_order") {
+			t.Fatalf("%s: body = %s, want invalid_pack_order", name, record.Body.String())
+		}
+	}
+	if roots := server.resources.PackRoots(); len(roots) != 2 {
+		t.Fatalf("roots = %v, want the order to be unchanged", roots)
+	}
+}
+
+// The sources report is what an operator reads to tell a missing pack from a missing tree, so it has
+// to publish the pack directory and the files in it, not only the extracted roots.
+func TestSourcesReportsTheResourcePackStack(t *testing.T) {
+	server, _ := testServerWithPacks(t, "base.zip")
+	record := httptest.NewRecorder()
+	server.Handler().ServeHTTP(record, httptest.NewRequest(http.MethodGet, "/api/v1/resources/sources", nil))
+	if record.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", record.Code, record.Body.String())
+	}
+	var report struct {
+		ResourcePacks resources.PackReport `json:"resourcePacks"`
+	}
+	if err := json.Unmarshal(record.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.ResourcePacks.Directory != server.cfg.PackDir() {
+		t.Fatalf("directory = %q, want %q", report.ResourcePacks.Directory, server.cfg.PackDir())
+	}
+	if len(report.ResourcePacks.Packs) != 1 || report.ResourcePacks.Packs[0].File != "base.zip" {
+		t.Fatalf("packs = %+v", report.ResourcePacks.Packs)
+	}
+	if !strings.Contains(record.Body.String(), "base.zip") {
+		t.Fatalf("sources does not report the pack: %s", record.Body.String())
+	}
+}
+
 // An operator who drops a pack into the contents directory or edits the index calls reload instead of
 // restarting the service, and the report he gets back is the same segment the sources endpoint shows.
 func TestReloadRebuildsTheCustomIndex(t *testing.T) {
@@ -688,6 +820,41 @@ items:
 	}
 	defer file.Close()
 	if err := png.Encode(file, sheet); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeResourcePack writes one archive with a fixed modification time.
+func writeResourcePack(t *testing.T, directory, name string, modTime time.Time) {
+	t.Helper()
+	path := filepath.Join(directory, name)
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for _, entry := range []struct{ name, content string }{
+		{"pack.mcmeta", `{"pack":{"pack_format":46}}`},
+		{"assets/minecraft/textures/item/" + name + ".txt", name},
+	} {
+		handle, createErr := writer.Create(entry.name)
+		if createErr != nil {
+			file.Close()
+			t.Fatal(createErr)
+		}
+		if _, writeErr := handle.Write([]byte(entry.content)); writeErr != nil {
+			file.Close()
+			t.Fatal(writeErr)
+		}
+	}
+	if err = writer.Close(); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err = file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chtimes(path, modTime, modTime); err != nil {
 		t.Fatal(err)
 	}
 }

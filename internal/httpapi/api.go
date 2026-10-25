@@ -49,6 +49,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/resources/{version}", s.prepare)
 	mux.HandleFunc("GET /api/v1/resources/{version}", s.resourceState)
 	mux.HandleFunc("GET /api/v1/resources/sources", s.sources)
+	mux.HandleFunc("GET /api/v1/resources/packs", s.resourcePacks)
+	mux.HandleFunc("PUT /api/v1/resources/packs", s.setResourcePackOrder)
 	mux.HandleFunc("POST /api/v1/resources/custom/reload", s.reloadCustom)
 	mux.HandleFunc("POST /api/v1/render", s.render)
 	mux.HandleFunc("GET /api/v1/openapi.json", s.openapi)
@@ -217,7 +219,7 @@ func (s *Server) prepare(w http.ResponseWriter, r *http.Request) {
 	if !started && state.Status == resources.StatusReady {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, publicResourceState(state))
+	writeJSON(w, status, s.publicResourceState(state))
 }
 
 func (s *Server) resourceState(w http.ResponseWriter, r *http.Request) {
@@ -227,10 +229,55 @@ func (s *Server) resourceState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "resource_not_found", "resource state does not exist")
 		return
 	}
-	writeJSON(w, http.StatusOK, publicResourceState(state))
+	writeJSON(w, http.StatusOK, s.publicResourceState(state))
 }
 
-func publicResourceState(state resources.VersionState) map[string]any {
+// resourcePacks reports the user resource pack stack: the directory that is read, every archive in
+// load order and the unzipped tree each one contributes to a render.
+func (s *Server) resourcePacks(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.resources.PackReport())
+}
+
+// setResourcePackOrder replaces the load order. The body is the inverse of what resourcePacks
+// publishes: every archive of the report, exactly once, in the new order. A later pack overrides an
+// earlier one, so the last entry of the list is the one that wins.
+func (s *Server) setResourcePackOrder(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > s.cfg.MaxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", "request body exceeds configured limit")
+		return
+	}
+	body := http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes)
+	defer body.Close()
+	var request struct {
+		Order []string `json:"order"`
+	}
+	decoder := json.NewDecoder(body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_pack_order", err.Error())
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid_pack_order", "request body must contain exactly one JSON value")
+		return
+	}
+	report, err := s.resources.SetPackOrder(request.Order)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_pack_order", err.Error())
+		return
+	}
+	s.logger.Info("resource pack order updated", "order", request.Order)
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) publicResourceState(state resources.VersionState) map[string]any {
+	loadedPacks := 0
+	for _, pack := range s.resources.PackReport().Packs {
+		if pack.Status == resources.PackLoaded {
+			loadedPacks++
+		}
+	}
 	return map[string]any{
 		"version":       state.Version,
 		"status":        state.Status,
@@ -240,7 +287,7 @@ func publicResourceState(state resources.VersionState) map[string]any {
 		"assetIndex":    state.AssetIndex,
 		"officialHash":  state.OfficialHash,
 		"addonHash":     state.AddonHash,
-		"resourcePacks": len(state.ResourcePacks),
+		"resourcePacks": loadedPacks,
 		"warnings":      state.Warnings,
 		"error":         state.Error,
 		"startedAt":     state.StartedAt,
@@ -294,7 +341,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "resources_not_ready", "prepare this Minecraft version before rendering")
 			return
 		}
-		resource = resources.Context{Version: request.Version}
+		resource = s.resources.BaseContext(request.Version)
 	}
 	resource = s.withCustomArt(resource, data)
 	backend := renderer.Info(s.compositor.Adapter)
